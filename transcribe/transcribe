@@ -16,7 +16,9 @@ Requires OPENAI_API_KEY in the environment.
 """
 
 import argparse
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from openai import OpenAI
@@ -24,6 +26,9 @@ from openai import OpenAI
 DEFAULT_GLOSSARY = Path(__file__).resolve().parent / "glossary.txt"
 MINI_MODEL = "gpt-4o-mini-transcribe"
 FULL_MODEL = "gpt-4o-transcribe"
+
+# Formats the OpenAI API accepts directly
+SUPPORTED_FORMATS = {".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm", ".flac"}
 
 
 def load_glossary(path: Path | None) -> str | None:
@@ -33,6 +38,19 @@ def load_glossary(path: Path | None) -> str | None:
         print(f"warning: glossary not found at {path}, proceeding without it", file=sys.stderr)
         return None
     return path.read_text().strip()
+
+
+def convert_to_mp3(audio_path: Path) -> Path:
+    tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+    tmp.close()
+    result = subprocess.run(
+        ["ffmpeg", "-i", str(audio_path), "-y", "-loglevel", "error", tmp.name],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"error: ffmpeg conversion failed: {result.stderr.strip()}", file=sys.stderr)
+        sys.exit(1)
+    return Path(tmp.name)
 
 
 def transcribe(audio_path: str, model: str, prompt: str | None) -> str:
@@ -57,6 +75,11 @@ def main():
         print(f"error: file not found: {audio}", file=sys.stderr)
         sys.exit(1)
 
+    converted = None
+    if audio.suffix.lower() not in SUPPORTED_FORMATS:
+        print(f"converting {audio.suffix} to mp3...", file=sys.stderr)
+        audio = converted = convert_to_mp3(audio)
+
     model = FULL_MODEL if args.full else MINI_MODEL
 
     if args.no_glossary:
@@ -65,8 +88,12 @@ def main():
         glossary_path = args.glossary if args.glossary else DEFAULT_GLOSSARY
         prompt = load_glossary(glossary_path)
 
-    text = transcribe(str(audio), model, prompt)
-    print(text)
+    try:
+        text = transcribe(str(audio), model, prompt)
+        print(text)
+    finally:
+        if converted:
+            converted.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
