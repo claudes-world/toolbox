@@ -1,0 +1,73 @@
+#!/home/claude/venvs/transcribe/bin/python3
+"""Transcribe audio files using OpenAI's transcription API.
+
+Usage:
+    transcribe <audio_file>
+    transcribe --full <audio_file>
+    transcribe --no-glossary <audio_file>
+    transcribe --glossary /path/to/custom.txt <audio_file>
+
+Flags:
+    --full          Use gpt-4o-transcribe instead of gpt-4o-mini-transcribe
+    --no-glossary   Skip the technical glossary prompt
+    --glossary F    Use a custom glossary file instead of the default
+
+Requires OPENAI_API_KEY in the environment.
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+from openai import OpenAI
+
+DEFAULT_GLOSSARY = Path(__file__).resolve().parent / "glossary.txt"
+MINI_MODEL = "gpt-4o-mini-transcribe"
+FULL_MODEL = "gpt-4o-transcribe"
+
+
+def load_glossary(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    if not path.exists():
+        print(f"warning: glossary not found at {path}, proceeding without it", file=sys.stderr)
+        return None
+    return path.read_text().strip()
+
+
+def transcribe(audio_path: str, model: str, prompt: str | None) -> str:
+    client = OpenAI()
+    kwargs = {"model": model, "file": open(audio_path, "rb")}
+    if prompt:
+        kwargs["prompt"] = prompt
+    transcript = client.audio.transcriptions.create(**kwargs)
+    return transcript.text
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Transcribe audio via OpenAI API")
+    parser.add_argument("audio_file", help="Path to the audio file")
+    parser.add_argument("--full", action="store_true", help=f"Use {FULL_MODEL} (default: {MINI_MODEL})")
+    parser.add_argument("--no-glossary", action="store_true", help="Skip glossary prompt")
+    parser.add_argument("--glossary", type=Path, default=None, help="Custom glossary file path")
+    args = parser.parse_args()
+
+    audio = Path(args.audio_file)
+    if not audio.exists():
+        print(f"error: file not found: {audio}", file=sys.stderr)
+        sys.exit(1)
+
+    model = FULL_MODEL if args.full else MINI_MODEL
+
+    if args.no_glossary:
+        prompt = None
+    else:
+        glossary_path = args.glossary if args.glossary else DEFAULT_GLOSSARY
+        prompt = load_glossary(glossary_path)
+
+    text = transcribe(str(audio), model, prompt)
+    print(text)
+
+
+if __name__ == "__main__":
+    main()
