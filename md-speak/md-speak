@@ -1,0 +1,457 @@
+#!/home/claude/venvs/transcribe/bin/python3
+"""Read markdown documents aloud with multiple voices and smart processing.
+
+Usage:
+    md-speak document.md
+    md-speak --out output.ogg document.md
+    md-speak --no-describe document.md    # skip AI descriptions of code/images
+
+Voice roles (Google Cloud TTS, overridable via env):
+    MD_VOICE_HEADING:  Headings (default: en-US-Wavenet-B, deep male)
+    MD_VOICE_BODY:     Body text (default: en-US-Wavenet-J, male)
+    MD_VOICE_SPECIAL:  Links, figures, code descriptions (default: en-US-Neural2-C, female)
+    MD_VOICE_TABLE:    Table content (default: en-US-Neural2-A, male)
+    MD_VOICE_QUOTE:    Blockquotes (default: en-US-Wavenet-D, male)
+
+Requires:
+    - GCP service account at ~/.secrets/gcp-tts-sa.json
+    - ANTHROPIC_API_KEY for AI descriptions (or claude CLI on Max plan)
+    - ffmpeg for audio stitching
+"""
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from urllib.parse import urlparse
+
+import mistune
+
+# --- Voice configuration (env-overridable) ---
+
+VOICES = {
+    "heading": os.environ.get("MD_VOICE_HEADING", "en-US-Wavenet-B"),
+    "body": os.environ.get("MD_VOICE_BODY", "en-US-Wavenet-J"),
+    "special": os.environ.get("MD_VOICE_SPECIAL", "en-US-Neural2-C"),
+    "table": os.environ.get("MD_VOICE_TABLE", "en-US-Neural2-A"),
+    "quote": os.environ.get("MD_VOICE_QUOTE", "en-US-Wavenet-D"),
+}
+
+# --- Pauses (seconds) ---
+
+PAUSE = {
+    "h1_before": 1.5,
+    "h2_before": 1.0,
+    "h3_before": 0.5,
+    "after_heading": 0.5,
+    "between_paragraphs": 0.6,
+    "between_list_items": 0.3,
+    "between_table_rows": 0.5,
+    "between_table_cells": 0.2,
+    "after_table": 0.6,
+    "hr": 1.5,
+    "after_code": 0.5,
+    "after_quote": 0.5,
+}
+
+# --- Segment types ---
+
+class Segment:
+    def __init__(self, text: str, voice: str, pause_before: float = 0, pause_after: float = 0):
+        self.text = text.strip()
+        self.voice = voice
+        self.pause_before = pause_before
+        self.pause_after = pause_after
+
+
+# --- Smart text processing ---
+
+def humanize_url(url: str) -> str:
+    """Convert URLs to human-readable descriptions."""
+    parsed = urlparse(url)
+    host = parsed.hostname or url
+    path = parsed.path.strip("/")
+
+    # GitHub repos
+    gh_match = re.match(r"github\.com/([^/]+)/([^/]+)(?:/pull/(\d+))?(?:/issues/(\d+))?", f"{host}/{path}")
+    if gh_match:
+        user, repo = gh_match.group(1), gh_match.group(2)
+        pr = gh_match.group(3)
+        issue = gh_match.group(4)
+        if pr:
+            return f"pull request {pr} on {repo}"
+        if issue:
+            return f"issue {issue} on {repo}"
+        return f"{user}'s {repo} repo"
+
+    # npm
+    if "npmjs.com" in host:
+        pkg = path.split("/")[-1] if path else url
+        return f"npm package {pkg}"
+
+    # Localhost
+    if host in ("localhost", "127.0.0.1"):
+        port = parsed.port or ""
+        return f"local service on port {port}" if port else "local service"
+
+    # Generic: just the domain
+    return host.replace("www.", "")
+
+
+def humanize_filepath(filepath: str) -> str:
+    """Convert file paths to human-readable descriptions."""
+    p = Path(filepath)
+    name = p.name
+
+    # Check if inside a git repo
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(p.parent), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if result.returncode == 0:
+            repo_root = Path(result.stdout.strip())
+            repo_name = repo_root.name
+            return f"{name} in {repo_name}"
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    # Strip /home/claude/
+    s = filepath.replace("/home/claude/", "~/")
+    if s.startswith("~/"):
+        parts = Path(s).parts
+        if len(parts) > 2:
+            return f"{name} in {parts[-2]}"
+        return name
+
+    # Just filename + parent
+    if p.parent.name:
+        return f"{name} in {p.parent.name}"
+    return name
+
+
+def describe_with_ai(content: str, prompt: str) -> str:
+    """Use Claude to describe code, images, or diagrams."""
+    try:
+        import anthropic
+        client = anthropic.Anthropic()
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=150,
+            messages=[{"role": "user", "content": f"{prompt}\n\n{content}"}],
+        )
+        return response.content[0].text.strip()
+    except Exception as e:
+        print(f"warning: AI description failed: {e}", file=sys.stderr)
+        return "content omitted"
+
+
+# --- Markdown AST walker ---
+
+def extract_text(token) -> str:
+    """Recursively extract plain text from a mistune token."""
+    if isinstance(token, str):
+        return token
+    if isinstance(token, dict):
+        t = token.get("type", "")
+        children = token.get("children")
+        raw = token.get("raw", "")
+
+        if t == "text":
+            return raw or token.get("text", "")
+        if t == "codespan":
+            return raw
+        if t == "link":
+            link_text = ""
+            if children:
+                link_text = extract_text(children)
+            url = token.get("attrs", {}).get("url", "") if isinstance(token.get("attrs"), dict) else token.get("link", "")
+            # Try to get URL from attrs
+            if not url and "attrs" in token:
+                attrs = token["attrs"]
+                if isinstance(attrs, dict):
+                    url = attrs.get("href", attrs.get("url", ""))
+            if url:
+                human = humanize_url(url)
+                return f"{link_text}, link to {human}" if link_text else f"link to {human}"
+            return link_text
+        if t == "emphasis":
+            return extract_text(children) if children else raw
+        if t == "strong":
+            return extract_text(children) if children else raw
+        if t in ("softbreak", "linebreak"):
+            return " "
+        if children:
+            return extract_text(children)
+        return raw
+    if isinstance(token, list):
+        return " ".join(extract_text(t) for t in token).strip()
+    return ""
+
+
+def process_markdown(md_text: str, use_ai: bool = True) -> list[Segment]:
+    """Parse markdown and produce a list of audio segments."""
+    md = mistune.create_markdown(renderer=None, plugins=['table'])
+    tokens = md(md_text)
+    segments: list[Segment] = []
+
+    for token in tokens:
+        if not isinstance(token, dict):
+            continue
+
+        t = token.get("type", "")
+        children = token.get("children")
+        raw = token.get("raw", "")
+
+        if t == "heading":
+            level = token.get("attrs", {}).get("level", 1) if isinstance(token.get("attrs"), dict) else 1
+            text = extract_text(children) if children else raw
+            if not text:
+                continue
+            pause_key = f"h{min(level, 3)}_before"
+            segments.append(Segment(
+                text=text,
+                voice=VOICES["heading"],
+                pause_before=PAUSE.get(pause_key, 0.5),
+                pause_after=PAUSE["after_heading"],
+            ))
+
+        elif t == "paragraph":
+            text = extract_text(children) if children else raw
+            if not text:
+                continue
+            # Detect file paths in text
+            text = re.sub(
+                r'(?:/[\w._-]+){2,}(?:/[\w._-]+)*',
+                lambda m: humanize_filepath(m.group()),
+                text,
+            )
+            segments.append(Segment(
+                text=text,
+                voice=VOICES["body"],
+                pause_after=PAUSE["between_paragraphs"],
+            ))
+
+        elif t == "block_code":
+            code = raw.strip()
+            lang = ""
+            if isinstance(token.get("attrs"), dict):
+                lang = token["attrs"].get("info", "") or ""
+            if use_ai and code:
+                desc = describe_with_ai(
+                    code,
+                    f"Describe this {lang or 'code'} in one concise sentence for a listener. Just the description, no preamble.",
+                )
+                segments.append(Segment(
+                    text=f"Code block: {desc}",
+                    voice=VOICES["special"],
+                    pause_after=PAUSE["after_code"],
+                ))
+            else:
+                lang_label = f"{lang} code" if lang else "code"
+                segments.append(Segment(
+                    text=f"{lang_label} block omitted",
+                    voice=VOICES["special"],
+                    pause_after=PAUSE["after_code"],
+                ))
+
+        elif t == "list":
+            items = children or []
+            for item in items:
+                if isinstance(item, dict) and item.get("type") == "list_item":
+                    item_children = item.get("children", [])
+                    text = extract_text(item_children)
+                    if text:
+                        segments.append(Segment(
+                            text=text,
+                            voice=VOICES["body"],
+                            pause_after=PAUSE["between_list_items"],
+                        ))
+
+        elif t == "table":
+            children_list = token.get("children", [])
+            header_texts = []
+
+            for child in children_list:
+                if not isinstance(child, dict):
+                    continue
+                ct = child.get("type", "")
+
+                if ct == "table_head":
+                    # Head cells are direct children (table_cell with head=true)
+                    cells = child.get("children", [])
+                    for cell in cells:
+                        if isinstance(cell, dict) and cell.get("type") == "table_cell":
+                            header_texts.append(extract_text(cell.get("children", [])))
+                    if header_texts:
+                        segments.append(Segment(
+                            text=", ".join(header_texts),
+                            voice=VOICES["table"],
+                            pause_after=PAUSE["between_table_rows"],
+                        ))
+
+                elif ct == "table_body":
+                    for table_row in child.get("children", []):
+                        if not isinstance(table_row, dict) or table_row.get("type") != "table_row":
+                            continue
+                        cell_texts = []
+                        for cell in table_row.get("children", []):
+                            if isinstance(cell, dict) and cell.get("type") == "table_cell":
+                                val = extract_text(cell.get("children", []))
+                                cell_texts.append(val)
+                        if cell_texts and header_texts:
+                            # Read as "key, value" pairs
+                            pairs = []
+                            for j, val in enumerate(cell_texts):
+                                if j < len(header_texts):
+                                    pairs.append(f"{header_texts[j]}, {val}")
+                                else:
+                                    pairs.append(val)
+                            segments.append(Segment(
+                                text=". ".join(pairs),
+                                voice=VOICES["table"],
+                                pause_after=PAUSE["between_table_rows"],
+                            ))
+                        elif cell_texts:
+                            segments.append(Segment(
+                                text=", ".join(cell_texts),
+                                voice=VOICES["table"],
+                                pause_after=PAUSE["between_table_rows"],
+                            ))
+
+            segments.append(Segment(text="", voice=VOICES["body"], pause_before=PAUSE["after_table"]))
+
+        elif t == "block_quote":
+            text = extract_text(children) if children else raw
+            if text:
+                segments.append(Segment(
+                    text=text,
+                    voice=VOICES["quote"],
+                    pause_after=PAUSE["after_quote"],
+                ))
+
+        elif t == "thematic_break":
+            segments.append(Segment(text="", voice=VOICES["body"], pause_before=PAUSE["hr"]))
+
+    # Filter empty segments (pause-only are kept)
+    return [s for s in segments if s.text or s.pause_before > 0 or s.pause_after > 0]
+
+
+# --- Audio generation ---
+
+def generate_audio(text: str, voice: str, output_path: str):
+    """Generate a single audio segment via Google Cloud TTS."""
+    os.environ.setdefault(
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        str(Path.home() / ".secrets" / "gcp-tts-sa.json"),
+    )
+    from google.cloud import texttospeech
+
+    client = texttospeech.TextToSpeechClient()
+    lang_code = "-".join(voice.split("-")[:2])
+
+    response = client.synthesize_speech(
+        input=texttospeech.SynthesisInput(text=text),
+        voice=texttospeech.VoiceSelectionParams(language_code=lang_code, name=voice),
+        audio_config=texttospeech.AudioConfig(
+            audio_encoding=texttospeech.AudioEncoding.MP3,
+            speaking_rate=0.95,
+        ),
+    )
+    Path(output_path).write_bytes(response.audio_content)
+
+
+def generate_silence(duration_sec: float, output_path: str):
+    """Generate a silence audio file."""
+    subprocess.run(
+        ["ffmpeg", "-f", "lavfi", "-i", f"anullsrc=r=24000:cl=mono",
+         "-t", str(duration_sec), "-c:a", "libmp3lame", "-y", "-loglevel", "error", output_path],
+        check=True,
+    )
+
+
+def stitch_audio(parts: list[str], output_path: str):
+    """Concatenate audio files into one ogg opus file."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        for part in parts:
+            f.write(f"file '{part}'\n")
+        concat_file = f.name
+
+    try:
+        subprocess.run(
+            ["ffmpeg", "-f", "concat", "-safe", "0", "-i", concat_file,
+             "-c:a", "libopus", "-y", "-loglevel", "error", output_path],
+            check=True,
+        )
+    finally:
+        Path(concat_file).unlink(missing_ok=True)
+
+
+# --- Main ---
+
+def main():
+    parser = argparse.ArgumentParser(description="Read markdown aloud with multiple voices")
+    parser.add_argument("file", help="Markdown file to read")
+    parser.add_argument("--out", "-o", type=Path, default=None, help="Output file (default: <input>.ogg)")
+    parser.add_argument("--no-describe", action="store_true", help="Skip AI descriptions of code/images")
+    args = parser.parse_args()
+
+    md_path = Path(args.file)
+    if not md_path.exists():
+        print(f"error: file not found: {md_path}", file=sys.stderr)
+        sys.exit(1)
+
+    output = args.out or md_path.with_suffix(".ogg")
+    md_text = md_path.read_text()
+
+    print(f"Parsing {md_path.name}...", file=sys.stderr)
+    segments = process_markdown(md_text, use_ai=not args.no_describe)
+    print(f"Generated {len(segments)} segments", file=sys.stderr)
+
+    # Generate audio for each segment
+    tmpdir = tempfile.mkdtemp(prefix="md-speak-")
+    parts: list[str] = []
+    char_count = 0
+
+    for i, seg in enumerate(segments):
+        # Pre-pause
+        if seg.pause_before > 0:
+            silence_path = f"{tmpdir}/silence-pre-{i}.mp3"
+            generate_silence(seg.pause_before, silence_path)
+            parts.append(silence_path)
+
+        # Audio
+        if seg.text:
+            audio_path = f"{tmpdir}/seg-{i}.mp3"
+            print(f"  [{i+1}/{len(segments)}] {seg.voice}: {seg.text[:60]}{'...' if len(seg.text) > 60 else ''}", file=sys.stderr)
+            generate_audio(seg.text, seg.voice, audio_path)
+            parts.append(audio_path)
+            char_count += len(seg.text)
+
+        # Post-pause
+        if seg.pause_after > 0:
+            silence_path = f"{tmpdir}/silence-post-{i}.mp3"
+            generate_silence(seg.pause_after, silence_path)
+            parts.append(silence_path)
+
+    if not parts:
+        print("error: no audio segments generated", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Stitching {len(parts)} audio parts...", file=sys.stderr)
+    stitch_audio(parts, str(output))
+
+    # Cleanup
+    for p in parts:
+        Path(p).unlink(missing_ok=True)
+    Path(tmpdir).rmdir()
+
+    print(f"{output} ({char_count} chars)", file=sys.stderr)
+    print(str(output))
+
+
+if __name__ == "__main__":
+    main()
