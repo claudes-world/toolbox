@@ -25,4 +25,4 @@ MX record, A record, AAAA record, CNAME, SRV, PTR, SOA, NS record,
 Linear, Slack, Discord, Telegram, BotFather, Notion, Figma, Vercel, Netlify,
 Render, Fly.io, Railway, Supabase, PlanetScale, Prisma, Drizzle, SQLAlchemy,
 pull request, PR, issue, branch, fork, upstream, origin, HEAD, main, master,
-staging, production, dev, hotfix, feature flag, rollback, deploy, ship it
+staging, production, dev, hotfix, feature flag, rollback, deploy, ship it, codex, doc, docs, AGENTS.md,  CLAUDE.md, README.md, ultrathink, index.html, gcloud, GCP, gcs, gsm, V0, postgres
