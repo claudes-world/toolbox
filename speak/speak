@@ -11,13 +11,16 @@ Usage:
 
 Providers:
     openai      OpenAI TTS (default) — cheapest, native opus, simple
+    google      Google Cloud TTS — generous free tier, 700+ voices
     elevenlabs  ElevenLabs — premium quality, more voices
 
 OpenAI voices: alloy, ash, ballad, coral, echo, fable, nova, onyx, sage, shimmer
+Google voices: Standard-A through J, Wavenet-A through J, Neural2-A through J
+  (use format like en-US-Wavenet-D, en-US-Neural2-C, en-US-Standard-A)
 ElevenLabs voices: eric, river, george, daniel, brian, alice, bella
 
-Requires OPENAI_API_KEY (for openai) or ELEVEN_API_KEY (for elevenlabs)
-in ~/.secrets/openai.env or ~/.secrets/elevenlabs.env.
+Requires OPENAI_API_KEY (for openai), GCP service account JSON (for google),
+or ELEVEN_API_KEY (for elevenlabs).
 """
 
 import argparse
@@ -62,6 +65,48 @@ def speak_openai(text: str, voice: str, ogg: bool) -> tuple[bytes, str]:
     )
     ext = ".ogg" if ogg else ".mp3"
     return response.content, ext
+
+
+# --- Provider: Google Cloud TTS ---
+
+GOOGLE_DEFAULT_VOICE = "en-US-Neural2-D"
+GOOGLE_SA_PATH = Path.home() / ".secrets" / "gcp-tts-sa.json"
+
+
+def speak_google(text: str, voice: str, ogg: bool) -> tuple[bytes, str]:
+    os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", str(GOOGLE_SA_PATH))
+
+    from google.cloud import texttospeech
+
+    client = texttospeech.TextToSpeechClient()
+
+    # Parse voice name — format: en-US-Neural2-D
+    parts = voice.rsplit("-", 1)
+    lang_code = "-".join(voice.split("-")[:2]) if "-" in voice else "en-US"
+
+    synthesis_input = texttospeech.SynthesisInput(text=text)
+    voice_params = texttospeech.VoiceSelectionParams(
+        language_code=lang_code,
+        name=voice,
+    )
+
+    if ogg:
+        audio_config = texttospeech.AudioConfig(
+            audio_encoding=texttospeech.AudioEncoding.OGG_OPUS,
+        )
+        ext = ".ogg"
+    else:
+        audio_config = texttospeech.AudioConfig(
+            audio_encoding=texttospeech.AudioEncoding.MP3,
+        )
+        ext = ".mp3"
+
+    response = client.synthesize_speech(
+        input=synthesis_input,
+        voice=voice_params,
+        audio_config=audio_config,
+    )
+    return response.audio_content, ext
 
 
 # --- Provider: ElevenLabs ---
@@ -149,10 +194,10 @@ ALL_VOICES = sorted(OPENAI_VOICES | set(ELEVENLABS_VOICES.keys()))
 def main():
     parser = argparse.ArgumentParser(description="Text-to-speech with multiple providers")
     parser.add_argument("text", nargs="?", default=None, help="Text to speak (or pipe via stdin)")
-    parser.add_argument("--provider", "-p", default="openai", choices=["openai", "elevenlabs"],
+    parser.add_argument("--provider", "-p", default="openai", choices=["openai", "google", "elevenlabs"],
                         help="TTS provider (default: openai)")
     parser.add_argument("--voice", "-v", default=None,
-                        help=f"Voice name (default: {OPENAI_DEFAULT_VOICE} for openai, {ELEVENLABS_DEFAULT_VOICE} for elevenlabs)")
+                        help=f"Voice name (default: {OPENAI_DEFAULT_VOICE} for openai, {GOOGLE_DEFAULT_VOICE} for google, {ELEVENLABS_DEFAULT_VOICE} for elevenlabs)")
     parser.add_argument("--model", default="flash", choices=ELEVENLABS_MODELS.keys(),
                         help="ElevenLabs model (default: flash, ignored for openai)")
     parser.add_argument("--out", type=Path, default=None, help="Output file path (default: stdout)")
@@ -179,6 +224,9 @@ def main():
             print(f"error: unknown openai voice '{voice}'. Available: {', '.join(sorted(OPENAI_VOICES))}", file=sys.stderr)
             sys.exit(1)
         audio_data, ext = speak_openai(text, voice, ogg)
+    elif args.provider == "google":
+        voice = args.voice or GOOGLE_DEFAULT_VOICE
+        audio_data, ext = speak_google(text, voice, ogg)
     else:
         voice = args.voice or ELEVENLABS_DEFAULT_VOICE
         audio_data, ext = speak_elevenlabs(text, voice, args.model, ogg)
