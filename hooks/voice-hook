@@ -1,0 +1,84 @@
+#!/bin/bash
+# Hook script for UserPromptSubmit: auto-transcribe voice notes from Telegram
+# Reads hook JSON from stdin, detects voice attachments, transcribes, and:
+# 1. Sends transcription as a quoted reply to the user on Telegram
+# 2. Outputs JSON with additionalContext so Claude receives the transcription
+
+set -euo pipefail
+
+INPUT=$(cat)
+CONTENT=$(echo "$INPUT" | jq -r '.message.content // ""' 2>/dev/null || true)
+
+# Check if this is a voice message
+if ! echo "$CONTENT" | grep -q 'attachment_mime="audio/ogg"'; then
+  exit 0
+fi
+
+# Extract fields from the channel tag attributes
+FILE_ID=$(echo "$CONTENT" | grep -oP 'attachment_file_id="\K[^"]+' || true)
+MSG_ID=$(echo "$CONTENT" | grep -oP 'message_id="\K[^"]+' || true)
+CHAT_ID=$(echo "$CONTENT" | grep -oP 'chat_id="\K[^"]+' || true)
+
+if [ -z "$FILE_ID" ]; then
+  exit 0
+fi
+
+# Load bot token
+BOTTOKEN=$(grep TELEGRAM_BOT_TOKEN /home/claude/.claude/channels/telegram/.env 2>/dev/null | cut -d= -f2)
+if [ -z "$BOTTOKEN" ]; then
+  exit 0
+fi
+
+# Load OpenAI key
+eval "$(grep OPENAI_API_KEY /home/claude/.secrets/openai.env 2>/dev/null | head -1)"
+export OPENAI_API_KEY
+if [ -z "${OPENAI_API_KEY:-}" ]; then
+  exit 0
+fi
+
+# Download voice file via Bot API
+FILE_INFO=$(curl -s "https://api.telegram.org/bot${BOTTOKEN}/getFile?file_id=${FILE_ID}")
+FILE_PATH=$(echo "$FILE_INFO" | jq -r '.result.file_path // empty')
+
+if [ -z "$FILE_PATH" ]; then
+  exit 0
+fi
+
+TMPFILE="/tmp/voice-hook-$$.oga"
+curl -s "https://api.telegram.org/file/bot${BOTTOKEN}/${FILE_PATH}" -o "$TMPFILE"
+
+# Transcribe
+TRANSCRIPTION=$(/home/claude/bin/transcribe "$TMPFILE" 2>/dev/null || echo "[transcription failed]")
+
+# Clean up temp file
+rm -f "$TMPFILE"
+
+if [ -z "$TRANSCRIPTION" ] || [ "$TRANSCRIPTION" = "[transcription failed]" ]; then
+  exit 0
+fi
+
+# Send transcription as a quoted reply to the user on Telegram
+if [ -n "$CHAT_ID" ] && [ -n "$MSG_ID" ]; then
+  # Use HTML blockquote for reliability (MarkdownV2 escaping is fragile)
+  QUOTED="<blockquote>${TRANSCRIPTION}</blockquote>"
+
+  curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n \
+      --arg chat_id "$CHAT_ID" \
+      --arg reply_to "$MSG_ID" \
+      --arg text "$QUOTED" \
+      '{chat_id: $chat_id, reply_to_message_id: ($reply_to | tonumber), text: $text, parse_mode: "HTML"}'
+    )" > /dev/null 2>&1 || true
+fi
+
+# Output JSON for Claude Code harness — inject transcription into context
+jq -n \
+  --arg transcription "$TRANSCRIPTION" \
+  --arg file_id "$FILE_ID" \
+  '{
+    hookSpecificOutput: {
+      hookEventName: "UserPromptSubmit",
+      additionalContext: ("[Voice note transcription from file_id=" + $file_id + "]\n" + $transcription)
+    }
+  }'

@@ -11,6 +11,7 @@ All tools use a shared Python venv at `~/venvs/transcribe/` and are symlinked in
 | [transcribe](#transcribe) | Speech-to-text with OpenAI + tech glossary |
 | [speak](#speak) | Text-to-speech with OpenAI, Google, or ElevenLabs |
 | [md-speak](#md-speak) | Read markdown documents aloud with multiple voices |
+| [voice-hook](#voice-hook) | Claude Code hook: auto-transcribe Telegram voice notes |
 
 ---
 
@@ -125,6 +126,7 @@ git clone git@github.com:claudes-world/toolbox.git ~/code/toolbox
 ln -sf ~/code/toolbox/transcribe/transcribe ~/bin/transcribe
 ln -sf ~/code/toolbox/speak/speak ~/bin/speak
 ln -sf ~/code/toolbox/md-speak/md-speak ~/bin/md-speak
+ln -sf ~/code/toolbox/hooks/voice-hook ~/bin/voice-hook
 ```
 
 Install the shared Python venv:
@@ -133,6 +135,45 @@ Install the shared Python venv:
 python3 -m venv ~/venvs/transcribe
 ~/venvs/transcribe/bin/pip install openai elevenlabs google-cloud-texttospeech mistune anthropic
 ```
+
+## Hooks
+
+Claude Code hooks that run automatically during sessions. These live in `hooks/` and are wired up via `.claude/settings.local.json`.
+
+### voice-hook
+
+Auto-transcribes Telegram voice notes. Fires on `UserPromptSubmit` — when a message arrives with an `audio/ogg` attachment, it:
+
+1. Downloads the audio via the Telegram Bot API
+2. Transcribes it using `~/bin/transcribe` (OpenAI gpt-4o-mini-transcribe)
+3. Sends the transcription back as a quoted reply to the original voice note
+4. Injects the transcription into Claude's context via `additionalContext`
+
+**Setup:** Add to `.claude/settings.local.json`:
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/claude/bin/voice-hook",
+            "timeout": 30,
+            "statusMessage": "Transcribing voice note..."
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+**Requires:**
+- `OPENAI_API_KEY` in `~/.secrets/openai.env`
+- Telegram bot token in `~/.claude/channels/telegram/.env`
+- `~/bin/transcribe` symlinked and working
+- ffmpeg installed
 
 ## License
 
