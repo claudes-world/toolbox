@@ -1,21 +1,23 @@
 #!/home/claude/venvs/transcribe/bin/python3
-"""Text-to-speech using the ElevenLabs API.
+"""Text-to-speech with multiple providers.
 
 Usage:
     speak "Hello, how are you?"
     echo "Hello" | speak
-    speak --voice river "Let me explain..."
-    speak --out reply.mp3 "Here's the answer."
-    speak --model v2 "Higher quality output."
+    speak --voice brian "Let me explain..."
+    speak --provider openai --voice nova "OpenAI voice."
+    speak --out reply.ogg "Saved to file."
+    speak --mp3 "Force mp3 output."
 
-Flags:
-    --voice NAME    Voice preset (default: eric)
-    --model MODEL   flash, v2, or v3 (default: flash)
-    --out FILE      Output file path (default: prints to stdout)
+Providers:
+    openai      OpenAI TTS (default) — cheapest, native opus, simple
+    elevenlabs  ElevenLabs — premium quality, more voices
 
-Available voices: eric, river, george, daniel, brian, alice, bella
+OpenAI voices: alloy, ash, ballad, coral, echo, fable, nova, onyx, sage, shimmer
+ElevenLabs voices: eric, river, george, daniel, brian, alice, bella
 
-Requires ELEVEN_API_KEY in the environment or ~/.secrets/elevenlabs.env.
+Requires OPENAI_API_KEY (for openai) or ELEVEN_API_KEY (for elevenlabs)
+in ~/.secrets/openai.env or ~/.secrets/elevenlabs.env.
 """
 
 import argparse
@@ -25,9 +27,46 @@ import sys
 import tempfile
 from pathlib import Path
 
-from elevenlabs.client import ElevenLabs
+# --- Provider: OpenAI ---
 
-VOICES = {
+OPENAI_VOICES = {"alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer"}
+OPENAI_DEFAULT_VOICE = "onyx"
+
+OPENAI_SECRETS = Path.home() / ".secrets" / "openai.env"
+
+
+def load_openai_key() -> str:
+    key = os.environ.get("OPENAI_API_KEY")
+    if key:
+        return key
+    if OPENAI_SECRETS.exists():
+        for line in OPENAI_SECRETS.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("OPENAI_API_KEY="):
+                return line.split("=", 1)[1].strip()
+    print("error: OPENAI_API_KEY not set. Add it to ~/.secrets/openai.env or export it.", file=sys.stderr)
+    sys.exit(1)
+
+
+def speak_openai(text: str, voice: str, ogg: bool) -> tuple[bytes, str]:
+    from openai import OpenAI
+
+    client = OpenAI(api_key=load_openai_key())
+    # OpenAI supports opus natively — no ffmpeg needed
+    fmt = "opus" if ogg else "mp3"
+    response = client.audio.speech.create(
+        model="tts-1",
+        voice=voice,
+        input=text,
+        response_format=fmt,
+    )
+    ext = ".ogg" if ogg else ".mp3"
+    return response.content, ext
+
+
+# --- Provider: ElevenLabs ---
+
+ELEVENLABS_VOICES = {
     "eric": "cjVigY5qzO86Huf0OWal",
     "river": "SAz9YHcvj6GT2YYXdXww",
     "george": "JBFqnCBsd6RMkjVDRZzb",
@@ -36,22 +75,23 @@ VOICES = {
     "alice": "Xb7hH8MSUJpSbSDYk0k2",
     "bella": "hpp4J3VqNfWAUOO0d1Us",
 }
+ELEVENLABS_DEFAULT_VOICE = "brian"
 
-MODELS = {
+ELEVENLABS_MODELS = {
     "flash": "eleven_flash_v2_5",
     "v2": "eleven_multilingual_v2",
     "v3": "eleven_v3",
 }
 
-SECRETS_FILE = Path.home() / ".secrets" / "elevenlabs.env"
+ELEVENLABS_SECRETS = Path.home() / ".secrets" / "elevenlabs.env"
 
 
-def load_api_key() -> str:
+def load_elevenlabs_key() -> str:
     key = os.environ.get("ELEVEN_API_KEY")
     if key:
         return key
-    if SECRETS_FILE.exists():
-        for line in SECRETS_FILE.read_text().splitlines():
+    if ELEVENLABS_SECRETS.exists():
+        for line in ELEVENLABS_SECRETS.read_text().splitlines():
             line = line.strip()
             if line.startswith("ELEVEN_API_KEY="):
                 return line.split("=", 1)[1].strip()
@@ -78,8 +118,17 @@ def convert_to_ogg(mp3_data: bytes) -> bytes:
         Path(ogg_path).unlink(missing_ok=True)
 
 
-def speak(text: str, voice_id: str, model_id: str, api_key: str, ogg: bool = True) -> tuple[bytes, str]:
-    client = ElevenLabs(api_key=api_key)
+def speak_elevenlabs(text: str, voice: str, model: str, ogg: bool) -> tuple[bytes, str]:
+    from elevenlabs.client import ElevenLabs
+
+    voice_id = ELEVENLABS_VOICES.get(voice)
+    if not voice_id:
+        print(f"error: unknown elevenlabs voice '{voice}'. Available: {', '.join(ELEVENLABS_VOICES)}", file=sys.stderr)
+        sys.exit(1)
+
+    model_id = ELEVENLABS_MODELS.get(model, ELEVENLABS_MODELS["flash"])
+
+    client = ElevenLabs(api_key=load_elevenlabs_key())
     audio = client.text_to_speech.convert(
         text=text,
         voice_id=voice_id,
@@ -92,11 +141,20 @@ def speak(text: str, voice_id: str, model_id: str, api_key: str, ogg: bool = Tru
     return mp3_data, ".mp3"
 
 
+# --- CLI ---
+
+ALL_VOICES = sorted(OPENAI_VOICES | set(ELEVENLABS_VOICES.keys()))
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Text-to-speech via ElevenLabs API")
+    parser = argparse.ArgumentParser(description="Text-to-speech with multiple providers")
     parser.add_argument("text", nargs="?", default=None, help="Text to speak (or pipe via stdin)")
-    parser.add_argument("--voice", default="eric", choices=VOICES.keys(), help="Voice preset (default: eric)")
-    parser.add_argument("--model", default="flash", choices=MODELS.keys(), help="Model: flash, v2, or v3 (default: flash)")
+    parser.add_argument("--provider", "-p", default="openai", choices=["openai", "elevenlabs"],
+                        help="TTS provider (default: openai)")
+    parser.add_argument("--voice", "-v", default=None,
+                        help=f"Voice name (default: {OPENAI_DEFAULT_VOICE} for openai, {ELEVENLABS_DEFAULT_VOICE} for elevenlabs)")
+    parser.add_argument("--model", default="flash", choices=ELEVENLABS_MODELS.keys(),
+                        help="ElevenLabs model (default: flash, ignored for openai)")
     parser.add_argument("--out", type=Path, default=None, help="Output file path (default: stdout)")
     parser.add_argument("--mp3", action="store_true", help="Output mp3 instead of ogg opus")
     args = parser.parse_args()
@@ -113,11 +171,17 @@ def main():
         print("error: empty text", file=sys.stderr)
         sys.exit(1)
 
-    api_key = load_api_key()
-    voice_id = VOICES[args.voice]
-    model_id = MODELS[args.model]
+    ogg = not args.mp3
 
-    audio_data, ext = speak(text, voice_id, model_id, api_key, ogg=not args.mp3)
+    if args.provider == "openai":
+        voice = args.voice or OPENAI_DEFAULT_VOICE
+        if voice not in OPENAI_VOICES:
+            print(f"error: unknown openai voice '{voice}'. Available: {', '.join(sorted(OPENAI_VOICES))}", file=sys.stderr)
+            sys.exit(1)
+        audio_data, ext = speak_openai(text, voice, ogg)
+    else:
+        voice = args.voice or ELEVENLABS_DEFAULT_VOICE
+        audio_data, ext = speak_elevenlabs(text, voice, args.model, ogg)
 
     if args.out:
         args.out.write_bytes(audio_data)
