@@ -374,7 +374,7 @@ def generate_silence(duration_sec: float, output_path: str):
 
 
 def stitch_audio(parts: list[str], output_path: str):
-    """Concatenate audio files into one ogg opus file."""
+    """Concatenate audio files into one mp3 file."""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
         for part in parts:
             f.write(f"file '{part}'\n")
@@ -383,7 +383,7 @@ def stitch_audio(parts: list[str], output_path: str):
     try:
         subprocess.run(
             ["ffmpeg", "-f", "concat", "-safe", "0", "-i", concat_file,
-             "-c:a", "libopus", "-y", "-loglevel", "error", output_path],
+             "-c:a", "libmp3lame", "-b:a", "128k", "-y", "-loglevel", "error", output_path],
             check=True,
         )
     finally:
@@ -395,7 +395,7 @@ def stitch_audio(parts: list[str], output_path: str):
 def main():
     parser = argparse.ArgumentParser(description="Read markdown aloud with multiple voices")
     parser.add_argument("file", help="Markdown file to read")
-    parser.add_argument("--out", "-o", type=Path, default=None, help="Output file (default: <input>.ogg)")
+    parser.add_argument("--out", "-o", type=Path, default=None, help="Output file (default: <input>.mp3)")
     parser.add_argument("--no-describe", action="store_true", help="Skip AI descriptions of code/images")
     args = parser.parse_args()
 
@@ -404,7 +404,7 @@ def main():
         print(f"error: file not found: {md_path}", file=sys.stderr)
         sys.exit(1)
 
-    output = args.out or md_path.with_suffix(".ogg")
+    output = args.out or md_path.with_suffix(".mp3")
     md_text = md_path.read_text()
 
     print(f"Parsing {md_path.name}...", file=sys.stderr)
