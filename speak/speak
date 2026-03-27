@@ -1,0 +1,108 @@
+#!/home/claude/venvs/transcribe/bin/python3
+"""Text-to-speech using the ElevenLabs API.
+
+Usage:
+    speak "Hello, how are you?"
+    echo "Hello" | speak
+    speak --voice river "Let me explain..."
+    speak --out reply.mp3 "Here's the answer."
+    speak --model v2 "Higher quality output."
+
+Flags:
+    --voice NAME    Voice preset (default: eric)
+    --model MODEL   flash, v2, or v3 (default: flash)
+    --out FILE      Output file path (default: prints to stdout)
+
+Available voices: eric, river, george, daniel, brian, alice, bella
+
+Requires ELEVEN_API_KEY in the environment or ~/.secrets/elevenlabs.env.
+"""
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+from elevenlabs.client import ElevenLabs
+
+VOICES = {
+    "eric": "cjVigY5qzO86Huf0OWal",
+    "river": "SAz9YHcvj6GT2YYXdXww",
+    "george": "JBFqnCBsd6RMkjVDRZzb",
+    "daniel": "onwK4e9ZLuTAKqWW03F9",
+    "brian": "nPczCjzI2devNBz1zQrb",
+    "alice": "Xb7hH8MSUJpSbSDYk0k2",
+    "bella": "hpp4J3VqNfWAUOO0d1Us",
+}
+
+MODELS = {
+    "flash": "eleven_flash_v2_5",
+    "v2": "eleven_multilingual_v2",
+    "v3": "eleven_v3",
+}
+
+SECRETS_FILE = Path.home() / ".secrets" / "elevenlabs.env"
+
+
+def load_api_key() -> str:
+    key = os.environ.get("ELEVEN_API_KEY")
+    if key:
+        return key
+    if SECRETS_FILE.exists():
+        for line in SECRETS_FILE.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("ELEVEN_API_KEY="):
+                return line.split("=", 1)[1].strip()
+    print("error: ELEVEN_API_KEY not set. Add it to ~/.secrets/elevenlabs.env or export it.", file=sys.stderr)
+    sys.exit(1)
+
+
+def speak(text: str, voice_id: str, model_id: str, api_key: str) -> bytes:
+    client = ElevenLabs(api_key=api_key)
+    audio = client.text_to_speech.convert(
+        text=text,
+        voice_id=voice_id,
+        model_id=model_id,
+        output_format="mp3_44100_128",
+    )
+    chunks = []
+    for chunk in audio:
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Text-to-speech via ElevenLabs API")
+    parser.add_argument("text", nargs="?", default=None, help="Text to speak (or pipe via stdin)")
+    parser.add_argument("--voice", default="eric", choices=VOICES.keys(), help="Voice preset (default: eric)")
+    parser.add_argument("--model", default="flash", choices=MODELS.keys(), help="Model: flash, v2, or v3 (default: flash)")
+    parser.add_argument("--out", type=Path, default=None, help="Output file path (default: stdout)")
+    args = parser.parse_args()
+
+    if args.text:
+        text = args.text
+    elif not sys.stdin.isatty():
+        text = sys.stdin.read().strip()
+    else:
+        print("error: provide text as an argument or pipe via stdin", file=sys.stderr)
+        sys.exit(1)
+
+    if not text:
+        print("error: empty text", file=sys.stderr)
+        sys.exit(1)
+
+    api_key = load_api_key()
+    voice_id = VOICES[args.voice]
+    model_id = MODELS[args.model]
+
+    audio_data = speak(text, voice_id, model_id, api_key)
+
+    if args.out:
+        args.out.write_bytes(audio_data)
+        print(f"{args.out}", file=sys.stderr)
+    else:
+        sys.stdout.buffer.write(audio_data)
+
+
+if __name__ == "__main__":
+    main()
