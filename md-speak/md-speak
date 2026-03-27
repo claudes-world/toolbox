@@ -146,7 +146,7 @@ def humanize_filepath(filepath: str) -> str:
 
 
 def humanize_text(text: str) -> str:
-    """Process text to humanize URLs and file paths."""
+    """Process text to humanize URLs, file paths, symbols, and special characters."""
     # Humanize URLs
     text = re.sub(
         r'https?://[^\s,)>]+',
@@ -159,6 +159,14 @@ def humanize_text(text: str) -> str:
         lambda m: humanize_filepath(m.group()),
         text,
     )
+    # Replace arrows with spoken equivalents
+    text = text.replace("→", " points to ")
+    text = text.replace("←", " pointed to ")
+    text = text.replace("->", " points to ")
+    text = text.replace("<-", " pointed to ")
+    # Replace tilde paths that didn't match the regex above
+    text = re.sub(r'~/(\w+)', r'home slash \1', text)
+    text = text.replace("~/", "home slash ")
     return text
 
 
