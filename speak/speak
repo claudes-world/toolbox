@@ -20,7 +20,9 @@ Requires ELEVEN_API_KEY in the environment or ~/.secrets/elevenlabs.env.
 
 import argparse
 import os
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from elevenlabs.client import ElevenLabs
@@ -57,7 +59,26 @@ def load_api_key() -> str:
     sys.exit(1)
 
 
-def speak(text: str, voice_id: str, model_id: str, api_key: str) -> bytes:
+def convert_to_ogg(mp3_data: bytes) -> bytes:
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as mp3f:
+        mp3f.write(mp3_data)
+        mp3_path = mp3f.name
+    ogg_path = mp3_path + ".ogg"
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-i", mp3_path, "-c:a", "libopus", "-y", "-loglevel", "error", ogg_path],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(f"warning: ogg conversion failed, returning mp3: {result.stderr.strip()}", file=sys.stderr)
+            return mp3_data
+        return Path(ogg_path).read_bytes()
+    finally:
+        Path(mp3_path).unlink(missing_ok=True)
+        Path(ogg_path).unlink(missing_ok=True)
+
+
+def speak(text: str, voice_id: str, model_id: str, api_key: str, ogg: bool = True) -> tuple[bytes, str]:
     client = ElevenLabs(api_key=api_key)
     audio = client.text_to_speech.convert(
         text=text,
@@ -65,10 +86,10 @@ def speak(text: str, voice_id: str, model_id: str, api_key: str) -> bytes:
         model_id=model_id,
         output_format="mp3_44100_128",
     )
-    chunks = []
-    for chunk in audio:
-        chunks.append(chunk)
-    return b"".join(chunks)
+    mp3_data = b"".join(audio)
+    if ogg:
+        return convert_to_ogg(mp3_data), ".ogg"
+    return mp3_data, ".mp3"
 
 
 def main():
@@ -77,6 +98,7 @@ def main():
     parser.add_argument("--voice", default="eric", choices=VOICES.keys(), help="Voice preset (default: eric)")
     parser.add_argument("--model", default="flash", choices=MODELS.keys(), help="Model: flash, v2, or v3 (default: flash)")
     parser.add_argument("--out", type=Path, default=None, help="Output file path (default: stdout)")
+    parser.add_argument("--mp3", action="store_true", help="Output mp3 instead of ogg opus")
     args = parser.parse_args()
 
     if args.text:
@@ -95,7 +117,7 @@ def main():
     voice_id = VOICES[args.voice]
     model_id = MODELS[args.model]
 
-    audio_data = speak(text, voice_id, model_id, api_key)
+    audio_data, ext = speak(text, voice_id, model_id, api_key, ogg=not args.mp3)
 
     if args.out:
         args.out.write_bytes(audio_data)
