@@ -274,24 +274,18 @@ def process_markdown(md_text: str, use_ai: bool = True) -> list[Segment]:
         elif t == "table":
             children_list = token.get("children", [])
             header_texts = []
+            all_rows: list[list[str]] = []
 
+            # First pass: extract headers and all row data
             for child in children_list:
                 if not isinstance(child, dict):
                     continue
                 ct = child.get("type", "")
 
                 if ct == "table_head":
-                    # Head cells are direct children (table_cell with head=true)
-                    cells = child.get("children", [])
-                    for cell in cells:
+                    for cell in child.get("children", []):
                         if isinstance(cell, dict) and cell.get("type") == "table_cell":
                             header_texts.append(extract_text(cell.get("children", [])))
-                    if header_texts:
-                        segments.append(Segment(
-                            text=", ".join(header_texts),
-                            voice=VOICES["table"],
-                            pause_after=PAUSE["between_table_rows"],
-                        ))
 
                 elif ct == "table_body":
                     for table_row in child.get("children", []):
@@ -300,27 +294,61 @@ def process_markdown(md_text: str, use_ai: bool = True) -> list[Segment]:
                         cell_texts = []
                         for cell in table_row.get("children", []):
                             if isinstance(cell, dict) and cell.get("type") == "table_cell":
-                                val = extract_text(cell.get("children", []))
-                                cell_texts.append(val)
-                        if cell_texts and header_texts:
-                            # Read as "key, value" pairs
-                            pairs = []
-                            for j, val in enumerate(cell_texts):
-                                if j < len(header_texts):
-                                    pairs.append(f"{header_texts[j]}, {val}")
-                                else:
-                                    pairs.append(val)
-                            segments.append(Segment(
-                                text=". ".join(pairs),
-                                voice=VOICES["table"],
-                                pause_after=PAUSE["between_table_rows"],
-                            ))
-                        elif cell_texts:
-                            segments.append(Segment(
-                                text=", ".join(cell_texts),
-                                voice=VOICES["table"],
-                                pause_after=PAUSE["between_table_rows"],
-                            ))
+                                cell_texts.append(extract_text(cell.get("children", [])))
+                        if cell_texts:
+                            all_rows.append(cell_texts)
+
+            # Ask Haiku which reading mode to use
+            num_cols = len(header_texts)
+            use_repeat_headers = num_cols >= 4  # default heuristic
+
+            if use_ai and header_texts and all_rows:
+                table_preview = " | ".join(header_texts) + "\n"
+                for row in all_rows[:3]:
+                    table_preview += " | ".join(row) + "\n"
+                try:
+                    mode = describe_with_ai(
+                        table_preview,
+                        "You are choosing how to read a table aloud. Reply with ONLY the word 'A' or 'B'.\n"
+                        "Mode A: Read column headers once, then each row as 'header1, value1. header2, value2.'\n"
+                        "Mode B: For each cell, repeat its column header before the value.\n\n"
+                        "Use Mode A for narrow key-value tables (2-3 columns) with obvious structure.\n"
+                        "Use Mode B for wide tables (4+ columns), comparison tables, or tables where "
+                        "values are ambiguous without their header (numbers, codes, short strings).\n\n"
+                        "Which mode for this table?"
+                    ).strip().upper()
+                    use_repeat_headers = mode.startswith("B")
+                except Exception:
+                    pass  # fall back to heuristic
+
+            if use_repeat_headers:
+                # Mode B: repeat headers with every cell
+                for row in all_rows:
+                    pairs = []
+                    for j, val in enumerate(row):
+                        if j < len(header_texts):
+                            pairs.append(f"{header_texts[j]}, {val}")
+                        else:
+                            pairs.append(val)
+                    segments.append(Segment(
+                        text=". ".join(pairs),
+                        voice=VOICES["table"],
+                        pause_after=PAUSE["between_table_rows"],
+                    ))
+            else:
+                # Mode A: headers once, then rows
+                if header_texts:
+                    segments.append(Segment(
+                        text=", ".join(header_texts),
+                        voice=VOICES["table"],
+                        pause_after=PAUSE["between_table_rows"],
+                    ))
+                for row in all_rows:
+                    segments.append(Segment(
+                        text=", ".join(row),
+                        voice=VOICES["table"],
+                        pause_after=PAUSE["between_table_rows"],
+                    ))
 
             segments.append(Segment(text="", voice=VOICES["body"], pause_before=PAUSE["after_table"]))
 
@@ -340,41 +368,97 @@ def process_markdown(md_text: str, use_ai: bool = True) -> list[Segment]:
     return [s for s in segments if s.text or s.pause_before > 0 or s.pause_after > 0]
 
 
+# --- SSML helpers ---
+
+def escape_ssml(text: str) -> str:
+    """Escape special XML characters for SSML."""
+    return (text
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&apos;"))
+
+
+def ssml_break(ms: int) -> str:
+    """SSML break tag."""
+    return f'<break time="{ms}ms"/>'
+
+
+def segments_to_ssml_batches(segments: list[Segment]) -> list[tuple[str, str]]:
+    """Group consecutive same-voice segments into SSML batches.
+    Returns list of (ssml_string, voice_name) tuples."""
+    batches: list[tuple[str, str]] = []
+    current_voice = None
+    current_parts: list[str] = []
+
+    def flush():
+        nonlocal current_voice, current_parts
+        if current_parts and current_voice:
+            ssml_body = "\n".join(current_parts)
+            ssml = f"<speak>\n{ssml_body}\n</speak>"
+            batches.append((ssml, current_voice))
+        current_parts = []
+
+    for seg in segments:
+        # Voice change — flush current batch
+        if seg.voice != current_voice:
+            flush()
+            current_voice = seg.voice
+
+        # Pre-pause
+        if seg.pause_before > 0:
+            current_parts.append(ssml_break(int(seg.pause_before * 1000)))
+
+        # Text content
+        if seg.text:
+            escaped = escape_ssml(seg.text)
+            current_parts.append(f"<p>{escaped}</p>")
+
+        # Post-pause
+        if seg.pause_after > 0:
+            current_parts.append(ssml_break(int(seg.pause_after * 1000)))
+
+    flush()
+    return batches
+
+
 # --- Audio generation ---
 
-def generate_audio(text: str, voice: str, output_path: str):
-    """Generate a single audio segment via Google Cloud TTS."""
+def get_tts_client():
+    """Get or create a Google Cloud TTS client."""
     os.environ.setdefault(
         "GOOGLE_APPLICATION_CREDENTIALS",
         str(Path.home() / ".secrets" / "gcp-tts-sa.json"),
     )
     from google.cloud import texttospeech
+    return texttospeech.TextToSpeechClient(), texttospeech
 
-    client = texttospeech.TextToSpeechClient()
+
+def generate_ssml_audio(ssml: str, voice: str, output_path: str):
+    """Generate audio from SSML via Google Cloud TTS."""
+    client, tts = get_tts_client()
     lang_code = "-".join(voice.split("-")[:2])
 
     response = client.synthesize_speech(
-        input=texttospeech.SynthesisInput(text=text),
-        voice=texttospeech.VoiceSelectionParams(language_code=lang_code, name=voice),
-        audio_config=texttospeech.AudioConfig(
-            audio_encoding=texttospeech.AudioEncoding.MP3,
+        input=tts.SynthesisInput(ssml=ssml),
+        voice=tts.VoiceSelectionParams(language_code=lang_code, name=voice),
+        audio_config=tts.AudioConfig(
+            audio_encoding=tts.AudioEncoding.MP3,
             speaking_rate=0.95,
         ),
     )
     Path(output_path).write_bytes(response.audio_content)
 
 
-def generate_silence(duration_sec: float, output_path: str):
-    """Generate a silence audio file."""
-    subprocess.run(
-        ["ffmpeg", "-f", "lavfi", "-i", f"anullsrc=r=24000:cl=mono",
-         "-t", str(duration_sec), "-c:a", "libmp3lame", "-y", "-loglevel", "error", output_path],
-        check=True,
-    )
-
-
 def stitch_audio(parts: list[str], output_path: str):
     """Concatenate audio files into one mp3 file."""
+    if len(parts) == 1:
+        # Single part — just copy
+        import shutil
+        shutil.copy2(parts[0], output_path)
+        return
+
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
         for part in parts:
             f.write(f"file '{part}'\n")
@@ -411,31 +495,24 @@ def main():
     segments = process_markdown(md_text, use_ai=not args.no_describe)
     print(f"Generated {len(segments)} segments", file=sys.stderr)
 
-    # Generate audio for each segment
+    # Batch into SSML by voice
+    batches = segments_to_ssml_batches(segments)
+    print(f"Batched into {len(batches)} SSML calls (was {len(segments)} segments)", file=sys.stderr)
+
+    # Generate audio for each batch
     tmpdir = tempfile.mkdtemp(prefix="md-speak-")
     parts: list[str] = []
     char_count = 0
 
-    for i, seg in enumerate(segments):
-        # Pre-pause
-        if seg.pause_before > 0:
-            silence_path = f"{tmpdir}/silence-pre-{i}.mp3"
-            generate_silence(seg.pause_before, silence_path)
-            parts.append(silence_path)
-
-        # Audio
-        if seg.text:
-            audio_path = f"{tmpdir}/seg-{i}.mp3"
-            print(f"  [{i+1}/{len(segments)}] {seg.voice}: {seg.text[:60]}{'...' if len(seg.text) > 60 else ''}", file=sys.stderr)
-            generate_audio(seg.text, seg.voice, audio_path)
-            parts.append(audio_path)
-            char_count += len(seg.text)
-
-        # Post-pause
-        if seg.pause_after > 0:
-            silence_path = f"{tmpdir}/silence-post-{i}.mp3"
-            generate_silence(seg.pause_after, silence_path)
-            parts.append(silence_path)
+    for i, (ssml, voice) in enumerate(batches):
+        audio_path = f"{tmpdir}/batch-{i}.mp3"
+        # Count chars (rough — includes SSML tags but close enough)
+        text_chars = len(re.sub(r'<[^>]+>', '', ssml))
+        char_count += text_chars
+        preview = re.sub(r'<[^>]+>', '', ssml).strip()[:60]
+        print(f"  [{i+1}/{len(batches)}] {voice}: {preview}{'...' if len(preview) >= 60 else ''}", file=sys.stderr)
+        generate_ssml_audio(ssml, voice, audio_path)
+        parts.append(audio_path)
 
     if not parts:
         print("error: no audio segments generated", file=sys.stderr)
