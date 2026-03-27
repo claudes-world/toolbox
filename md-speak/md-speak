@@ -36,7 +36,7 @@ VOICES = {
     "heading": os.environ.get("MD_VOICE_HEADING", "en-US-Wavenet-B"),
     "body": os.environ.get("MD_VOICE_BODY", "en-US-Wavenet-J"),
     "special": os.environ.get("MD_VOICE_SPECIAL", "en-US-Neural2-C"),
-    "table": os.environ.get("MD_VOICE_TABLE", "en-US-Neural2-A"),
+    "table": os.environ.get("MD_VOICE_TABLE", "en-US-Neural2-C"),
     "quote": os.environ.get("MD_VOICE_QUOTE", "en-US-Wavenet-D"),
 }
 
@@ -102,35 +102,64 @@ def humanize_url(url: str) -> str:
 
 
 def humanize_filepath(filepath: str) -> str:
-    """Convert file paths to human-readable descriptions."""
+    """Convert file paths and folder paths to human-readable descriptions."""
     p = Path(filepath)
     name = p.name
+    is_dir = filepath.endswith("/") or not p.suffix
 
     # Check if inside a git repo
+    check_dir = str(p) if is_dir else str(p.parent)
     try:
         result = subprocess.run(
-            ["git", "-C", str(p.parent), "rev-parse", "--show-toplevel"],
+            ["git", "-C", check_dir, "rev-parse", "--show-toplevel"],
             capture_output=True, text=True, timeout=2,
         )
         if result.returncode == 0:
             repo_root = Path(result.stdout.strip())
             repo_name = repo_root.name
+            if is_dir:
+                return f"{name} folder in {repo_name} project"
             return f"{name} in {repo_name}"
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
 
-    # Strip /home/claude/
+    # Strip /home/claude/ and convert to spoken form
     s = filepath.replace("/home/claude/", "~/")
     if s.startswith("~/"):
-        parts = Path(s).parts
-        if len(parts) > 2:
-            return f"{name} in {parts[-2]}"
-        return name
+        parts = s.replace("~/", "home/").split("/")
+        parts = [p for p in parts if p]
+        if len(parts) == 1:
+            return parts[0]
+        if len(parts) == 2:
+            return f"{parts[0]} slash {parts[1]}"
+        # For deeper paths, say the last part + context
+        if is_dir:
+            return f"{parts[-1]} folder in {parts[-2]}"
+        return f"{parts[-1]} in {parts[-2]}"
 
     # Just filename + parent
     if p.parent.name:
+        if is_dir:
+            return f"{name} folder in {p.parent.name}"
         return f"{name} in {p.parent.name}"
     return name
+
+
+def humanize_text(text: str) -> str:
+    """Process text to humanize URLs and file paths."""
+    # Humanize URLs
+    text = re.sub(
+        r'https?://[^\s,)>]+',
+        lambda m: f"link to {humanize_url(m.group())}",
+        text,
+    )
+    # Humanize file paths (absolute paths with 2+ components)
+    text = re.sub(
+        r'(?:~|/home/claude)?(?:/[\w._-]+){2,}(?:/[\w._-]+)*',
+        lambda m: humanize_filepath(m.group()),
+        text,
+    )
+    return text
 
 
 def describe_with_ai(content: str, prompt: str) -> str:
@@ -223,12 +252,8 @@ def process_markdown(md_text: str, use_ai: bool = True) -> list[Segment]:
             text = extract_text(children) if children else raw
             if not text:
                 continue
-            # Detect file paths in text
-            text = re.sub(
-                r'(?:/[\w._-]+){2,}(?:/[\w._-]+)*',
-                lambda m: humanize_filepath(m.group()),
-                text,
-            )
+            # Humanize URLs and file paths
+            text = humanize_text(text)
             segments.append(Segment(
                 text=text,
                 voice=VOICES["body"],
@@ -294,7 +319,7 @@ def process_markdown(md_text: str, use_ai: bool = True) -> list[Segment]:
                         cell_texts = []
                         for cell in table_row.get("children", []):
                             if isinstance(cell, dict) and cell.get("type") == "table_cell":
-                                cell_texts.append(extract_text(cell.get("children", [])))
+                                cell_texts.append(humanize_text(extract_text(cell.get("children", []))))
                         if cell_texts:
                             all_rows.append(cell_texts)
 
