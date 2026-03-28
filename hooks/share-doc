@@ -32,30 +32,48 @@ echo "# ${TITLE}" > "$FILEPATH"
 echo "" >> "$FILEPATH"
 echo "$BODY" >> "$FILEPATH"
 
-# Send deep-link inline button via Telegram Bot API
+# Generate audio version
+AUDIOPATH="${FILEPATH%.md}.mp3"
+/home/claude/bin/md-speak --no-describe --out "$AUDIOPATH" "$FILEPATH" 2>/dev/null || true
+
+# Send to Telegram: audio + deep link button
 . "$(dirname "$(readlink -f "$0")")/common.sh" 2>/dev/null || true
 CHAT_ID="${TELEGRAM_CHAT_ID:-}"
 
-if [ -n "$BOTTOKEN" ]; then
+if [ -n "$BOTTOKEN" ] && [ -n "$CHAT_ID" ]; then
   ENCODED_PATH=$(python3 -c "from urllib.parse import quote; print(quote('${FILEPATH}'))")
+  DEEP_URL="https://cpc.claude.do/#file=${ENCODED_PATH}"
 
-  curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
-    -H "Content-Type: application/json" \
-    -d "$(jq -n \
-      --arg cid "$CHAT_ID" \
-      --arg title "📄 ${TITLE}" \
-      --arg url "https://cpc.claude.do/#file=${ENCODED_PATH}" \
-      '{
-        chat_id: $cid,
-        text: $title,
-        reply_markup: {
-          inline_keyboard: [[{
-            text: "Read in Pocket Console",
-            web_app: {url: $url}
-          }]]
-        }
-      }'
-    )" > /dev/null 2>&1 || true
+  if [ -f "$AUDIOPATH" ] && [ -s "$AUDIOPATH" ]; then
+    # Send audio with inline keyboard button for deep link
+    curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendAudio" \
+      -F "chat_id=${CHAT_ID}" \
+      -F "audio=@${AUDIOPATH}" \
+      -F "title=${TITLE}" \
+      -F "caption=📄 ${TITLE}" \
+      -F "reply_markup={\"inline_keyboard\":[[{\"text\":\"Read in Pocket Console\",\"web_app\":{\"url\":\"${DEEP_URL}\"}}]]}" \
+      -F "disable_notification=true" \
+      > /dev/null 2>&1 || true
+  else
+    # Fallback: text message with inline button (no audio)
+    curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
+      -H "Content-Type: application/json" \
+      -d "$(jq -n \
+        --arg cid "$CHAT_ID" \
+        --arg title "📄 ${TITLE}" \
+        --arg url "$DEEP_URL" \
+        '{
+          chat_id: $cid,
+          text: $title,
+          reply_markup: {
+            inline_keyboard: [[{
+              text: "Read in Pocket Console",
+              web_app: {url: $url}
+            }]]
+          }
+        }'
+      )" > /dev/null 2>&1 || true
+  fi
 fi
 
 echo "$FILEPATH"
