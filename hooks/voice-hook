@@ -6,8 +6,19 @@
 
 set -euo pipefail
 
+LOG="/tmp/voice-hook-debug.log"
+
 INPUT=$(cat)
-CONTENT=$(echo "$INPUT" | jq -r '.message.content // ""' 2>/dev/null || true)
+echo "=== $(date) ===" >> "$LOG"
+echo "$INPUT" | head -c 2000 >> "$LOG"
+echo "" >> "$LOG"
+
+# UserPromptSubmit hook receives {prompt: "...", session_id: "...", ...}
+CONTENT=$(echo "$INPUT" | jq -r '.prompt // .message.content // ""' 2>/dev/null || true)
+
+if [ -z "$CONTENT" ]; then
+  CONTENT="$INPUT"
+fi
 
 # Check if this is a voice message
 if ! echo "$CONTENT" | grep -q 'attachment_mime="audio/ogg"'; then

@@ -5,7 +5,7 @@
 set -euo pipefail
 
 INPUT=$(cat)
-CONTENT=$(echo "$INPUT" | jq -r '.message.content // ""' 2>/dev/null || true)
+CONTENT=$(echo "$INPUT" | jq -r '.prompt // .message.content // ""' 2>/dev/null || true)
 
 # Only trigger for Telegram channel messages
 if ! echo "$CONTENT" | grep -q 'source="plugin:telegram'; then
