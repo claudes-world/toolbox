@@ -1,0 +1,117 @@
+#!/home/claude/venvs/transcribe/bin/python3
+"""Generate images using Google's Gemini/Imagen API.
+
+Usage:
+    gen-image "a sunset over mountains"
+    gen-image --out cover.png "album art for a podcast about AI"
+    gen-image --model imagen-3 "photorealistic cat"
+    gen-image --size 512x512 "icon for a chat app"
+
+Models:
+    imagen-3        High quality (default)
+    imagen-3-fast   Lower latency
+    gemini-2.0-flash  Inline with text (experimental)
+
+Requires GOOGLE_AI_API_KEY in ~/.secrets/google-ai.env.
+"""
+
+import argparse
+import base64
+import json
+import os
+import sys
+from pathlib import Path
+from urllib.request import Request, urlopen
+
+SECRETS_FILE = Path.home() / ".secrets" / "google-ai.env"
+
+MODELS = {
+    "imagen-4": "imagen-4.0-generate-001",
+    "imagen-4-fast": "imagen-4.0-fast-generate-001",
+    "imagen-4-ultra": "imagen-4.0-ultra-generate-001",
+}
+
+
+def load_api_key() -> str:
+    key = os.environ.get("GOOGLE_AI_API_KEY")
+    if key:
+        return key
+    if SECRETS_FILE.exists():
+        for line in SECRETS_FILE.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("GOOGLE_AI_API_KEY="):
+                return line.split("=", 1)[1].strip()
+    print("error: GOOGLE_AI_API_KEY not set", file=sys.stderr)
+    sys.exit(1)
+
+
+def generate_image(prompt: str, model: str, api_key: str, aspect_ratio: str = "1:1") -> bytes:
+    """Generate image via Gemini API Imagen endpoint."""
+    model_id = MODELS.get(model, MODELS["imagen-4-fast"])
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:predict?key={api_key}"
+
+    payload = json.dumps({
+        "instances": [{"prompt": prompt}],
+        "parameters": {
+            "sampleCount": 1,
+            "aspectRatio": aspect_ratio,
+        }
+    }).encode()
+
+    req = Request(url, data=payload, headers={"Content-Type": "application/json"})
+
+    try:
+        with urlopen(req) as resp:
+            data = json.loads(resp.read())
+    except Exception as e:
+        if hasattr(e, 'read'):
+            error_body = e.read().decode()
+            print(f"API error: {error_body}", file=sys.stderr)
+        raise
+
+    predictions = data.get("predictions", [])
+    if not predictions:
+        print("error: no image generated", file=sys.stderr)
+        sys.exit(1)
+
+    image_b64 = predictions[0].get("bytesBase64Encoded", "")
+    if not image_b64:
+        print("error: empty image data", file=sys.stderr)
+        sys.exit(1)
+
+    return base64.b64decode(image_b64)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate images via Google AI")
+    parser.add_argument("prompt", help="Image description")
+    parser.add_argument("--out", "-o", type=Path, default=None,
+                        help="Output file (default: generated-<timestamp>.png)")
+    parser.add_argument("--model", "-m", default="imagen-4-fast",
+                        choices=list(MODELS.keys()),
+                        help="Model (default: imagen-4-fast)")
+    parser.add_argument("--aspect", "-a", default="1:1",
+                        help="Aspect ratio: 1:1, 16:9, 9:16, 4:3, 3:4 (default: 1:1)")
+    args = parser.parse_args()
+
+    api_key = load_api_key()
+
+    print(f"Generating with {args.model}...", file=sys.stderr)
+    image_data = generate_image(args.prompt, args.model, api_key, args.aspect)
+
+    if args.out:
+        output = args.out
+    else:
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        slug = args.prompt[:30].lower().replace(" ", "-").replace("/", "")
+        output = Path(f"/tmp/gen-{ts}-{slug}.png")
+
+    output.write_bytes(image_data)
+    print(f"{output}", file=sys.stderr)
+    print(str(output))
+
+
+if __name__ == "__main__":
+    main()
