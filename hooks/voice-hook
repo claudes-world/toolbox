@@ -6,12 +6,7 @@
 
 set -euo pipefail
 
-LOG="/tmp/voice-hook-debug.log"
-
 INPUT=$(cat)
-echo "=== $(date) ===" >> "$LOG"
-echo "$INPUT" | head -c 2000 >> "$LOG"
-echo "" >> "$LOG"
 
 # UserPromptSubmit hook receives {prompt: "...", session_id: "...", ...}
 CONTENT=$(echo "$INPUT" | jq -r '.prompt // .message.content // ""' 2>/dev/null || true)
