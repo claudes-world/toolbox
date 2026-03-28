@@ -10,11 +10,9 @@ echo "=== agent-start $(date) ===" >> /tmp/agent-hooks.log
 echo "$INPUT" | head -c 1000 >> /tmp/agent-hooks.log
 echo "" >> /tmp/agent-hooks.log
 
-# Extract agent info — try multiple field names
-AGENT_DESC=$(echo "$INPUT" | jq -r '.agent_description // .description // .prompt // empty' 2>/dev/null | head -c 80 || true)
-[ -z "$AGENT_DESC" ] && AGENT_DESC="agent"
-AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // .id // empty' 2>/dev/null || true)
-AGENT_MODEL=$(echo "$INPUT" | jq -r '.model // empty' 2>/dev/null || true)
+# Fields available: agent_id, agent_type, session_id, cwd, hook_event_name
+AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null || true)
+AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // "agent"' 2>/dev/null || true)
 TIMESTAMP=$(TZ=America/New_York date '+%-I:%M %p ET')
 
 # Load bot token
@@ -23,11 +21,9 @@ BOTTOKEN=$(grep TELEGRAM_BOT_TOKEN /home/claude/.claude/channels/telegram/.env 2
 
 CHAT_ID="1676859445"
 
-# Build message using printf for real newlines
+# Build message
 NL=$'\n'
-MSG="🚀 <b>Agent started</b>${NL}<i>${AGENT_DESC}</i>"
-[ -n "$AGENT_MODEL" ] && MSG="${MSG}${NL}📦 ${AGENT_MODEL}"
-MSG="${MSG}${NL}🕐 ${TIMESTAMP}"
+MSG="🚀 <b>Agent started</b>${NL}<i>${AGENT_TYPE}</i>${NL}🕐 ${TIMESTAMP}"
 
 # Send to Telegram (silent)
 RESPONSE=$(curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
@@ -49,9 +45,8 @@ if [ -n "$AGENT_ID" ] && [ -n "$MSG_ID" ]; then
   # Add/update entry
   jq --arg id "$AGENT_ID" \
      --arg msg_id "$MSG_ID" \
-     --arg desc "$AGENT_DESC" \
+     --arg type "$AGENT_TYPE" \
      --arg started "$TIMESTAMP" \
-     --arg model "$AGENT_MODEL" \
-     '.[$id] = {msg_id: ($msg_id | tonumber), desc: $desc, started: $started, model: $model, status: "running"}' \
+     '.[$id] = {msg_id: ($msg_id | tonumber), type: $type, started: $started, status: "running"}' \
      "$TRACKER" > "${TRACKER}.tmp" && mv "${TRACKER}.tmp" "$TRACKER"
 fi

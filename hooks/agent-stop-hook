@@ -9,10 +9,10 @@ echo "=== agent-stop $(date) ===" >> /tmp/agent-hooks.log
 echo "$INPUT" | head -c 1000 >> /tmp/agent-hooks.log
 echo "" >> /tmp/agent-hooks.log
 
-# Extract agent info
-AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // .id // empty' 2>/dev/null || true)
-AGENT_DESC=$(echo "$INPUT" | jq -r '.agent_description // .description // empty' 2>/dev/null | head -c 80 || true)
-[ -z "$AGENT_DESC" ] && AGENT_DESC="agent"
+# Fields: agent_id, agent_type, last_assistant_message, agent_transcript_path
+AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null || true)
+AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // "agent"' 2>/dev/null || true)
+LAST_MSG=$(echo "$INPUT" | jq -r '.last_assistant_message // empty' 2>/dev/null | head -c 120 || true)
 TIMESTAMP=$(TZ=America/New_York date '+%-I:%M %p ET')
 
 # Load bot token
@@ -29,7 +29,8 @@ fi
 
 # Build message with real newlines
 NL=$'\n'
-MSG="✅ <b>Agent finished</b>${NL}<i>${AGENT_DESC}</i>${NL}🕐 ${TIMESTAMP}"
+MSG="✅ <b>Agent finished</b>${NL}<i>${AGENT_TYPE}</i>${NL}🕐 ${TIMESTAMP}"
+[ -n "$LAST_MSG" ] && MSG="${MSG}${NL}📝 ${LAST_MSG}"
 
 # Send to Telegram (threaded under start message if possible, silent)
 SEND_DATA=$(jq -n \
