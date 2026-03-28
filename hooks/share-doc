@@ -1,0 +1,61 @@
+#!/bin/bash
+# Write markdown to a timestamped file in ~/claudes-world/tmp/ and send
+# a Telegram deep-link button to open it in Pocket Console.
+#
+# Input: markdown content via stdin (first line = title)
+# Output: file path on stdout
+
+set -euo pipefail
+
+TMPDIR="/home/claude/claudes-world/tmp"
+mkdir -p "$TMPDIR"
+
+INPUT=$(cat)
+
+# First line is the title (strip leading # if present)
+TITLE=$(echo "$INPUT" | head -1 | sed 's/^#* *//')
+BODY=$(echo "$INPUT" | tail -n +2)
+
+if [ -z "$TITLE" ]; then
+  echo "error: no title (first line empty)" >&2
+  exit 1
+fi
+
+# Slugify title for filename
+SLUG=$(echo "$TITLE" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//' | sed 's/-$//' | cut -c1-60)
+TIMESTAMP=$(TZ=America/New_York date +%Y%m%d-%H%M%S)
+FILENAME="${TIMESTAMP}-${SLUG}.md"
+FILEPATH="${TMPDIR}/${FILENAME}"
+
+# Write file — ensure H1 title
+echo "# ${TITLE}" > "$FILEPATH"
+echo "" >> "$FILEPATH"
+echo "$BODY" >> "$FILEPATH"
+
+# Send deep-link inline button via Telegram Bot API
+BOTTOKEN=$(grep TELEGRAM_BOT_TOKEN /home/claude/.claude/channels/telegram/.env 2>/dev/null | cut -d= -f2)
+CHAT_ID="1676859445"
+
+if [ -n "$BOTTOKEN" ]; then
+  ENCODED_PATH=$(python3 -c "from urllib.parse import quote; print(quote('${FILEPATH}'))")
+
+  curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n \
+      --arg cid "$CHAT_ID" \
+      --arg title "📄 ${TITLE}" \
+      --arg url "https://cpc.claude.do/#file=${ENCODED_PATH}" \
+      '{
+        chat_id: $cid,
+        text: $title,
+        reply_markup: {
+          inline_keyboard: [[{
+            text: "Read in Pocket Console",
+            web_app: {url: $url}
+          }]]
+        }
+      }'
+    )" > /dev/null 2>&1 || true
+fi
+
+echo "$FILEPATH"
