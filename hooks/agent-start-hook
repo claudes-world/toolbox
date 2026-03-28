@@ -17,7 +17,7 @@ AGENT_SHORT="${AGENT_ID:0:8}"
 TIMESTAMP=$(TZ=America/New_York date '+%-I:%M %p ET')
 
 HOOK_CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
-. "$(dirname "$0")/common.sh"
+. "$(dirname "$(readlink -f "$0")")/common.sh"
 CHAT_ID="$TELEGRAM_CHAT_ID"
 [ -z "$BOTTOKEN" ] && exit 0
 require_chat_id || exit 0
