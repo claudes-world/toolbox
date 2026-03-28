@@ -1,7 +1,6 @@
 #!/bin/bash
 # Hook script for UserPromptSubmit: handle Actions keyboard button taps
-# Detects action button texts and executes them, sending results via Telegram.
-# Also sends the actions menu when "Actions" is tapped.
+# Shows a one-time reply keyboard for actions, executes them, then restores launcher.
 
 set -euo pipefail
 
@@ -32,31 +31,39 @@ send_msg() {
     -H "Content-Type: application/json" -d "$data" > /dev/null 2>&1 || true
 }
 
-ACTIONS_INLINE='{"inline_keyboard":[[{"text":"📊 Usage (7d)","callback_data":"usage_7d"},{"text":"📊 Usage (30d)","callback_data":"usage_30d"}],[{"text":"📋 Git Status","callback_data":"git_status"},{"text":"🔄 Reload Plugins","callback_data":"reload_plugins"}]]}'
+ACTIONS_MENU='{"keyboard":[[{"text":"📊 Usage (7d)"},{"text":"📊 Usage (30d)"}],[{"text":"📋 Git Status"},{"text":"🔄 Reload Plugins"}]],"resize_keyboard":true,"one_time_keyboard":true}'
+
+LAUNCHER='{"keyboard":[[{"text":"🖥 Console","web_app":{"url":"https://cpc.claude.do/#terminal"}},{"text":"📁 Files","web_app":{"url":"https://cpc.claude.do/#files"}}],[{"text":"📚 Knowledge","web_app":{"url":"https://cpc.claude.do/#files"}},{"text":"⚡ Actions"}]],"resize_keyboard":true,"is_persistent":true}'
 
 case "$CONTENT" in
   *"⚡ Actions"*)
-    send_msg "Choose an action:" "" "$ACTIONS_INLINE"
+    send_msg "Choose an action:" "" "$ACTIONS_MENU"
     echo '{"suppressOutput":true}'
     ;;
-  *"usage_7d"*)
+  *"📊 Usage (7d)"*)
+    send_msg "Fetching 7-day usage..."
     /home/claude/bin/openai-usage --days 7 --telegram 2>/dev/null || send_msg "Failed to fetch usage"
+    send_msg "Done." "" "$LAUNCHER"
     echo '{"suppressOutput":true}'
     ;;
-  *"usage_30d"*)
+  *"📊 Usage (30d)"*)
+    send_msg "Fetching 30-day usage..."
     /home/claude/bin/openai-usage --days 30 --telegram 2>/dev/null || send_msg "Failed to fetch usage"
+    send_msg "Done." "" "$LAUNCHER"
     echo '{"suppressOutput":true}'
     ;;
-  *"git_status"*)
+  *"📋 Git Status"*)
     OUTPUT=$(cd /home/claude/claudes-world && git status --short 2>&1)
     if [ -z "$OUTPUT" ]; then
       OUTPUT="Working tree clean"
     fi
     send_msg "<pre>${OUTPUT}</pre>" "HTML"
+    send_msg "Done." "" "$LAUNCHER"
     echo '{"suppressOutput":true}'
     ;;
-  *"reload_plugins"*)
-    # Let Claude handle this one
+  *"🔄 Reload Plugins"*)
+    # Restore launcher then let Claude handle the reload
+    send_msg "Reloading..." "" "$LAUNCHER"
     exit 0
     ;;
   *)
