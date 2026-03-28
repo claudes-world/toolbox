@@ -484,27 +484,43 @@ def generate_ssml_audio(ssml: str, voice: str, output_path: str):
     Path(output_path).write_bytes(response.audio_content)
 
 
-def add_mp3_metadata(file_path: str, title: str = ""):
-    """Add artist and title metadata to mp3 file."""
-    tagged = file_path + ".tagged.mp3"
-    args = [
-        "ffmpeg", "-i", file_path,
-        "-metadata", "artist=Claude-do",
-        "-metadata", "album=md-speak",
-    ]
+def add_mp3_metadata(
+    file_path: str,
+    title: str = "",
+    artist: str = "Claude.do",
+    album: str = "Claude's World",
+    art_path: str = "",
+):
+    """Add ID3 metadata and album art to an mp3 file using mutagen."""
+    from mutagen.mp3 import MP3
+    from mutagen.id3 import TIT2, TPE1, TALB, APIC
+
+    # Load or create ID3 tags
+    audio = MP3(file_path)
+    if audio.tags is None:
+        audio.add_tags()
+    tags = audio.tags
+
+    if artist:
+        tags["TPE1"] = TPE1(encoding=3, text=artist)
+    if album:
+        tags["TALB"] = TALB(encoding=3, text=album)
     if title:
-        args += ["-metadata", f"title={title}"]
-    # Add album art if available
-    cover = Path.home() / "claudes-world" / "favicon.png"
+        tags["TIT2"] = TIT2(encoding=3, text=title)
+
+    # Embed album art
+    cover = Path(art_path) if art_path else Path.home() / "claudes-world" / "favicon.png"
     if cover.exists():
-        args += ["-i", str(cover), "-map", "0:a", "-map", "1:v",
-                 "-c:v", "png", "-disposition:v", "attached_pic"]
-    args += ["-c:a", "copy", "-y", "-loglevel", "error", tagged]
-    result = subprocess.run(args, capture_output=True, text=True)
-    if result.returncode == 0:
-        Path(tagged).rename(file_path)
-    else:
-        Path(tagged).unlink(missing_ok=True)
+        mime = "image/png" if cover.suffix.lower() == ".png" else "image/jpeg"
+        tags["APIC"] = APIC(
+            encoding=3,
+            mime=mime,
+            type=3,  # Cover (front)
+            desc="Cover",
+            data=cover.read_bytes(),
+        )
+
+    tags.save(file_path, v2_version=3)
 
 
 def stitch_audio(parts: list[str], output_path: str):

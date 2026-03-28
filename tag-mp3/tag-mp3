@@ -1,0 +1,110 @@
+#!/home/claude/venvs/transcribe/bin/python3
+"""Tag an mp3 file with ID3 metadata and optional album art.
+
+Usage:
+    tag-mp3 file.mp3
+    tag-mp3 --artist "Name" file.mp3
+    tag-mp3 --title "My Doc" file.mp3
+    tag-mp3 --album "My Album" file.mp3
+    tag-mp3 --art /path/to/image.png file.mp3
+    tag-mp3 --art-prompt "a sunset" file.mp3   (placeholder for future image gen)
+
+Defaults:
+    artist  = Claude.do
+    album   = Claude's World
+    title   = filename stem (title-cased)
+    art     = ~/claudes-world/favicon.png
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+
+DEFAULT_ARTIST = "Claude.do"
+DEFAULT_ALBUM = "Claude's World"
+DEFAULT_ART = Path.home() / "claudes-world" / "favicon.png"
+
+
+def tag_mp3(
+    file_path: str,
+    title: str = "",
+    artist: str = DEFAULT_ARTIST,
+    album: str = DEFAULT_ALBUM,
+    art_path: str = "",
+):
+    """Write ID3 tags and album art to an mp3 file using mutagen."""
+    from mutagen.mp3 import MP3
+    from mutagen.id3 import TIT2, TPE1, TALB, APIC
+
+    audio = MP3(file_path)
+    if audio.tags is None:
+        audio.add_tags()
+    tags = audio.tags
+
+    if artist:
+        tags["TPE1"] = TPE1(encoding=3, text=artist)
+    if album:
+        tags["TALB"] = TALB(encoding=3, text=album)
+    if title:
+        tags["TIT2"] = TIT2(encoding=3, text=title)
+
+    cover = Path(art_path) if art_path else DEFAULT_ART
+    if cover.exists():
+        mime = "image/png" if cover.suffix.lower() == ".png" else "image/jpeg"
+        tags["APIC"] = APIC(
+            encoding=3,
+            mime=mime,
+            type=3,   # Cover (front)
+            desc="Cover",
+            data=cover.read_bytes(),
+        )
+    elif art_path:
+        print(f"warning: art file not found: {art_path}", file=sys.stderr)
+
+    tags.save(file_path, v2_version=3)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Tag an mp3 file with ID3 metadata and album art")
+    parser.add_argument("file", help="mp3 file to tag")
+    parser.add_argument("--artist", default=DEFAULT_ARTIST, help=f"Artist name (default: {DEFAULT_ARTIST})")
+    parser.add_argument("--album", default=DEFAULT_ALBUM, help=f"Album name (default: {DEFAULT_ALBUM})")
+    parser.add_argument("--title", default="", help="Title (default: filename stem, title-cased)")
+    parser.add_argument("--art", default="", metavar="PATH", help=f"Album art image path (default: {DEFAULT_ART})")
+    parser.add_argument(
+        "--art-prompt", default="", metavar="PROMPT",
+        help="(Placeholder) Describe art to generate — not yet implemented",
+    )
+    args = parser.parse_args()
+
+    mp3 = Path(args.file)
+    if not mp3.exists():
+        print(f"error: file not found: {mp3}", file=sys.stderr)
+        sys.exit(1)
+    if mp3.suffix.lower() != ".mp3":
+        print(f"warning: file does not have .mp3 extension: {mp3}", file=sys.stderr)
+
+    if args.art_prompt:
+        print("note: --art-prompt is not yet implemented; using default cover art", file=sys.stderr)
+
+    title = args.title or mp3.stem.replace("-", " ").replace("_", " ").title()
+
+    tag_mp3(
+        file_path=str(mp3),
+        title=title,
+        artist=args.artist,
+        album=args.album,
+        art_path=args.art,
+    )
+
+    print(f"Tagged: {mp3}")
+    print(f"  title:  {title}")
+    print(f"  artist: {args.artist}")
+    print(f"  album:  {args.album}")
+    art_src = args.art or str(DEFAULT_ART)
+    print(f"  art:    {art_src}")
+
+
+if __name__ == "__main__":
+    main()
