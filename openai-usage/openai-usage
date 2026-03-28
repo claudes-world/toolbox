@@ -1,0 +1,192 @@
+#!/home/claude/venvs/transcribe/bin/python3
+"""Query OpenAI costs and usage, optionally send to Telegram.
+
+Usage:
+    openai-usage                    # print to stdout
+    openai-usage --telegram         # send formatted message to Telegram
+    openai-usage --days 30          # last 30 days instead of 7
+"""
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from urllib.request import Request, urlopen
+from urllib.parse import quote
+
+SECRETS_FILE = Path.home() / ".secrets" / "openai.env"
+TG_ENV = Path.home() / ".claude" / "channels" / "telegram" / ".env"
+CHAT_ID = "1676859445"
+
+
+def load_key(name: str, path: Path) -> str:
+    if name in os.environ:
+        return os.environ[name]
+    if path.exists():
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if line.startswith(f"{name}="):
+                return line.split("=", 1)[1].strip()
+    print(f"error: {name} not set", file=sys.stderr)
+    sys.exit(1)
+
+
+def api_get(url: str, token: str) -> dict:
+    req = Request(url, headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urlopen(req) as resp:
+            return json.loads(resp.read())
+    except Exception as e:
+        if hasattr(e, 'read'):
+            print(f"API error for {url}: {e.read().decode()}", file=sys.stderr)
+        raise
+
+
+def api_get_curl(url: str, token: str) -> dict:
+    """Use curl for requests that need unencoded brackets in query params."""
+    import subprocess
+    result = subprocess.run(
+        ["curl", "-s", url, "-H", f"Authorization: Bearer {token}"],
+        capture_output=True, text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def get_costs(admin_key: str, start_ts: int, end_ts: int) -> list[dict]:
+    """Fetch daily costs from the Costs API with line_item breakdown."""
+    url = (
+        f"https://api.openai.com/v1/organization/costs"
+        f"?start_time={start_ts}&end_time={end_ts}&limit=31&group_by[]=line_item"
+    )
+    data = api_get_curl(url, admin_key)
+    return data.get("data", [])
+
+
+def get_usage(admin_key: str, start_ts: int, end_ts: int, endpoint: str = "completions") -> list[dict]:
+    """Fetch usage with model breakdown."""
+    url = (
+        f"https://api.openai.com/v1/organization/usage/{endpoint}"
+        f"?start_time={start_ts}&end_time={end_ts}&bucket_width=1d&limit=31&group_by[]=model"
+    )
+    data = api_get_curl(url, admin_key)
+    return data.get("data", [])
+
+
+def format_report(days: int, costs_data: list, completions_data: list, audio_data: list) -> str:
+    """Format a human-readable usage report."""
+    # Aggregate costs by line item
+    cost_by_item: dict[str, float] = {}
+    total_cost = 0.0
+
+    for bucket in costs_data:
+        for result in bucket.get("results", []):
+            item = result.get("line_item", "unknown")
+            amount = float(result.get("amount", {}).get("value", 0))
+            cost_by_item[item] = cost_by_item.get(item, 0) + amount
+            total_cost += amount
+
+    # Aggregate completion tokens by model
+    model_tokens: dict[str, dict] = {}
+    total_requests = 0
+
+    for bucket in completions_data:
+        for result in bucket.get("results", []):
+            model = result.get("model", "unknown")
+            if model not in model_tokens:
+                model_tokens[model] = {"input": 0, "output": 0, "requests": 0}
+            model_tokens[model]["input"] += result.get("input_tokens", 0)
+            model_tokens[model]["output"] += result.get("output_tokens", 0)
+            model_tokens[model]["requests"] += result.get("num_model_requests", 0)
+            total_requests += result.get("num_model_requests", 0)
+
+    # Aggregate audio usage
+    audio_requests = 0
+    for bucket in audio_data:
+        for result in bucket.get("results", []):
+            audio_requests += result.get("num_model_requests", 0)
+
+    # Build report
+    lines = []
+    lines.append(f"OpenAI Usage Report — Last {days} days")
+    lines.append(f"{'=' * 35}")
+    lines.append("")
+
+    # Total cost
+    lines.append(f"Total cost: ${total_cost:.4f}")
+    lines.append("")
+
+    # Cost breakdown
+    if cost_by_item:
+        lines.append("Cost by service:")
+        for item, amount in sorted(cost_by_item.items(), key=lambda x: -x[1]):
+            if amount > 0.0001:
+                lines.append(f"  {item}: ${amount:.4f}")
+        lines.append("")
+
+    # Token usage by model
+    if model_tokens:
+        lines.append("Completions by model:")
+        for model, stats in sorted(model_tokens.items(), key=lambda x: -x[1]["requests"]):
+            if stats["requests"] > 0:
+                total_tok = stats["input"] + stats["output"]
+                lines.append(f"  {model}")
+                lines.append(f"    {stats['requests']} requests, {total_tok:,} tokens")
+        lines.append("")
+
+    # Audio
+    if audio_requests > 0:
+        lines.append(f"Audio transcriptions: {audio_requests} requests")
+        lines.append("")
+
+    lines.append(f"Total API requests: {total_requests + audio_requests}")
+
+    return "\n".join(lines)
+
+
+def send_telegram(text: str):
+    """Send message to Telegram."""
+    bot_token = load_key("TELEGRAM_BOT_TOKEN", TG_ENV)
+    payload = json.dumps({
+        "chat_id": CHAT_ID,
+        "text": f"<pre>{text}</pre>",
+        "parse_mode": "HTML",
+    }).encode()
+    req = Request(
+        f"https://api.telegram.org/bot{bot_token}/sendMessage",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    urlopen(req)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="OpenAI usage report")
+    parser.add_argument("--days", type=int, default=7, help="Number of days to report (default: 7)")
+    parser.add_argument("--telegram", action="store_true", help="Send report to Telegram")
+    args = parser.parse_args()
+
+    admin_key = load_key("OPENAI_ADMIN_KEY", SECRETS_FILE)
+
+    now = datetime.now(timezone.utc)
+    end_ts = int(now.timestamp())
+    start_ts = int((now - timedelta(days=args.days)).timestamp())
+
+    print(f"Fetching costs and usage for last {args.days} days...", file=sys.stderr)
+
+    costs = get_costs(admin_key, start_ts, end_ts)
+    completions = get_usage(admin_key, start_ts, end_ts, "completions")
+    audio = get_usage(admin_key, start_ts, end_ts, "audio_transcriptions")
+
+    report = format_report(args.days, costs, completions, audio)
+
+    if args.telegram:
+        send_telegram(report)
+        print("Sent to Telegram", file=sys.stderr)
+    else:
+        print(report)
+
+
+if __name__ == "__main__":
+    main()
