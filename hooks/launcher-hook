@@ -1,0 +1,31 @@
+#!/bin/bash
+# Hook script for SessionStart: restore the web_app keyboard launcher
+# Ensures the Telegram chat always has the launcher keyboard available
+
+set -euo pipefail
+
+BOTTOKEN=$(grep TELEGRAM_BOT_TOKEN /home/claude/.claude/channels/telegram/.env 2>/dev/null | cut -d= -f2)
+[ -z "$BOTTOKEN" ] && exit 0
+
+CHAT_ID="1676859445"
+
+curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"chat_id\": \"${CHAT_ID}\",
+    \"text\": \"Session started.\",
+    \"reply_markup\": {
+      \"keyboard\": [
+        [
+          {\"text\": \"🖥 Console\", \"web_app\": {\"url\": \"https://cpc.claude.do/#terminal\"}},
+          {\"text\": \"📁 Files\", \"web_app\": {\"url\": \"https://cpc.claude.do/#files\"}}
+        ],
+        [
+          {\"text\": \"📚 Knowledge\", \"web_app\": {\"url\": \"https://cpc.claude.do/#files\"}},
+          {\"text\": \"⚡ Actions\"}
+        ]
+      ],
+      \"resize_keyboard\": true,
+      \"is_persistent\": true
+    }
+  }" > /dev/null 2>&1 || true
