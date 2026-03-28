@@ -32,30 +32,22 @@ send_msg() {
     -H "Content-Type: application/json" -d "$data" > /dev/null 2>&1 || true
 }
 
-ACTIONS_MENU='{"keyboard":[[{"text":"📊 OpenAI Usage (7d)"},{"text":"📊 OpenAI Usage (30d)"}],[{"text":"🔄 Reload Plugins"},{"text":"📋 Git Status"}],[{"text":"🔙 Back"}]],"resize_keyboard":true}'
-
-LAUNCHER_MENU='{"keyboard":[[{"text":"🖥 Console","web_app":{"url":"https://cpc.claude.do/#terminal"}},{"text":"📁 Files","web_app":{"url":"https://cpc.claude.do/#files"}}],[{"text":"📚 Knowledge","web_app":{"url":"https://cpc.claude.do/#files"}},{"text":"⚡ Actions"}]],"resize_keyboard":true,"is_persistent":true}'
+ACTIONS_INLINE='{"inline_keyboard":[[{"text":"📊 Usage (7d)","callback_data":"usage_7d"},{"text":"📊 Usage (30d)","callback_data":"usage_30d"}],[{"text":"📋 Git Status","callback_data":"git_status"},{"text":"🔄 Reload Plugins","callback_data":"reload_plugins"}]]}'
 
 case "$CONTENT" in
   *"⚡ Actions"*)
-    send_msg "Choose an action:" "" "$ACTIONS_MENU"
+    send_msg "Choose an action:" "" "$ACTIONS_INLINE"
     echo '{"suppressOutput":true}'
     ;;
-  *"📊 OpenAI Usage (7d)"*)
-    send_msg "Fetching 7-day usage..."
+  *"usage_7d"*)
     /home/claude/bin/openai-usage --days 7 --telegram 2>/dev/null || send_msg "Failed to fetch usage"
     echo '{"suppressOutput":true}'
     ;;
-  *"📊 OpenAI Usage (30d)"*)
-    send_msg "Fetching 30-day usage..."
+  *"usage_30d"*)
     /home/claude/bin/openai-usage --days 30 --telegram 2>/dev/null || send_msg "Failed to fetch usage"
     echo '{"suppressOutput":true}'
     ;;
-  *"🔄 Reload Plugins"*)
-    # This one we want Claude to handle — don't suppress
-    exit 0
-    ;;
-  *"📋 Git Status"*)
+  *"git_status"*)
     OUTPUT=$(cd /home/claude/claudes-world && git status --short 2>&1)
     if [ -z "$OUTPUT" ]; then
       OUTPUT="Working tree clean"
@@ -63,9 +55,9 @@ case "$CONTENT" in
     send_msg "<pre>${OUTPUT}</pre>" "HTML"
     echo '{"suppressOutput":true}'
     ;;
-  *"🔙 Back"*)
-    send_msg "Back to launcher." "" "$LAUNCHER_MENU"
-    echo '{"suppressOutput":true}'
+  *"reload_plugins"*)
+    # Let Claude handle this one
+    exit 0
     ;;
   *)
     exit 0
