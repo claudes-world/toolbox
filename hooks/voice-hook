@@ -6,7 +6,10 @@
 
 set -euo pipefail
 
+LOG="/tmp/voice-hook.log"
 INPUT=$(cat)
+echo "=== $(date) ===" >> "$LOG"
+echo "INPUT: ${INPUT:0:500}" >> "$LOG"
 
 # UserPromptSubmit hook receives {prompt: "...", session_id: "...", ...}
 CONTENT=$(echo "$INPUT" | jq -r '.prompt // .message.content // ""' 2>/dev/null || true)
@@ -17,15 +20,19 @@ fi
 
 # Check if this is a voice message
 if ! echo "$CONTENT" | grep -q 'attachment_mime="audio/ogg"'; then
+  echo "NOT voice message, exiting" >> "$LOG"
   exit 0
 fi
+echo "Voice message detected" >> "$LOG"
 
 # Extract fields from the channel tag attributes
 FILE_ID=$(echo "$CONTENT" | grep -oP 'attachment_file_id="\K[^"]+' || true)
 MSG_ID=$(echo "$CONTENT" | grep -oP 'message_id="\K[^"]+' || true)
 CHAT_ID=$(echo "$CONTENT" | grep -oP 'chat_id="\K[^"]+' || true)
+echo "FILE_ID=$FILE_ID MSG_ID=$MSG_ID CHAT_ID=$CHAT_ID" >> "$LOG"
 
 if [ -z "$FILE_ID" ]; then
+  echo "No FILE_ID, exiting" >> "$LOG"
   exit 0
 fi
 
@@ -47,8 +54,10 @@ FILE_INFO=$(curl -s "https://api.telegram.org/bot${BOTTOKEN}/getFile?file_id=${F
 FILE_PATH=$(echo "$FILE_INFO" | jq -r '.result.file_path // empty')
 
 if [ -z "$FILE_PATH" ]; then
+  echo "No FILE_PATH from Bot API, exiting" >> "$LOG"
   exit 0
 fi
+echo "FILE_PATH=$FILE_PATH" >> "$LOG"
 
 TMPFILE="/tmp/voice-hook-$$.oga"
 
@@ -66,9 +75,12 @@ TRANSCRIPTION=$(/home/claude/bin/transcribe "$TMPFILE" 2>/dev/null || echo "[tra
 # Clean up temp file
 rm -f "$TMPFILE"
 
+echo "TRANSCRIPTION: ${TRANSCRIPTION:0:100}" >> "$LOG"
 if [ -z "$TRANSCRIPTION" ] || [ "$TRANSCRIPTION" = "[transcription failed]" ]; then
+  echo "Transcription failed, exiting" >> "$LOG"
   exit 0
 fi
+echo "Sending Telegram reply and outputting JSON" >> "$LOG"
 
 # Send transcription as a quoted reply to the user on Telegram
 if [ -n "$CHAT_ID" ] && [ -n "$MSG_ID" ]; then
