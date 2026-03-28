@@ -77,8 +77,8 @@ fi
 
 # Send transcription as a quoted reply to the user on Telegram
 if [ -n "$CHAT_ID" ] && [ -n "$MSG_ID" ]; then
-  # Use HTML blockquote for reliability (MarkdownV2 escaping is fragile)
-  QUOTED="<blockquote>${TRANSCRIPTION}</blockquote>"
+  # Use HTML blockquote + italic for reliability (MarkdownV2 escaping is fragile)
+  QUOTED="<blockquote><i>${TRANSCRIPTION}</i></blockquote>"
 
   curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
     -H "Content-Type: application/json" \
