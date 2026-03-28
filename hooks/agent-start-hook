@@ -5,11 +5,17 @@ set -euo pipefail
 INPUT=$(cat)
 TRACKER="/tmp/agent-tracker.json"
 
-# Extract agent info from hook input
-AGENT_DESC=$(echo "$INPUT" | jq -r '.agent_description // .description // "unnamed agent"' 2>/dev/null || echo "unnamed agent")
+# Log raw input so we can see what fields are available
+echo "=== agent-start $(date) ===" >> /tmp/agent-hooks.log
+echo "$INPUT" | head -c 1000 >> /tmp/agent-hooks.log
+echo "" >> /tmp/agent-hooks.log
+
+# Extract agent info — try multiple field names
+AGENT_DESC=$(echo "$INPUT" | jq -r '.agent_description // .description // .prompt // empty' 2>/dev/null | head -c 80 || true)
+[ -z "$AGENT_DESC" ] && AGENT_DESC="agent"
 AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // .id // empty' 2>/dev/null || true)
 AGENT_MODEL=$(echo "$INPUT" | jq -r '.model // empty' 2>/dev/null || true)
-TIMESTAMP=$(TZ=America/New_York date '+%Y-%m-%d %I:%M:%S %p ET')
+TIMESTAMP=$(TZ=America/New_York date '+%-I:%M %p ET')
 
 # Load bot token
 BOTTOKEN=$(grep TELEGRAM_BOT_TOKEN /home/claude/.claude/channels/telegram/.env 2>/dev/null | cut -d= -f2)
@@ -17,11 +23,11 @@ BOTTOKEN=$(grep TELEGRAM_BOT_TOKEN /home/claude/.claude/channels/telegram/.env 2
 
 CHAT_ID="1676859445"
 
-# Build message
-MSG="🚀 <b>Agent started</b>"
-[ -n "$AGENT_DESC" ] && MSG="${MSG}\n<i>${AGENT_DESC}</i>"
-[ -n "$AGENT_MODEL" ] && MSG="${MSG}\n📦 ${AGENT_MODEL}"
-MSG="${MSG}\n🕐 ${TIMESTAMP}"
+# Build message using printf for real newlines
+NL=$'\n'
+MSG="🚀 <b>Agent started</b>${NL}<i>${AGENT_DESC}</i>"
+[ -n "$AGENT_MODEL" ] && MSG="${MSG}${NL}📦 ${AGENT_MODEL}"
+MSG="${MSG}${NL}🕐 ${TIMESTAMP}"
 
 # Send to Telegram (silent)
 RESPONSE=$(curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
