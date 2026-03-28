@@ -8,6 +8,80 @@ INPUT=$(cat 2>/dev/null || true)
 HOOK_CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
 HOOK_CWD="${HOOK_CWD:-$(pwd)}"
 
+# ---------------------------------------------------------------------------
+# Orphaned Telegram plugin cleanup
+# When Claude Code sessions restart, old "bun server.ts" telegram plugin
+# processes can be left running. Multiple polling instances fight over the
+# bot connection and cause messages to be lost.
+#
+# Strategy: find all bun server.ts processes whose command path includes the
+# telegram plugin directory. Walk up the process tree to find the claude
+# ancestor. If that ancestor is dead, the plugin is orphaned — kill it.
+# Never touch processes belonging to the CURRENT session.
+# ---------------------------------------------------------------------------
+_cleanup_telegram_orphans() {
+  local logfile="/tmp/telegram-cleanup.log"
+  local current_session_ppid=$$   # this hook's own PID; its ancestors are alive
+
+  # Find all bun server.ts processes running the telegram plugin
+  local pids
+  pids=$(pgrep -f "bun.*server\.ts" 2>/dev/null || true)
+  [ -z "$pids" ] && return 0
+
+  local ts
+  ts=$(date '+%Y-%m-%d %H:%M:%S')
+
+  for pid in $pids; do
+    # Confirm this bun process is actually the telegram plugin by checking
+    # its working directory or parent command contains "telegram"
+    local parent_pid
+    parent_pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    [ -z "$parent_pid" ] && continue
+
+    local parent_cmd
+    parent_cmd=$(ps -o cmd= -p "$parent_pid" 2>/dev/null || true)
+    if [[ "$parent_cmd" != *"telegram"* ]]; then
+      continue  # not a telegram plugin bun process, skip
+    fi
+
+    # Walk up the tree: bun server.ts -> bun run (telegram) -> claude session
+    # We need the claude ancestor two levels up from bun server.ts
+    local claude_pid
+    claude_pid=$(ps -o ppid= -p "$parent_pid" 2>/dev/null | tr -d ' ')
+    [ -z "$claude_pid" ] && continue
+
+    # Skip if this is the current session's own plugin (ancestor of $$)
+    # Check by seeing if $$ is a descendant of $claude_pid
+    local check_pid=$$
+    local is_current=false
+    for _ in 1 2 3 4 5; do
+      check_pid=$(ps -o ppid= -p "$check_pid" 2>/dev/null | tr -d ' ')
+      [ -z "$check_pid" ] || [ "$check_pid" -le 1 ] && break
+      if [ "$check_pid" -eq "$claude_pid" ]; then
+        is_current=true
+        break
+      fi
+    done
+    if $is_current; then
+      echo "$ts [telegram-cleanup] PID $pid belongs to current session (claude PID $claude_pid), skipping" >> "$logfile"
+      continue
+    fi
+
+    # Check if the claude ancestor is still alive
+    if kill -0 "$claude_pid" 2>/dev/null; then
+      echo "$ts [telegram-cleanup] PID $pid has live claude ancestor (PID $claude_pid), skipping" >> "$logfile"
+      continue
+    fi
+
+    # Claude ancestor is dead — this is an orphan. Kill the whole subtree:
+    # bun server.ts ($pid) and its bun run parent ($parent_pid)
+    echo "$ts [telegram-cleanup] Killing orphaned telegram plugin: bun server.ts PID=$pid (bun run PID=$parent_pid, dead claude PID=$claude_pid)" >> "$logfile"
+    kill "$pid" 2>/dev/null || true
+    kill "$parent_pid" 2>/dev/null || true
+  done
+}
+_cleanup_telegram_orphans
+
 . "$(dirname "$(readlink -f "$0")")/common.sh"
 
 [ -z "$BOTTOKEN" ] && exit 0
