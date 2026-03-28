@@ -1,0 +1,51 @@
+#!/bin/bash
+# Hook for SubagentStop: notify Telegram (threaded) and update tracker
+set -euo pipefail
+
+INPUT=$(cat)
+TRACKER="/tmp/agent-tracker.json"
+
+# Extract agent info
+AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // .id // empty' 2>/dev/null || true)
+AGENT_DESC=$(echo "$INPUT" | jq -r '.agent_description // .description // "agent"' 2>/dev/null || true)
+TIMESTAMP=$(TZ=America/New_York date '+%Y-%m-%d %I:%M:%S %p ET')
+
+# Load bot token
+BOTTOKEN=$(grep TELEGRAM_BOT_TOKEN /home/claude/.claude/channels/telegram/.env 2>/dev/null | cut -d= -f2)
+[ -z "$BOTTOKEN" ] && exit 0
+
+CHAT_ID="1676859445"
+
+# Look up the start message_id from tracker
+REPLY_TO=""
+if [ -n "$AGENT_ID" ] && [ -f "$TRACKER" ]; then
+  REPLY_TO=$(jq -r --arg id "$AGENT_ID" '.[$id].msg_id // empty' "$TRACKER" 2>/dev/null || true)
+  START_TIME=$(jq -r --arg id "$AGENT_ID" '.[$id].started // empty' "$TRACKER" 2>/dev/null || true)
+fi
+
+# Build message
+MSG="✅ <b>Agent finished</b>"
+[ -n "$AGENT_DESC" ] && MSG="${MSG}\n<i>${AGENT_DESC}</i>"
+MSG="${MSG}\n🕐 ${TIMESTAMP}"
+
+# Send to Telegram (threaded under start message if possible, silent)
+SEND_DATA=$(jq -n \
+  --arg cid "$CHAT_ID" \
+  --arg text "$MSG" \
+  '{chat_id: $cid, text: $text, parse_mode: "HTML", disable_notification: true}')
+
+if [ -n "$REPLY_TO" ]; then
+  SEND_DATA=$(echo "$SEND_DATA" | jq --arg rt "$REPLY_TO" '. + {reply_to_message_id: ($rt | tonumber)}')
+fi
+
+curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
+  -H "Content-Type: application/json" \
+  -d "$SEND_DATA" > /dev/null 2>&1 || true
+
+# Update tracker
+if [ -n "$AGENT_ID" ] && [ -f "$TRACKER" ]; then
+  jq --arg id "$AGENT_ID" \
+     --arg finished "$TIMESTAMP" \
+     'if .[$id] then .[$id].status = "done" | .[$id].finished = $finished else . end' \
+     "$TRACKER" > "${TRACKER}.tmp" && mv "${TRACKER}.tmp" "$TRACKER"
+fi

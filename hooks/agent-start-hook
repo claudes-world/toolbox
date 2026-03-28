@@ -1,0 +1,51 @@
+#!/bin/bash
+# Hook for SubagentStart: notify Telegram and track agent in JSON file
+set -euo pipefail
+
+INPUT=$(cat)
+TRACKER="/tmp/agent-tracker.json"
+
+# Extract agent info from hook input
+AGENT_DESC=$(echo "$INPUT" | jq -r '.agent_description // .description // "unnamed agent"' 2>/dev/null || echo "unnamed agent")
+AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // .id // empty' 2>/dev/null || true)
+AGENT_MODEL=$(echo "$INPUT" | jq -r '.model // empty' 2>/dev/null || true)
+TIMESTAMP=$(TZ=America/New_York date '+%Y-%m-%d %I:%M:%S %p ET')
+
+# Load bot token
+BOTTOKEN=$(grep TELEGRAM_BOT_TOKEN /home/claude/.claude/channels/telegram/.env 2>/dev/null | cut -d= -f2)
+[ -z "$BOTTOKEN" ] && exit 0
+
+CHAT_ID="1676859445"
+
+# Build message
+MSG="🚀 <b>Agent started</b>"
+[ -n "$AGENT_DESC" ] && MSG="${MSG}\n<i>${AGENT_DESC}</i>"
+[ -n "$AGENT_MODEL" ] && MSG="${MSG}\n📦 ${AGENT_MODEL}"
+MSG="${MSG}\n🕐 ${TIMESTAMP}"
+
+# Send to Telegram (silent)
+RESPONSE=$(curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
+  -H "Content-Type: application/json" \
+  -d "$(jq -n \
+    --arg cid "$CHAT_ID" \
+    --arg text "$MSG" \
+    '{chat_id: $cid, text: $text, parse_mode: "HTML", disable_notification: true}'
+  )" 2>/dev/null || true)
+
+# Extract message_id from response
+MSG_ID=$(echo "$RESPONSE" | jq -r '.result.message_id // empty' 2>/dev/null || true)
+
+# Update tracker JSON
+if [ -n "$AGENT_ID" ] && [ -n "$MSG_ID" ]; then
+  # Create tracker if it doesn't exist
+  [ ! -f "$TRACKER" ] && echo '{}' > "$TRACKER"
+
+  # Add/update entry
+  jq --arg id "$AGENT_ID" \
+     --arg msg_id "$MSG_ID" \
+     --arg desc "$AGENT_DESC" \
+     --arg started "$TIMESTAMP" \
+     --arg model "$AGENT_MODEL" \
+     '.[$id] = {msg_id: ($msg_id | tonumber), desc: $desc, started: $started, model: $model, status: "running"}' \
+     "$TRACKER" > "${TRACKER}.tmp" && mv "${TRACKER}.tmp" "$TRACKER"
+fi
