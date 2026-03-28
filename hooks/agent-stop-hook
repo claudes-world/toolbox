@@ -12,14 +12,14 @@ echo "" >> /tmp/agent-hooks.log
 # Fields: agent_id, agent_type, last_assistant_message, agent_transcript_path
 AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null || true)
 AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // "agent"' 2>/dev/null || true)
+AGENT_SHORT="${AGENT_ID:0:8}"
 LAST_MSG=$(echo "$INPUT" | jq -r '.last_assistant_message // empty' 2>/dev/null | head -c 120 || true)
 TIMESTAMP=$(TZ=America/New_York date '+%-I:%M %p ET')
 
-# Load bot token
-BOTTOKEN=$(grep TELEGRAM_BOT_TOKEN /home/claude/.claude/channels/telegram/.env 2>/dev/null | cut -d= -f2)
+. "$(dirname "$0")/common.sh"
+CHAT_ID="$TELEGRAM_CHAT_ID"
 [ -z "$BOTTOKEN" ] && exit 0
-
-CHAT_ID="1676859445"
+[ -z "$CHAT_ID" ] && exit 0
 
 # Look up the start message_id from tracker
 REPLY_TO=""
@@ -29,7 +29,7 @@ fi
 
 # Build message with real newlines
 NL=$'\n'
-MSG="✅ <b>Agent finished</b>${NL}<i>${AGENT_TYPE}</i>${NL}🕐 ${TIMESTAMP}"
+MSG="✅ <b>agent-${AGENT_SHORT}</b> finished${NL}🕐 ${TIMESTAMP}"
 [ -n "$LAST_MSG" ] && MSG="${MSG}${NL}📝 ${LAST_MSG}"
 
 # Send to Telegram (threaded under start message if possible, silent)

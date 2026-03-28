@@ -7,7 +7,8 @@ set -euo pipefail
 BOTTOKEN=$(grep TELEGRAM_BOT_TOKEN /home/claude/.claude/channels/telegram/.env 2>/dev/null | cut -d= -f2)
 [ -z "$BOTTOKEN" ] && exit 0
 
-CHAT_ID="1676859445"
+. "$(dirname "$0")/common.sh"
+CHAT_ID="$TELEGRAM_CHAT_ID"
 
 curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
   -H "Content-Type: application/json" \

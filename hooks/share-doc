@@ -33,8 +33,8 @@ echo "" >> "$FILEPATH"
 echo "$BODY" >> "$FILEPATH"
 
 # Send deep-link inline button via Telegram Bot API
-BOTTOKEN=$(grep TELEGRAM_BOT_TOKEN /home/claude/.claude/channels/telegram/.env 2>/dev/null | cut -d= -f2)
-CHAT_ID="1676859445"
+. "$(dirname "$(readlink -f "$0")")/common.sh" 2>/dev/null || true
+CHAT_ID="${TELEGRAM_CHAT_ID:-}"
 
 if [ -n "$BOTTOKEN" ]; then
   ENCODED_PATH=$(python3 -c "from urllib.parse import quote; print(quote('${FILEPATH}'))")

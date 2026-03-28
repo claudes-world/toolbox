@@ -18,7 +18,22 @@ from urllib.parse import quote
 
 SECRETS_FILE = Path.home() / ".secrets" / "openai.env"
 TG_ENV = Path.home() / ".claude" / "channels" / "telegram" / ".env"
-CHAT_ID = "1676859445"
+TG_SECRETS = Path.home() / ".secrets" / "telegram.env"
+
+
+def get_chat_id() -> str:
+    if TG_SECRETS.exists():
+        for line in TG_SECRETS.read_text().splitlines():
+            if line.strip().startswith("TELEGRAM_CHAT_ID="):
+                return line.strip().split("=", 1)[1].strip()
+    # Fallback: first allowed user from access.json
+    import json
+    access = Path.home() / ".claude" / "channels" / "telegram" / "access.json"
+    if access.exists():
+        data = json.loads(access.read_text())
+        if data.get("allowFrom"):
+            return data["allowFrom"][0]
+    return ""
 
 
 def load_key(name: str, path: Path) -> str:
@@ -149,7 +164,7 @@ def send_telegram(text: str):
     """Send message to Telegram."""
     bot_token = load_key("TELEGRAM_BOT_TOKEN", TG_ENV)
     payload = json.dumps({
-        "chat_id": CHAT_ID,
+        "chat_id": get_chat_id(),
         "text": f"<pre>{text}</pre>",
         "parse_mode": "HTML",
     }).encode()
