@@ -93,7 +93,7 @@ if [ -n "$CHAT_ID" ] && [ -n "$MSG_ID" ]; then
       --arg chat_id "$CHAT_ID" \
       --arg reply_to "$MSG_ID" \
       --arg text "$QUOTED" \
-      '{chat_id: $chat_id, reply_to_message_id: ($reply_to | tonumber), text: $text, parse_mode: "HTML"}'
+      '{chat_id: $chat_id, reply_to_message_id: ($reply_to | tonumber), text: $text, parse_mode: "HTML", disable_notification: true}'
     )" > /dev/null 2>&1 || true
 fi
 
