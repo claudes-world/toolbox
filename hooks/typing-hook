@@ -1,0 +1,35 @@
+#!/bin/bash
+# Hook script for UserPromptSubmit: show typing indicator for Telegram messages
+# Fires on every inbound Telegram message so the user knows the session is alive.
+
+set -euo pipefail
+
+INPUT=$(cat)
+CONTENT=$(echo "$INPUT" | jq -r '.message.content // ""' 2>/dev/null || true)
+
+# Only trigger for Telegram channel messages
+if ! echo "$CONTENT" | grep -q 'source="plugin:telegram'; then
+  exit 0
+fi
+
+# Skip voice messages — voice-hook handles those with upload_voice
+if echo "$CONTENT" | grep -q 'attachment_mime="audio/ogg"'; then
+  exit 0
+fi
+
+# Extract chat_id
+CHAT_ID=$(echo "$CONTENT" | grep -oP 'chat_id="\K[^"]+' || true)
+
+if [ -z "$CHAT_ID" ]; then
+  exit 0
+fi
+
+# Load bot token
+BOTTOKEN=$(grep TELEGRAM_BOT_TOKEN /home/claude/.claude/channels/telegram/.env 2>/dev/null | cut -d= -f2)
+if [ -z "$BOTTOKEN" ]; then
+  exit 0
+fi
+
+# Show typing indicator
+curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendChatAction" \
+  -d "chat_id=${CHAT_ID}&action=typing" > /dev/null 2>&1 || true

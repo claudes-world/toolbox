@@ -49,7 +49,7 @@ TMPFILE="/tmp/voice-hook-$$.oga"
 # Show typing indicator while processing
 if [ -n "$CHAT_ID" ]; then
   curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendChatAction" \
-    -d "chat_id=${CHAT_ID}&action=record_voice" > /dev/null 2>&1 || true
+    -d "chat_id=${CHAT_ID}&action=upload_voice" > /dev/null 2>&1 || true
 fi
 
 curl -s "https://api.telegram.org/file/bot${BOTTOKEN}/${FILE_PATH}" -o "$TMPFILE"
