@@ -16,6 +16,7 @@ AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // "agent"' 2>/dev/null || true)
 AGENT_SHORT="${AGENT_ID:0:8}"
 TIMESTAMP=$(TZ=America/New_York date '+%-I:%M %p ET')
 
+HOOK_CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
 . "$(dirname "$0")/common.sh"
 CHAT_ID="$TELEGRAM_CHAT_ID"
 [ -z "$BOTTOKEN" ] && exit 0

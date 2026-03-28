@@ -24,6 +24,12 @@ if [ -z "$CHAT_ID" ]; then
   exit 0
 fi
 
+# Write active chat to project-scoped file
+CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
+if [ -n "$CWD" ] && [ -d "${CWD}/.claude" ]; then
+  echo "$CHAT_ID" > "${CWD}/.claude/.active-chat"
+fi
+
 # Load bot token
 BOTTOKEN=$(grep TELEGRAM_BOT_TOKEN /home/claude/.claude/channels/telegram/.env 2>/dev/null | cut -d= -f2)
 if [ -z "$BOTTOKEN" ]; then
