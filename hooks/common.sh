@@ -1,31 +1,30 @@
 # Shared config for Telegram hooks
 # Source this at the top of hook scripts: . "$(dirname "$0")/common.sh"
 #
-# Reads BOTTOKEN and TELEGRAM_CHAT_ID with this priority:
-# 1. .claude/.active-chat (written by typing-hook per session, project-scoped)
-# 2. TELEGRAM_CHAT_ID env var (from settings.local.json env block)
-# 3. ~/.secrets/telegram.env (global fallback)
-# 4. First allowFrom entry in access.json (last resort)
+# Sets: BOTTOKEN, TELEGRAM_CHAT_ID
+# Caller should set HOOK_CWD before sourcing (from hook JSON .cwd field).
+#
+# If chat ID can't be resolved, sets HOOK_ERROR with a message that
+# should be output as additionalContext so the model can fix it.
 
 # Bot token
 BOTTOKEN=$(grep TELEGRAM_BOT_TOKEN /home/claude/.claude/channels/telegram/.env 2>/dev/null | cut -d= -f2)
 
 # Chat ID — project-scoped active chat first
-# Hooks receive cwd in their JSON input. Caller should extract it before sourcing.
-# Fall back to pwd if not set.
 HOOK_CWD="${HOOK_CWD:-$(pwd)}"
 ACTIVE_CHAT_FILE="${HOOK_CWD}/.claude/.active-chat"
 
 TELEGRAM_CHAT_ID=""
+HOOK_ERROR=""
 
 # 1. Project-scoped active chat (written by typing-hook)
 if [ -f "$ACTIVE_CHAT_FILE" ]; then
   TELEGRAM_CHAT_ID=$(cat "$ACTIVE_CHAT_FILE" 2>/dev/null | tr -d '[:space:]')
 fi
 
-# 2. Env var (from settings.local.json)
-if [ -z "$TELEGRAM_CHAT_ID" ] && [ -n "${TELEGRAM_CHAT_ID_ENV:-}" ]; then
-  TELEGRAM_CHAT_ID="$TELEGRAM_CHAT_ID_ENV"
+# 2. Env var (from settings.local.json env block)
+if [ -z "$TELEGRAM_CHAT_ID" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+  TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID}"
 fi
 
 # 3. Global secrets file
@@ -37,3 +36,23 @@ fi
 if [ -z "$TELEGRAM_CHAT_ID" ]; then
   TELEGRAM_CHAT_ID=$(jq -r '.allowFrom[0] // empty' /home/claude/.claude/channels/telegram/access.json 2>/dev/null || true)
 fi
+
+# Error handling — if still empty, set error message for the model
+if [ -z "$TELEGRAM_CHAT_ID" ]; then
+  HOOK_ERROR="[Hook error] Could not resolve Telegram chat ID. Tried: ${ACTIVE_CHAT_FILE}, TELEGRAM_CHAT_ID env, ~/.secrets/telegram.env, access.json. The user needs to send a Telegram message first so typing-hook can write .claude/.active-chat, or set TELEGRAM_CHAT_ID in .claude/settings.local.json env block."
+fi
+
+# Helper: output error JSON and exit if chat ID is missing
+# Call this in hooks that require chat ID: require_chat_id || exit 0
+require_chat_id() {
+  if [ -n "$HOOK_ERROR" ]; then
+    jq -n --arg err "$HOOK_ERROR" '{
+      hookSpecificOutput: {
+        hookEventName: "UserPromptSubmit",
+        additionalContext: $err
+      }
+    }'
+    return 1
+  fi
+  return 0
+}

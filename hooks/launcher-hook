@@ -1,15 +1,25 @@
 #!/bin/bash
 # Hook script for SessionStart: restore the web_app keyboard launcher
-# Ensures the Telegram chat always has the launcher keyboard available
+# Also initializes .active-chat if it doesn't exist yet.
 
 set -euo pipefail
 
-BOTTOKEN=$(grep TELEGRAM_BOT_TOKEN /home/claude/.claude/channels/telegram/.env 2>/dev/null | cut -d= -f2)
-[ -z "$BOTTOKEN" ] && exit 0
-
+INPUT=$(cat 2>/dev/null || true)
+HOOK_CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
 HOOK_CWD="${HOOK_CWD:-$(pwd)}"
+
 . "$(dirname "$0")/common.sh"
+
+[ -z "$BOTTOKEN" ] && exit 0
+[ -z "$TELEGRAM_CHAT_ID" ] && exit 0
+
 CHAT_ID="$TELEGRAM_CHAT_ID"
+
+# Initialize .active-chat if it doesn't exist
+ACTIVE_CHAT="${HOOK_CWD}/.claude/.active-chat"
+if [ ! -f "$ACTIVE_CHAT" ] && [ -d "${HOOK_CWD}/.claude" ]; then
+  echo "$CHAT_ID" > "$ACTIVE_CHAT"
+fi
 
 curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
   -H "Content-Type: application/json" \

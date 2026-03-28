@@ -20,7 +20,7 @@ HOOK_CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
 . "$(dirname "$0")/common.sh"
 CHAT_ID="$TELEGRAM_CHAT_ID"
 [ -z "$BOTTOKEN" ] && exit 0
-[ -z "$CHAT_ID" ] && exit 0
+require_chat_id || exit 0
 
 # Look up the start message_id from tracker
 REPLY_TO=""
