@@ -1,0 +1,217 @@
+#!/bin/bash
+# ports — dynamic port map of all listening TCP services on this VPS
+# Shows port, process name, PID, tunnel hostname, and systemd status
+
+CLOUDFLARED_CONFIG="/etc/cloudflared/config.yml"
+
+# ── color setup ────────────────────────────────────────────────────────────────
+if [ -t 1 ]; then
+  GREEN='\033[0;32m'
+  RED='\033[0;31m'
+  YELLOW='\033[0;33m'
+  CYAN='\033[0;36m'
+  BOLD='\033[1m'
+  DIM='\033[2m'
+  RESET='\033[0m'
+else
+  GREEN='' RED='' YELLOW='' CYAN='' BOLD='' DIM='' RESET=''
+fi
+
+# ── parse cloudflared config: build port→hostname map ─────────────────────────
+declare -A TUNNEL_MAP
+
+if [ -r "$CLOUDFLARED_CONFIG" ]; then
+  current_host=""
+  while IFS= read -r line; do
+    # Match hostname lines: "  - hostname: foo.bar.com"
+    if [[ "$line" =~ ^[[:space:]]*-[[:space:]]*hostname:[[:space:]]*(.+)$ ]]; then
+      current_host="${BASH_REMATCH[1]}"
+      current_host="${current_host// /}"
+    fi
+    # Match service lines: "    service: http://127.0.0.1:PORT"
+    # Also handle httpHostHeader routing (port 18080 serves multiple hosts via Caddy)
+    if [[ "$line" =~ service:[[:space:]]*http[s]?://[^:]+:([0-9]+) ]]; then
+      port="${BASH_REMATCH[1]}"
+      if [ -n "$current_host" ] && [ -n "$port" ]; then
+        # For ports already mapped (e.g. 18080 shared by multiple vhosts), append
+        if [ -n "${TUNNEL_MAP[$port]:-}" ]; then
+          TUNNEL_MAP["$port"]="${TUNNEL_MAP[$port]}, $current_host"
+        else
+          TUNNEL_MAP["$port"]="$current_host"
+        fi
+        current_host=""
+      fi
+    fi
+  done < "$CLOUDFLARED_CONFIG"
+fi
+
+# ── build PID→systemd service map ─────────────────────────────────────────────
+declare -A PID_TO_SERVICE
+
+while IFS= read -r line; do
+  unit=$(echo "$line" | awk '{print $1}')
+  [ -z "$unit" ] && continue
+  pid=$(systemctl show "$unit" --property=MainPID --value 2>/dev/null)
+  [ -z "$pid" ] || [ "$pid" = "0" ] && continue
+  svc_name="${unit%.service}"
+  PID_TO_SERVICE["$pid"]="$svc_name"
+done < <(systemctl list-units --type=service --no-pager --no-legend 2>/dev/null | awk '{print $1}')
+
+# ── helper: get friendly process label ────────────────────────────────────────
+get_process_label() {
+  local pid="$1"
+  local comm="$2"
+
+  # If this PID belongs to a known systemd service, use a friendly label
+  local svc="${PID_TO_SERVICE[$pid]:-}"
+
+  if [ -n "$svc" ]; then
+    case "$svc" in
+      companion)                          echo "bun (companion)" ;;
+      t3code-prod)                        echo "node (t3code-prod)" ;;
+      t3code-dev-server)                  echo "bun (t3code-dev)" ;;
+      t3code-dev-web)                     echo "bun (t3code-web)" ;;
+      do-box-control-panel-dev-server)    echo "node (cpc-server)" ;;
+      do-box-control-panel-dev-web)       echo "node (cpc-web)" ;;
+      glances)                            echo "glances" ;;
+      caddy)                              echo "caddy" ;;
+      cloudflared)                        echo "cloudflared" ;;
+      ssh|sshd)                           echo "sshd" ;;
+      tailscaled)                         echo "tailscaled" ;;
+      docker|containerd)                  echo "$comm ($svc)" ;;
+      *)                                  echo "$comm ($svc)" ;;
+    esac
+    return
+  fi
+
+  # Fall back to cmdline-based detection for non-systemd processes
+  local cmdline
+  cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
+
+  case "$cmdline" in
+    *the-companion*)             echo "bun (companion)" ;;
+    cloudflared\ *)              echo "cloudflared (goalserve)" ;;
+    *cloudflared*)               echo "cloudflared (goalserve)" ;;
+    *goalserve*replay*)          echo "uvicorn (goalserve)" ;;
+    *goalserve*ingest*)          echo "node (goalserve-ingest)" ;;
+    *goalserve*demo*)            echo "node (goalserve-pwa)" ;;
+    *do-box-control-panel/*)     echo "node (cpc-server)" ;;
+    *claude-pocket-console*)     echo "node (cpc)" ;;
+    *t3code*server*)             echo "bun (t3code-dev)" ;;
+    *t3code*web*)                echo "bun (t3code-web)" ;;
+    *codex*)                     echo "codex" ;;
+    *uvicorn*)                   echo "uvicorn" ;;
+    *docker-proxy*)              echo "docker-proxy" ;;
+    *)                           echo "$comm" ;;
+  esac
+}
+
+# ── get systemd status for a PID ──────────────────────────────────────────────
+get_status() {
+  local pid="$1"
+  local svc="${PID_TO_SERVICE[$pid]:-}"
+  if [ -n "$svc" ]; then
+    systemctl is-active "${svc}.service" 2>/dev/null || echo "unknown"
+  else
+    if [ -d "/proc/$pid" ]; then
+      echo "active"
+    else
+      echo "unknown"
+    fi
+  fi
+}
+
+# ── collect data — use sudo ss to see process info for all users ───────────────
+declare -A SEEN_PORTS
+declare -a ROWS
+
+while IFS= read -r line; do
+  [[ "$line" =~ ^LISTEN ]] || continue
+
+  # Extract local address:port (field 4)
+  addr_port=$(echo "$line" | awk '{print $4}')
+  port=$(echo "$addr_port" | rev | cut -d: -f1 | rev)
+
+  # Deduplicate — same port may appear for both IPv4 and IPv6
+  [ -n "${SEEN_PORTS[$port]:-}" ] && continue
+  SEEN_PORTS["$port"]=1
+
+  # Extract process info: users:(("name",pid=NNN,fd=NNN))
+  proc_field=$(echo "$line" | grep -oP 'users:\(\("[^"]+",pid=\d+[^)]*\)\)' || true)
+
+  if [ -z "$proc_field" ]; then
+    proc_name="(unknown)"
+    pid="-"
+  else
+    proc_name=$(echo "$proc_field" | grep -oP '"\K[^"]+' | head -1)
+    pid=$(echo "$proc_field" | grep -oP 'pid=\K\d+' | head -1)
+  fi
+
+  # Get friendly label and status
+  if [ "$pid" != "-" ] && [ -d "/proc/$pid" ]; then
+    label=$(get_process_label "$pid" "$proc_name")
+    status=$(get_status "$pid")
+  else
+    label="$proc_name"
+    status="unknown"
+  fi
+
+  # Tunnel hostname
+  tunnel="${TUNNEL_MAP[$port]:-}"
+  [ -z "$tunnel" ] && tunnel="-"
+
+  ROWS+=("$port|$label|$pid|$tunnel|$status")
+done < <(sudo ss -tlnp 2>/dev/null)
+
+# ── sort by port number ───────────────────────────────────────────────────────
+IFS=$'\n' sorted=($(printf '%s\n' "${ROWS[@]}" | sort -t'|' -k1 -n))
+unset IFS
+
+# ── print table ───────────────────────────────────────────────────────────────
+printf "${BOLD}%-7s %-24s %-10s %-30s %s${RESET}\n" \
+  "PORT" "PROCESS" "PID" "TUNNEL" "STATUS"
+printf "${DIM}%s${RESET}\n" "$(printf '─%.0s' {1..82})"
+
+for row in "${sorted[@]}"; do
+  IFS='|' read -r port label pid tunnel status <<< "$row"
+
+  # Color the status
+  case "$status" in
+    active|running)
+      status_str="${GREEN}${status}${RESET}" ;;
+    inactive|failed|dead)
+      status_str="${RED}${status}${RESET}" ;;
+    activating|deactivating)
+      status_str="${YELLOW}${status}${RESET}" ;;
+    *)
+      status_str="${DIM}${status}${RESET}" ;;
+  esac
+
+  # Color tunnel hostname — truncate if too long for column
+  if [ "$tunnel" = "-" ]; then
+    tunnel_disp="${DIM}-${RESET}"
+    tunnel_len=1
+  else
+    # If multiple hosts, abbreviate after first
+    first_host=$(echo "$tunnel" | cut -d, -f1)
+    rest=$(echo "$tunnel" | cut -s -d, -f2-)
+    if [ -n "$rest" ]; then
+      count=$(echo "$tunnel" | tr -cd ',' | wc -c)
+      tunnel_short="${first_host} +${count}"
+    else
+      tunnel_short="$first_host"
+    fi
+    tunnel_disp="${CYAN}${tunnel_short}${RESET}"
+    tunnel_len=${#tunnel_short}
+  fi
+
+  # Pad tunnel field to 28 chars (accounting for invisible color escapes)
+  pad=$(( 28 - tunnel_len ))
+  [ $pad -lt 0 ] && pad=0
+  pad_str=$(printf '%*s' "$pad" '')
+
+  printf "%-7s %-24s %-10s %b%s %b\n" \
+    "$port" "$label" "$pid" "$tunnel_disp" "$pad_str" "$status_str"
+done
+
+printf "\n"
