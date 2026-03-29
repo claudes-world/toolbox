@@ -13,7 +13,7 @@ Defaults:
     artist  = Claude.do
     album   = Claude's World
     title   = filename stem (title-cased)
-    art     = ~/claudes-world/favicon.png
+    art     = toolbox/default-cover.png
 """
 
 import argparse
@@ -23,7 +23,7 @@ from pathlib import Path
 
 DEFAULT_ARTIST = "Claude.do"
 DEFAULT_ALBUM = "Claude's World"
-DEFAULT_ART = Path.home() / "claudes-world" / "favicon.png"
+DEFAULT_ART = Path(__file__).resolve().parent.parent / "default-cover.png"
 
 
 def tag_mp3(

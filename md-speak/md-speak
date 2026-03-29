@@ -509,7 +509,7 @@ def add_mp3_metadata(
         tags["TIT2"] = TIT2(encoding=3, text=title)
 
     # Embed album art
-    cover = Path(art_path) if art_path else Path.home() / "claudes-world" / "favicon.png"
+    cover = Path(art_path) if art_path else Path(__file__).resolve().parent.parent / "default-cover.png"
     if cover.exists():
         mime = "image/png" if cover.suffix.lower() == ".png" else "image/jpeg"
         tags["APIC"] = APIC(
