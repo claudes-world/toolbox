@@ -53,7 +53,8 @@ if [ -n "$BOTTOKEN" ] && [ -n "$CHAT_ID" ]; then
       -F "caption=📄 ${TITLE}" \
       -F "reply_markup={\"inline_keyboard\":[[{\"text\":\"Read in Pocket Console\",\"web_app\":{\"url\":\"${DEEP_URL}\"}}]]}" \
       -F "disable_notification=true" \
-      > /dev/null 2>&1 || true
+      > "$TMPDIR/.last-send-response.json" 2>&1 || true
+    MSG_ID=$(jq -r '.result.message_id // empty' "$TMPDIR/.last-send-response.json" 2>/dev/null || true)
   else
     # Fallback: text message with inline button (no audio)
     curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
@@ -72,8 +73,17 @@ if [ -n "$BOTTOKEN" ] && [ -n "$CHAT_ID" ]; then
             }]]
           }
         }'
-      )" > /dev/null 2>&1 || true
+      )" > "$TMPDIR/.last-send-response.json" 2>&1 || true
+    MSG_ID=$(jq -r '.result.message_id // empty' "$TMPDIR/.last-send-response.json" 2>/dev/null || true)
   fi
+
+  # Auto-pin the shared document message
+  if [ -n "$MSG_ID" ]; then
+    curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/pinChatMessage" \
+      -d "chat_id=${CHAT_ID}&message_id=${MSG_ID}&disable_notification=true" \
+      > /dev/null 2>&1 || true
+  fi
+  rm -f "$TMPDIR/.last-send-response.json"
 fi
 
 echo "$FILEPATH"
