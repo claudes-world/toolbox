@@ -35,7 +35,7 @@ send_msg() {
 
 ACTIONS_MENU='{"keyboard":[[{"text":"📊 Usage (7d)"},{"text":"📊 Usage (30d)"}],[{"text":"📋 Git Status"},{"text":"🔄 Reload Plugins"}]],"resize_keyboard":true,"one_time_keyboard":true}'
 
-LAUNCHER='{"keyboard":[[{"text":"🖥 Console","web_app":{"url":"https://cpc.claude.do/#terminal"}},{"text":"📁 Files","web_app":{"url":"https://cpc.claude.do/#files"}}],[{"text":"📚 Knowledge","web_app":{"url":"https://cpc.claude.do/#files"}},{"text":"⚡ Actions"}]],"resize_keyboard":true,"is_persistent":true}'
+LAUNCHER='{"keyboard":[[{"text":"🖥 Console","web_app":{"url":"https://cpc.claude.do/#terminal"}},{"text":"📁 Files","web_app":{"url":"https://cpc.claude.do/#files"}}],[{"text":"📚 Knowledge","web_app":{"url":"https://cpc.claude.do/#files"}},{"text":"⚡ Actions"}],[{"text":"🧪 Dev Console","web_app":{"url":"https://cpc-dev.claude.do/#terminal"}}]],"resize_keyboard":true,"is_persistent":true}'
 
 case "$CONTENT" in
   *"⚡ Actions"*)
