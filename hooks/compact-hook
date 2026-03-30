@@ -1,0 +1,27 @@
+#!/bin/bash
+# Hook for PreCompact and PostCompact: notify user on Telegram
+# Matcher should be set to handle both "manual" and "auto"
+
+set -euo pipefail
+
+INPUT=$(cat)
+EVENT=$(echo "$INPUT" | jq -r '.hook_event_name // empty' 2>/dev/null || true)
+MATCHER=$(echo "$INPUT" | jq -r '.matcher // empty' 2>/dev/null || true)
+HOOK_CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
+
+. "$(dirname "$(readlink -f "$0")")/common.sh" 2>/dev/null || true
+CHAT_ID="${TELEGRAM_CHAT_ID:-}"
+
+[ -z "$BOTTOKEN" ] && exit 0
+[ -z "$CHAT_ID" ] && exit 0
+
+if [[ "$EVENT" == *"PreCompact"* ]] || [[ "$MATCHER" == *"manual"* && -z "$EVENT" ]]; then
+  # Could be PreCompact
+  curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
+    -d "chat_id=${CHAT_ID}&text=🗜 Compacting context...&disable_notification=true" \
+    > /dev/null 2>&1 || true
+elif [[ "$EVENT" == *"PostCompact"* ]]; then
+  curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
+    -d "chat_id=${CHAT_ID}&text=✅ Context compacted.&disable_notification=true" \
+    > /dev/null 2>&1 || true
+fi
