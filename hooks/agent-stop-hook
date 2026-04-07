@@ -13,7 +13,7 @@ echo "" >> /tmp/agent-hooks.log
 AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null || true)
 AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // "agent"' 2>/dev/null || true)
 AGENT_SHORT="${AGENT_ID:0:8}"
-LAST_MSG=$(echo "$INPUT" | jq -r '.last_assistant_message // empty' 2>/dev/null | head -c 120 || true)
+LAST_MSG=$(echo "$INPUT" | jq -r '.last_assistant_message // empty' 2>/dev/null | head -c 2000 || true)
 TIMESTAMP=$(TZ=America/New_York date '+%-I:%M %p ET')
 
 HOOK_CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
@@ -31,7 +31,7 @@ fi
 # Build message with real newlines
 NL=$'\n'
 MSG="✅ <b>agent-${AGENT_SHORT}</b> finished${NL}🕐 ${TIMESTAMP}"
-[ -n "$LAST_MSG" ] && MSG="${MSG}${NL}📝 ${LAST_MSG}"
+[ -n "$LAST_MSG" ] && MSG="${MSG}${NL}<blockquote expandable>📝 ${LAST_MSG}</blockquote>"
 
 # Send to Telegram (threaded under start message if possible, silent)
 SEND_DATA=$(jq -n \

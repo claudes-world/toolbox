@@ -590,6 +590,14 @@ def main():
         print("error: no audio segments generated", file=sys.stderr)
         sys.exit(1)
 
+    # Generate "end of document" closing line in the female voice
+    doc_name = md_path.stem.replace("-", " ").replace("_", " ").title()
+    end_ssml = f'<speak><break time="800ms"/><p>{escape_ssml("This is the end of: " + doc_name)}</p></speak>'
+    end_audio_path = f"{tmpdir}/end-segment.mp3"
+    print(f"  [END] {VOICES['special']}: This is the end of: {doc_name}", file=sys.stderr)
+    generate_ssml_audio(end_ssml, VOICES["special"], end_audio_path)
+    parts.append(end_audio_path)
+
     print(f"Stitching {len(parts)} audio parts...", file=sys.stderr)
     stitch_audio(parts, str(output))
 
