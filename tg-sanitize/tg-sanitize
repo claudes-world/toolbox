@@ -1,0 +1,115 @@
+#!/usr/bin/env node
+/**
+ * tg-sanitize — Telegram MarkdownV2 sanitizer
+ *
+ * Escapes special characters per Telegram's MarkdownV2 rules.
+ * Preserves intentional formatting (bold, italic, code, links).
+ *
+ * Usage:
+ *   tg-sanitize "Hello world! This has (special) chars."
+ *   echo "text with ~tildes~ and dots." | tg-sanitize
+ *   tg-sanitize --raw "Escape EVERYTHING including *bold*"
+ *   tg-sanitize --keep-format "Keep *bold* and _italic_ but escape the rest"
+ *
+ * Modes:
+ *   --raw          Escape every special char (for plain text injection)
+ *   --keep-format  Preserve *bold*, _italic_, `code`, [links](url)  (default)
+ *
+ * Node.js library usage:
+ *   const { sanitize, sanitizeRaw } = require('./tg-sanitize');
+ *   sanitize("Hello (world)!")     // "Hello \\(world\\)\\!"
+ *   sanitizeRaw("*bold* text!")    // "\\*bold\\* text\\!"
+ */
+
+// Characters that must be escaped in MarkdownV2 (per Telegram docs)
+// _ * [ ] ( ) ~ ` > # + - = | { } . !
+const SPECIAL = /[_*\[\]()~`>#\+\-=|{}.!\\]/g;
+
+/**
+ * Escape ALL special chars — for plain text that should have zero formatting.
+ */
+function sanitizeRaw(text) {
+  return text.replace(SPECIAL, '\\$&');
+}
+
+/**
+ * Escape special chars while preserving intentional MarkdownV2 formatting:
+ * - *bold*, _italic_, __underline__, ~strikethrough~, ||spoiler||
+ * - `inline code`, ```pre blocks```
+ * - [link text](url)
+ *
+ * Strategy: temporarily replace known formatting with placeholders,
+ * escape everything else, then restore formatting.
+ */
+function sanitize(text) {
+  const placeholders = [];
+  let idx = 0;
+
+  function hold(match) {
+    const key = `\x00PH${idx++}\x00`;
+    placeholders.push({ key, val: match });
+    return key;
+  }
+
+  let t = text;
+
+  // Preserve code blocks first (they contain raw text)
+  t = t.replace(/```[\s\S]*?```/g, hold);
+  t = t.replace(/`[^`]+`/g, hold);
+
+  // Preserve links [text](url)
+  t = t.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, label, url) => {
+    // Escape special chars inside the label, but not the structural brackets
+    const safeLabel = label.replace(SPECIAL, '\\$&');
+    const safeUrl = url; // URLs don't need escaping inside ()
+    return hold(`[${safeLabel}](${safeUrl})`);
+  });
+
+  // Preserve bold **text** and *text*
+  t = t.replace(/\*\*([^*]+)\*\*/g, (m, inner) => hold(`**${inner.replace(SPECIAL, '\\$&')}**`));
+  t = t.replace(/\*([^*]+)\*/g, (m, inner) => hold(`*${inner.replace(SPECIAL, '\\$&')}*`));
+
+  // Preserve italic _text_ (but not __underline__ — already caught by bold)
+  t = t.replace(/__([^_]+)__/g, (m, inner) => hold(`__${inner.replace(SPECIAL, '\\$&')}__`));
+  t = t.replace(/_([^_]+)_/g, (m, inner) => hold(`_${inner.replace(SPECIAL, '\\$&')}_`));
+
+  // Preserve strikethrough ~text~
+  t = t.replace(/~([^~]+)~/g, (m, inner) => hold(`~${inner.replace(SPECIAL, '\\$&')}~`));
+
+  // Preserve spoiler ||text||
+  t = t.replace(/\|\|([^|]+)\|\|/g, (m, inner) => hold(`||${inner.replace(SPECIAL, '\\$&')}||`));
+
+  // Now escape everything remaining
+  t = t.replace(SPECIAL, '\\$&');
+
+  // Restore placeholders
+  for (const { key, val } of placeholders) {
+    t = t.replace(key, val);
+  }
+
+  return t;
+}
+
+// --- CLI ---
+if (require.main === module) {
+  const args = process.argv.slice(2);
+  const raw = args.includes('--raw');
+  const filtered = args.filter(a => !a.startsWith('--'));
+
+  // Read from args or stdin
+  if (filtered.length > 0) {
+    const input = filtered.join(' ');
+    process.stdout.write(raw ? sanitizeRaw(input) : sanitize(input));
+    if (process.stdout.isTTY) process.stdout.write('\n');
+  } else {
+    let buf = '';
+    process.stdin.setEncoding('utf-8');
+    process.stdin.on('data', chunk => buf += chunk);
+    process.stdin.on('end', () => {
+      process.stdout.write(raw ? sanitizeRaw(buf) : sanitize(buf));
+    });
+  }
+}
+
+// Exports for use as a library
+module.exports = { sanitize, sanitizeRaw };
