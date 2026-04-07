@@ -15,6 +15,13 @@ HOOK_CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
 . "$(dirname "$(readlink -f "$0")")/common.sh"
 CHAT_ID="$TELEGRAM_CHAT_ID"
 
+# Generate a fresh JWT for the Voice button web_app URL (matches launcher-hook).
+JWT_SECRET="${BOTTOKEN}"
+JWT_HEADER=$(echo -n '{"alg":"HS256","typ":"JWT"}' | base64 -w0 | tr '+/' '-_' | tr -d '=')
+JWT_PAYLOAD=$(echo -n "{\"sub\":\"${CHAT_ID}\",\"iat\":$(date +%s),\"exp\":$(($(date +%s) + 604800))}" | base64 -w0 | tr '+/' '-_' | tr -d '=')
+JWT_SIGNATURE=$(echo -n "${JWT_HEADER}.${JWT_PAYLOAD}" | openssl dgst -sha256 -hmac "${JWT_SECRET}" -binary | base64 -w0 | tr '+/' '-_' | tr -d '=')
+CPC_AUTH_TOKEN="${JWT_HEADER}.${JWT_PAYLOAD}.${JWT_SIGNATURE}"
+
 send_msg() {
   local text="$1"
   local parse_mode="${2:-}"
@@ -35,7 +42,10 @@ send_msg() {
 
 ACTIONS_MENU='{"keyboard":[[{"text":"📊 Usage (7d)"},{"text":"📊 Usage (30d)"}],[{"text":"📋 Git Status"},{"text":"🔄 Reload Plugins"}],[{"text":"🔌 Fix Telegram"}]],"resize_keyboard":true,"one_time_keyboard":true}'
 
-LAUNCHER='{"keyboard":[[{"text":"🖥 Console","web_app":{"url":"https://cpc.claude.do/#terminal"}},{"text":"📁 Files","web_app":{"url":"https://cpc.claude.do/#files"}}],[{"text":"📚 Knowledge","web_app":{"url":"https://cpc.claude.do/#files"}},{"text":"⚡ Actions"},{"text":"📝 Scrum"}],[{"text":"🧪 Dev Console","web_app":{"url":"https://cpc-dev.claude.do/#terminal"}}]],"resize_keyboard":true,"is_persistent":true}'
+# LAUNCHER must stay in sync with hooks/launcher-hook (4-button row).
+# See toolbox issue #7. JWT-bearing URL for Voice button is generated above.
+# Develop button uses t.me/claude_do_bot/dev (BotFather direct link).
+LAUNCHER="{\"keyboard\":[[{\"text\":\"⚡️\\nActions\"},{\"text\":\"📱\\nDevelop\",\"web_app\":{\"url\":\"https://t.me/claude_do_bot/dev\"}},{\"text\":\"🎙️\\nVoice\",\"web_app\":{\"url\":\"https://cpc.claude.do/#voice&token=${CPC_AUTH_TOKEN}\"}},{\"text\":\"📝\\nScrum\"}]],\"resize_keyboard\":true,\"is_persistent\":true}"
 
 case "$CONTENT" in
   *"⚡ Actions"*|*"⚡️Actions"*)
