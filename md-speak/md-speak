@@ -43,9 +43,9 @@ VOICES = {
 # --- Pauses (seconds) ---
 
 PAUSE = {
-    "h1_before": 1.5,
-    "h2_before": 1.0,
-    "h3_before": 0.5,
+    "h1_before": 1.0,
+    "h2_before": 0.7,
+    "h3_before": 0.35,
     "after_heading": 0.5,
     "between_paragraphs": 0.6,
     "between_list_items": 0.3,
@@ -468,7 +468,7 @@ def get_tts_client():
     return texttospeech.TextToSpeechClient(), texttospeech
 
 
-def generate_ssml_audio(ssml: str, voice: str, output_path: str):
+def generate_ssml_audio(ssml: str, voice: str, output_path: str, rate: float = 0.95):
     """Generate audio from SSML via Google Cloud TTS."""
     client, tts = get_tts_client()
     lang_code = "-".join(voice.split("-")[:2])
@@ -478,7 +478,7 @@ def generate_ssml_audio(ssml: str, voice: str, output_path: str):
         voice=tts.VoiceSelectionParams(language_code=lang_code, name=voice),
         audio_config=tts.AudioConfig(
             audio_encoding=tts.AudioEncoding.MP3,
-            speaking_rate=0.95,
+            speaking_rate=rate,
         ),
     )
     Path(output_path).write_bytes(response.audio_content)
@@ -583,7 +583,8 @@ def main():
         char_count += text_chars
         preview = re.sub(r'<[^>]+>', '', ssml).strip()[:60]
         print(f"  [{i+1}/{len(batches)}] {voice}: {preview}{'...' if len(preview) >= 60 else ''}", file=sys.stderr)
-        generate_ssml_audio(ssml, voice, audio_path)
+        rate = 1.05 if voice == VOICES["body"] else 0.95
+        generate_ssml_audio(ssml, voice, audio_path, rate=rate)
         parts.append(audio_path)
 
     if not parts:
