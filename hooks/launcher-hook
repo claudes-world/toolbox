@@ -102,13 +102,17 @@ JWT_PAYLOAD=$(echo -n "{\"sub\":\"${CHAT_ID}\",\"iat\":$(date +%s),\"exp\":$(($(
 JWT_SIGNATURE=$(echo -n "${JWT_HEADER}.${JWT_PAYLOAD}" | openssl dgst -sha256 -hmac "${JWT_SECRET}" -binary | base64 -w0 | tr '+/' '-_' | tr -d '=')
 CPC_AUTH_TOKEN="${JWT_HEADER}.${JWT_PAYLOAD}.${JWT_SIGNATURE}"
 
-# NOTE: The Develop button uses https://t.me/claude_do_bot/dev so the Telegram
-# header shows the BotFather direct-link mini app title instead of the raw web
-# origin. Per Bot API docs (2026-04), the t.me alternative is officially
-# documented ONLY for MenuButtonWebApp — KeyboardButton.web_app's WebAppInfo.url
-# is described as "An HTTPS URL of a Web App" with no t.me carve-out. Telegram
-# clients MAY special-case t.me HTTPS URLs here in practice; if the button
-# silently fails to open, fall back to https://cpc.claude.do/dev/?token=${CPC_AUTH_TOKEN}.
+# NOTE on the Develop button URL:
+# We tried using https://t.me/claude_do_bot/dev (BotFather direct link) so the
+# Telegram header would show the registered mini app title. Telegram REJECTED
+# it at the API with `Bad Request: BUTTON_URL_INVALID`. Per the Bot API docs
+# the t.me alternative is officially supported ONLY on MenuButtonWebApp, NOT
+# on KeyboardButton.web_app — and the rejection is enforced at sendMessage
+# time, not just on tap. The launcher silently failed for hours because curl
+# was redirected to /dev/null. If you want the BotFather header title back,
+# the only option is to switch from a reply-keyboard button to a chat menu
+# button (MenuButtonWebApp via setChatMenuButton API), which is a different
+# UX surface entirely.
 curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
   -H "Content-Type: application/json" \
   -d "{
@@ -118,7 +122,7 @@ curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
       \"keyboard\": [
         [
           {\"text\": \"⚡️\nActions\"},
-          {\"text\": \"📱\nDevelop\", \"web_app\": {\"url\": \"https://t.me/claude_do_bot/dev\"}},
+          {\"text\": \"📱\nDevelop\", \"web_app\": {\"url\": \"https://cpc.claude.do/dev/?token=${CPC_AUTH_TOKEN}\"}},
           {\"text\": \"🎙️\nVoice\", \"web_app\": {\"url\": \"https://cpc.claude.do/#voice&token=${CPC_AUTH_TOKEN}\"}},
           {\"text\": \"📝\nScrum\"}
         ]
@@ -126,4 +130,4 @@ curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
       \"resize_keyboard\": true,
       \"is_persistent\": true
     }
-  }" > /dev/null 2>&1 || true
+  }"
