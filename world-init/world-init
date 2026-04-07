@@ -1,0 +1,152 @@
+#!/bin/bash
+# world-init — bootstrap ~/.world/ on a fresh host
+#
+# Creates the ~/.world/ directory structure per ADR 0006 and seeds it
+# with either empty stub files or copies from a template source.
+#
+# Usage:
+#   world-init                   # init with empty stubs
+#   world-init --dry-run         # show what would happen
+#   world-init --force           # overwrite existing files
+#   world-init --template DIR    # copy stubs from a template directory
+#
+# Idempotent: safe to run multiple times. By default, only creates
+# files that don't already exist.
+#
+# Status: Proof-of-concept per ADR 0006. Not yet integrated with
+# CPC's .world-templates/ (that comes in Phase 2).
+
+set -euo pipefail
+
+WORLD="${WORLD_DIR:-$HOME/.world}"
+DRY_RUN=0
+FORCE=0
+TEMPLATE=""
+
+log() {
+  if [[ $DRY_RUN -eq 1 ]]; then
+    echo "[dry-run] $*"
+  else
+    echo "$*"
+  fi
+}
+
+usage() {
+  sed -n '2,16p' "$0" | sed 's/^# \?//'
+  exit 0
+}
+
+# Parse args
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1; shift ;;
+    --force)   FORCE=1; shift ;;
+    --template) TEMPLATE="$2"; shift 2 ;;
+    --help|-h) usage ;;
+    *) echo "error: unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+
+# Directory structure per ADR 0006
+DIRS=(
+  "reference"
+  "guides"
+  "conventions"
+  "host"
+)
+
+# Files to seed (relative to $WORLD)
+# Format: "relative_path|title|description"
+FILES=(
+  "AGENTS.md|Claude's World (Index)|Root index — read this first"
+  "reference/ports.md|Port Reservations|Canonical port assignments and registry"
+  "reference/services.md|Active Services|systemd units, cron jobs, long-running processes"
+  "reference/secrets.md|Secrets Locations|Where each secret lives and what it's for"
+  "reference/shared-hosting.md|Shared File Hosting|~/shared, Caddy, cloudflared, R2"
+  "reference/tooling-map.md|Tooling Map|Every script in ~/bin and toolbox, what it does"
+  "guides/deploy-cpc.md|Deploy CPC|Release tagging, prod restart"
+  "guides/add-a-skill.md|Add a Claude Code Skill|SKILL.md format, registration, testing"
+  "guides/add-a-tool.md|Add a Tool to Toolbox|Directory structure, ~/bin symlinks"
+  "guides/rebuild-vps.md|Rebuild the VPS|Disaster recovery walkthrough"
+  "guides/share-a-doc.md|Share a Markdown Doc|Using send-md and share-doc"
+  "conventions/gitflow.md|Gitflow|Branch discipline, PR policy"
+  "conventions/port-allocation.md|Port Allocation|The 38/48/58 convention, port-for, worktree binding"
+  "conventions/tool-design-principles.md|Tool Design Principles|How to think about adding tools"
+  "conventions/memory-system.md|Memory System|What to write to memory, what NOT to"
+  "conventions/changelog-discipline.md|Changelog Discipline|When to update VPS_CHANGELOG vs AGENTIC_HOST_CHANGELOG"
+  "host/AGENTS.md|Host AGENTS.md|VPS-specific rules and warnings"
+  "host/manifest.yml|Backup Manifest|Per ADR 0004 — declarative backup inventory"
+)
+
+# --- Main ---
+
+log "world-init: initializing Claude's World at $WORLD"
+[[ -n "$TEMPLATE" ]] && log "  template source: $TEMPLATE"
+[[ $FORCE -eq 1 ]] && log "  force mode: existing files will be overwritten"
+
+# Create directory structure
+for dir in "${DIRS[@]}"; do
+  target="$WORLD/$dir"
+  if [[ ! -d "$target" ]]; then
+    log "  mkdir $target"
+    [[ $DRY_RUN -eq 0 ]] && mkdir -p "$target"
+  fi
+done
+
+# Seed files
+created=0
+skipped=0
+for entry in "${FILES[@]}"; do
+  IFS='|' read -r relpath title description <<< "$entry"
+  target="$WORLD/$relpath"
+  source=""
+
+  # Determine source
+  if [[ -n "$TEMPLATE" && -f "$TEMPLATE/$relpath" ]]; then
+    source="$TEMPLATE/$relpath"
+  fi
+
+  # Skip if exists and not --force
+  if [[ -f "$target" && $FORCE -eq 0 ]]; then
+    log "  skip: $target (exists)"
+    skipped=$((skipped + 1))
+    continue
+  fi
+
+  if [[ -n "$source" ]]; then
+    log "  copy: $source -> $target"
+    [[ $DRY_RUN -eq 0 ]] && cp "$source" "$target"
+  else
+    # Create stub
+    log "  stub: $target"
+    if [[ $DRY_RUN -eq 0 ]]; then
+      cat > "$target" <<STUB
+# ${title}
+
+> **Status:** Stub. To be filled in.
+
+${description}
+
+## See also
+
+- ADR 0006: .world/ directory bootstrap
+STUB
+    fi
+  fi
+  created=$((created + 1))
+done
+
+# Summary
+log ""
+log "world-init: done"
+log "  created/updated: $created"
+log "  skipped (exists): $skipped"
+log "  location: $WORLD"
+
+if [[ $DRY_RUN -eq 0 && $created -gt 0 ]]; then
+  echo ""
+  echo "Next steps:"
+  echo "  1. Edit $WORLD/AGENTS.md to make it the bootstrap index"
+  echo "  2. Fill in the stub files with actual content"
+  echo "  3. Update ~/AGENTS.md to point at ~/.world/AGENTS.md"
+fi
