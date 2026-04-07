@@ -33,6 +33,54 @@ function sanitizeRaw(text) {
 }
 
 /**
+ * Find `[label](url)` patterns and rewrite them via `cb(label, url)`.
+ * Unlike a simple `[^)]+` regex, this walks the URL portion character by
+ * character so that URLs containing balanced parentheses (e.g. many
+ * Wikipedia links) are captured intact. A `\)` inside the URL is treated
+ * as an escaped paren and does not close the link.
+ */
+function replaceLinks(input, cb) {
+  let out = '';
+  let i = 0;
+  while (i < input.length) {
+    // Look for `[`
+    if (input[i] !== '[') { out += input[i++]; continue; }
+    // Find the matching `]` for the label (no nested brackets supported)
+    const labelEnd = input.indexOf(']', i + 1);
+    if (labelEnd === -1 || input[labelEnd + 1] !== '(') {
+      out += input[i++]; continue;
+    }
+    const label = input.slice(i + 1, labelEnd);
+    // Walk the URL, tracking paren depth and skipping escaped chars
+    let j = labelEnd + 2;
+    let depth = 1;
+    let url = '';
+    while (j < input.length && depth > 0) {
+      const ch = input[j];
+      if (ch === '\\' && j + 1 < input.length) {
+        url += ch + input[j + 1];
+        j += 2;
+        continue;
+      }
+      if (ch === '(') { depth++; url += ch; j++; continue; }
+      if (ch === ')') {
+        depth--;
+        if (depth === 0) { j++; break; }
+        url += ch; j++; continue;
+      }
+      url += ch; j++;
+    }
+    if (depth !== 0) {
+      // Unbalanced — treat the `[` as literal and move on
+      out += input[i++]; continue;
+    }
+    out += cb(label, url);
+    i = j;
+  }
+  return out;
+}
+
+/**
  * Escape special chars while preserving intentional MarkdownV2 formatting:
  * - *bold*, _italic_, __underline__, ~strikethrough~, ||spoiler||
  * - `inline code`, ```pre blocks```
@@ -58,13 +106,22 @@ function sanitize(text) {
   t = t.replace(/`[^`]+`/g, hold);
 
   // Preserve links [text](url)
-  t = t.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, label, url) => {
+  // Use a balanced-paren matcher for the URL portion so URLs containing
+  // parentheses (e.g. Wikipedia links) are captured correctly. We walk the
+  // string manually after each `](` to find the matching closing paren.
+  t = replaceLinks(t, (label, url) => {
     // Escape special chars inside the label, but not the structural brackets
     const safeLabel = label.replace(SPECIAL, '\\$&');
-    const safeUrl = url; // URLs don't need escaping inside ()
+    // Per Telegram MarkdownV2 docs, inside `(url)` only `)` and `\` are
+    // special and must be escaped with a preceding `\`.
+    const safeUrl = url.replace(/[)\\]/g, '\\$&');
     return hold(`[${safeLabel}](${safeUrl})`);
   });
 
+  // TODO(nested-formatting): escaping all SPECIAL chars inside `inner` blocks
+  // prevents nested formatting like `*bold _italic_*` or `*bold with `code`*`.
+  // A proper fix needs a real MarkdownV2 parser that tracks nesting depth;
+  // tracked as a follow-up after the review-r1 fix PR.
   // Preserve bold **text** and *text*
   t = t.replace(/\*\*([^*]+)\*\*/g, (m, inner) => hold(`**${inner.replace(SPECIAL, '\\$&')}**`));
   t = t.replace(/\*([^*]+)\*/g, (m, inner) => hold(`*${inner.replace(SPECIAL, '\\$&')}*`));
@@ -82,9 +139,14 @@ function sanitize(text) {
   // Now escape everything remaining
   t = t.replace(SPECIAL, '\\$&');
 
-  // Restore placeholders
+  // Restore placeholders.
+  // CAREFUL: when the second arg to String.prototype.replace is a string,
+  // JavaScript interprets `$&`, `$\``, `$'`, `$1`–`$9`, and `$$` as special
+  // patterns — so a held URL or code block containing `$&` would be
+  // corrupted. Passing a function as the replacement bypasses that
+  // interpretation entirely and treats `val` as a pure literal.
   for (const { key, val } of placeholders) {
-    t = t.replace(key, val);
+    t = t.replace(key, () => val);
   }
 
   return t;
