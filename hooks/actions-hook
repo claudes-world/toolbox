@@ -33,14 +33,20 @@ send_msg() {
     -H "Content-Type: application/json" -d "$data" > /dev/null 2>&1 || true
 }
 
-ACTIONS_MENU='{"keyboard":[[{"text":"📊 Usage (7d)"},{"text":"📊 Usage (30d)"}],[{"text":"📋 Git Status"},{"text":"🔄 Reload Plugins"}]],"resize_keyboard":true,"one_time_keyboard":true}'
+ACTIONS_MENU='{"keyboard":[[{"text":"📊 Usage (7d)"},{"text":"📊 Usage (30d)"}],[{"text":"📋 Git Status"},{"text":"🔄 Reload Plugins"}],[{"text":"🔌 Fix Telegram"}]],"resize_keyboard":true,"one_time_keyboard":true}'
 
-LAUNCHER='{"keyboard":[[{"text":"🖥 Console","web_app":{"url":"https://cpc.claude.do/#terminal"}},{"text":"📁 Files","web_app":{"url":"https://cpc.claude.do/#files"}}],[{"text":"📚 Knowledge","web_app":{"url":"https://cpc.claude.do/#files"}},{"text":"⚡ Actions"}],[{"text":"🧪 Dev Console","web_app":{"url":"https://cpc-dev.claude.do/#terminal"}}]],"resize_keyboard":true,"is_persistent":true}'
+LAUNCHER='{"keyboard":[[{"text":"🖥 Console","web_app":{"url":"https://cpc.claude.do/#terminal"}},{"text":"📁 Files","web_app":{"url":"https://cpc.claude.do/#files"}}],[{"text":"📚 Knowledge","web_app":{"url":"https://cpc.claude.do/#files"}},{"text":"⚡ Actions"},{"text":"📝 Scrum"}],[{"text":"🧪 Dev Console","web_app":{"url":"https://cpc-dev.claude.do/#terminal"}}]],"resize_keyboard":true,"is_persistent":true}'
 
 case "$CONTENT" in
-  *"⚡ Actions"*)
+  *"⚡ Actions"*|*"⚡️Actions"*)
     send_msg "Choose an action:" "" "$ACTIONS_MENU"
     echo '{"suppressOutput":true}'
+    ;;
+  *"📝Scrum"*|*"📝 Scrum"*)
+    # Don't suppress — let the prompt flow to Claude with injected scrum instructions
+    cat <<'JSON'
+{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"The user tapped the Scrum button. Run a stand-up meeting check-in. Reply with a markdown document (use the send-md skill) covering:\n\n1. **Active background agents** — what each is doing, status, ETA, blockers\n2. **Recently completed this session** — what shipped\n3. **Pending plans not yet executed** — work that has plans but no implementation\n4. **TODO.md items I have forgotten about** — review TODO.md and surface anything we havent touched\n5. **Open architectural threads** — conversations weve started but not concluded\n6. **Recommended next actions** — prioritized list\n7. **Risks / concerns** — anything to flag\n\nFormat as a scrum meeting notes doc. Be concise but complete. The goal is to let the user catch up on context after a tangent or after sleep."}}
+JSON
     ;;
   *"📊 Usage (7d)"*)
     send_msg "Fetching 7-day usage..."
@@ -67,6 +73,48 @@ case "$CONTENT" in
     # Restore launcher then let Claude handle the reload
     send_msg "Reloading..." "" "$LAUNCHER"
     exit 0
+    ;;
+  *"🔌 Fix Telegram"*)
+    # Kill all telegram plugin processes except the one belonging to this session.
+    # Walk up from $$ to find our session's claude PID, then kill any telegram
+    # bun processes that don't share that ancestor.
+    MY_CLAUDE_PID=""
+    check_pid=$$
+    for _ in 1 2 3 4 5 6 7 8; do
+      check_pid=$(ps -o ppid= -p "$check_pid" 2>/dev/null | tr -d ' ')
+      [ -z "$check_pid" ] || [ "$check_pid" -le 1 ] && break
+      check_cmd=$(ps -o comm= -p "$check_pid" 2>/dev/null || true)
+      if [[ "$check_cmd" == "claude" ]]; then
+        MY_CLAUDE_PID="$check_pid"
+        break
+      fi
+    done
+
+    killed=0
+    for pid in $(pgrep -f "bun.*telegram" 2>/dev/null || true); do
+      # Walk up from this bun process to see if it's under our claude PID
+      is_ours=false
+      walk_pid="$pid"
+      for _ in 1 2 3 4 5 6; do
+        walk_pid=$(ps -o ppid= -p "$walk_pid" 2>/dev/null | tr -d ' ')
+        [ -z "$walk_pid" ] || [ "$walk_pid" -le 1 ] && break
+        if [ -n "$MY_CLAUDE_PID" ] && [ "$walk_pid" = "$MY_CLAUDE_PID" ]; then
+          is_ours=true
+          break
+        fi
+      done
+      if ! $is_ours; then
+        kill "$pid" 2>/dev/null && killed=$((killed + 1)) || true
+      fi
+    done
+
+    if [ "$killed" -gt 0 ]; then
+      send_msg "🔌 Killed $killed stale Telegram plugin process(es)."
+    else
+      send_msg "🔌 No stale Telegram plugins found."
+    fi
+    send_msg "Done." "" "$LAUNCHER"
+    echo '{"suppressOutput":true}'
     ;;
   *)
     exit 0

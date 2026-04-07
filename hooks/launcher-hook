@@ -95,6 +95,20 @@ if [ ! -f "$ACTIVE_CHAT" ] && [ -d "${HOOK_CWD}/.claude" ]; then
   echo "$CHAT_ID" > "$ACTIVE_CHAT"
 fi
 
+# Generate JWT for keyboard auth (fallback when initData is unavailable)
+JWT_SECRET="${BOTTOKEN}"
+JWT_HEADER=$(echo -n '{"alg":"HS256","typ":"JWT"}' | base64 -w0 | tr '+/' '-_' | tr -d '=')
+JWT_PAYLOAD=$(echo -n "{\"sub\":\"${CHAT_ID}\",\"iat\":$(date +%s),\"exp\":$(($(date +%s) + 604800))}" | base64 -w0 | tr '+/' '-_' | tr -d '=')
+JWT_SIGNATURE=$(echo -n "${JWT_HEADER}.${JWT_PAYLOAD}" | openssl dgst -sha256 -hmac "${JWT_SECRET}" -binary | base64 -w0 | tr '+/' '-_' | tr -d '=')
+CPC_AUTH_TOKEN="${JWT_HEADER}.${JWT_PAYLOAD}.${JWT_SIGNATURE}"
+
+# NOTE: The Develop button uses https://t.me/claude_do_bot/dev so the Telegram
+# header shows the BotFather direct-link mini app title instead of the raw web
+# origin. Per Bot API docs (2026-04), the t.me alternative is officially
+# documented ONLY for MenuButtonWebApp — KeyboardButton.web_app's WebAppInfo.url
+# is described as "An HTTPS URL of a Web App" with no t.me carve-out. Telegram
+# clients MAY special-case t.me HTTPS URLs here in practice; if the button
+# silently fails to open, fall back to https://cpc.claude.do/dev/?token=${CPC_AUTH_TOKEN}.
 curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
   -H "Content-Type: application/json" \
   -d "{
@@ -103,15 +117,10 @@ curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
     \"reply_markup\": {
       \"keyboard\": [
         [
-          {\"text\": \"🖥 Console\", \"web_app\": {\"url\": \"https://cpc.claude.do/#terminal\"}},
-          {\"text\": \"📁 Files\", \"web_app\": {\"url\": \"https://cpc.claude.do/#files\"}}
-        ],
-        [
-          {\"text\": \"📚 Knowledge\", \"web_app\": {\"url\": \"https://cpc.claude.do/#files\"}},
-          {\"text\": \"⚡ Actions\"}
-        ],
-        [
-          {\"text\": \"🧪 Dev Console\", \"web_app\": {\"url\": \"https://cpc-dev.claude.do/#terminal\"}}
+          {\"text\": \"⚡️\nActions\"},
+          {\"text\": \"📱\nDevelop\", \"web_app\": {\"url\": \"https://t.me/claude_do_bot/dev\"}},
+          {\"text\": \"🎙️\nVoice\", \"web_app\": {\"url\": \"https://cpc.claude.do/#voice&token=${CPC_AUTH_TOKEN}\"}},
+          {\"text\": \"📝\nScrum\"}
         ]
       ],
       \"resize_keyboard\": true,
