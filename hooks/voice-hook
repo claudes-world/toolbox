@@ -84,8 +84,15 @@ echo "Sending Telegram reply and outputting JSON" >> "$LOG"
 
 # Send transcription as a quoted reply to the user on Telegram
 if [ -n "$CHAT_ID" ] && [ -n "$MSG_ID" ]; then
-  # Use HTML blockquote + italic for reliability (MarkdownV2 escaping is fragile)
-  QUOTED="<blockquote><i>${TRANSCRIPTION}</i></blockquote>"
+  # Per Gemini review: the transcription is interpolated into an HTML-formatted
+  # Telegram message, so raw `<`, `>`, `&` in the transcript would break parsing
+  # (or enable tag injection). Escape `&` FIRST so the later `<`/`>` substitutions
+  # don't double-escape the ampersands we just inserted.
+  ESCAPED_TRANSCRIPTION=$(printf '%s' "$TRANSCRIPTION" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
+
+  # Expandable blockquote: collapsed by default, tap to expand
+  QUOTED="<blockquote expandable><b>Transcription:</b>
+<i>${ESCAPED_TRANSCRIPTION}</i></blockquote>"
 
   curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
     -H "Content-Type: application/json" \
