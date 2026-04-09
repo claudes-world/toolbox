@@ -84,6 +84,15 @@ echo "Sending Telegram reply and outputting JSON" >> "$LOG"
 
 # Send transcription as a quoted reply to the user on Telegram
 if [ -n "$CHAT_ID" ] && [ -n "$MSG_ID" ]; then
+  # Generate a fresh JWT for launcher keyboard web_app URLs
+  # (matches launcher-hook / actions-hook).
+  JWT_SECRET="${BOTTOKEN}"
+  JWT_HEADER=$(echo -n '{"alg":"HS256","typ":"JWT"}' | base64 -w0 | tr '+/' '-_' | tr -d '=')
+  JWT_PAYLOAD=$(echo -n "{\"sub\":\"${CHAT_ID}\",\"iat\":$(date +%s),\"exp\":$(($(date +%s) + 604800))}" | base64 -w0 | tr '+/' '-_' | tr -d '=')
+  JWT_SIGNATURE=$(echo -n "${JWT_HEADER}.${JWT_PAYLOAD}" | openssl dgst -sha256 -hmac "${JWT_SECRET}" -binary | base64 -w0 | tr '+/' '-_' | tr -d '=')
+  CPC_AUTH_TOKEN="${JWT_HEADER}.${JWT_PAYLOAD}.${JWT_SIGNATURE}"
+
+  LAUNCHER="{\"keyboard\":[[{\"text\":\"⚡️\\nActions\"},{\"text\":\"📱\\nDevelop\",\"web_app\":{\"url\":\"https://cpc.claude.do/dev/?token=${CPC_AUTH_TOKEN}\"}},{\"text\":\"🎙️\\nVoice\",\"web_app\":{\"url\":\"https://cpc.claude.do/#voice&token=${CPC_AUTH_TOKEN}\"}},{\"text\":\"📝\\nScrum\"}]],\"resize_keyboard\":true,\"is_persistent\":true}"
   # Per Gemini review: the transcription is interpolated into an HTML-formatted
   # Telegram message, so raw `<`, `>`, `&` in the transcript would break parsing
   # (or enable tag injection). Escape `&` FIRST so the later `<`/`>` substitutions
@@ -100,7 +109,8 @@ if [ -n "$CHAT_ID" ] && [ -n "$MSG_ID" ]; then
       --arg chat_id "$CHAT_ID" \
       --arg reply_to "$MSG_ID" \
       --arg text "$QUOTED" \
-      '{chat_id: $chat_id, reply_to_message_id: ($reply_to | tonumber), text: $text, parse_mode: "HTML", disable_notification: true}'
+      --argjson reply_markup "$LAUNCHER" \
+      '{chat_id: $chat_id, reply_to_message_id: ($reply_to | tonumber), text: $text, parse_mode: "HTML", disable_notification: true, reply_markup: $reply_markup}'
     )" > /dev/null 2>&1 || true
 fi
 
