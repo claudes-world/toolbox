@@ -42,6 +42,8 @@ if [ -z "$BOTTOKEN" ]; then
   exit 0
 fi
 
+. "$(dirname "$(readlink -f "$0")")/lib/launcher-keyboard.sh"
+
 # Load OpenAI key
 eval "$(grep OPENAI_API_KEY /home/claude/.secrets/openai.env 2>/dev/null | head -1)"
 export OPENAI_API_KEY
@@ -84,15 +86,7 @@ echo "Sending Telegram reply and outputting JSON" >> "$LOG"
 
 # Send transcription as a quoted reply to the user on Telegram
 if [ -n "$CHAT_ID" ] && [ -n "$MSG_ID" ]; then
-  # Generate a fresh JWT for launcher keyboard web_app URLs
-  # (matches launcher-hook / actions-hook).
-  JWT_SECRET="${BOTTOKEN}"
-  JWT_HEADER=$(echo -n '{"alg":"HS256","typ":"JWT"}' | base64 -w0 | tr '+/' '-_' | tr -d '=')
-  JWT_PAYLOAD=$(echo -n "{\"sub\":\"${CHAT_ID}\",\"iat\":$(date +%s),\"exp\":$(($(date +%s) + 604800))}" | base64 -w0 | tr '+/' '-_' | tr -d '=')
-  JWT_SIGNATURE=$(echo -n "${JWT_HEADER}.${JWT_PAYLOAD}" | openssl dgst -sha256 -hmac "${JWT_SECRET}" -binary | base64 -w0 | tr '+/' '-_' | tr -d '=')
-  CPC_AUTH_TOKEN="${JWT_HEADER}.${JWT_PAYLOAD}.${JWT_SIGNATURE}"
-
-  LAUNCHER="{\"keyboard\":[[{\"text\":\"⚡️\\nActions\"},{\"text\":\"📱\\nDevelop\",\"web_app\":{\"url\":\"https://cpc.claude.do/dev/?token=${CPC_AUTH_TOKEN}\"}},{\"text\":\"🎙️\\nVoice\",\"web_app\":{\"url\":\"https://cpc.claude.do/#voice&token=${CPC_AUTH_TOKEN}\"}},{\"text\":\"📝\\nScrum\"}]],\"resize_keyboard\":true,\"is_persistent\":true}"
+  LAUNCHER=$(build_launcher_reply_markup "$CHAT_ID" "$BOTTOKEN")
   # Per Gemini review: the transcription is interpolated into an HTML-formatted
   # Telegram message, so raw `<`, `>`, `&` in the transcript would break parsing
   # (or enable tag injection). Escape `&` FIRST so the later `<`/`>` substitutions
