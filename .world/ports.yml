@@ -1,0 +1,13 @@
+# Port declarations for port-for allocation (ADR 0003).
+#
+# toolbox has no port-binding services yet — it is a collection of
+# shell scripts and Claude Code hooks (md-speak, tg-sanitize,
+# transcribe, speak, gen-image, world-init, tag-mp3, openai-usage,
+# plus hooks/). None of these bind TCP ports.
+#
+# This file exists so that `port-for --init` treats the repo as
+# migrated (empty `purposes` list → nothing to allocate, no warning
+# about a missing config) and so future services added to toolbox can
+# be declared here alongside the existing pattern from CPC and inbox.
+repo: toolbox
+purposes: []
