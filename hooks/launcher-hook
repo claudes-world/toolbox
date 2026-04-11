@@ -83,6 +83,7 @@ _cleanup_telegram_orphans() {
 _cleanup_telegram_orphans
 
 . "$(dirname "$(readlink -f "$0")")/common.sh"
+. "$(dirname "$(readlink -f "$0")")/lib/launcher-keyboard.sh"
 
 [ -z "$BOTTOKEN" ] && exit 0
 [ -z "$TELEGRAM_CHAT_ID" ] && exit 0
@@ -95,12 +96,7 @@ if [ ! -f "$ACTIVE_CHAT" ] && [ -d "${HOOK_CWD}/.claude" ]; then
   echo "$CHAT_ID" > "$ACTIVE_CHAT"
 fi
 
-# Generate JWT for keyboard auth (fallback when initData is unavailable)
-JWT_SECRET="${BOTTOKEN}"
-JWT_HEADER=$(echo -n '{"alg":"HS256","typ":"JWT"}' | base64 -w0 | tr '+/' '-_' | tr -d '=')
-JWT_PAYLOAD=$(echo -n "{\"sub\":\"${CHAT_ID}\",\"iat\":$(date +%s),\"exp\":$(($(date +%s) + 604800))}" | base64 -w0 | tr '+/' '-_' | tr -d '=')
-JWT_SIGNATURE=$(echo -n "${JWT_HEADER}.${JWT_PAYLOAD}" | openssl dgst -sha256 -hmac "${JWT_SECRET}" -binary | base64 -w0 | tr '+/' '-_' | tr -d '=')
-CPC_AUTH_TOKEN="${JWT_HEADER}.${JWT_PAYLOAD}.${JWT_SIGNATURE}"
+LAUNCHER_REPLY_MARKUP=$(build_launcher_reply_markup "$CHAT_ID" "$BOTTOKEN")
 
 # NOTE on the Develop button URL:
 # We tried using https://t.me/claude_do_bot/dev (BotFather direct link) so the
@@ -115,19 +111,9 @@ CPC_AUTH_TOKEN="${JWT_HEADER}.${JWT_PAYLOAD}.${JWT_SIGNATURE}"
 # UX surface entirely.
 curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
   -H "Content-Type: application/json" \
-  -d "{
-    \"chat_id\": \"${CHAT_ID}\",
-    \"text\": \"Session started.\",
-    \"reply_markup\": {
-      \"keyboard\": [
-        [
-          {\"text\": \"⚡️\nActions\"},
-          {\"text\": \"📱\nDevelop\", \"web_app\": {\"url\": \"https://cpc.claude.do/dev/?token=${CPC_AUTH_TOKEN}\"}},
-          {\"text\": \"🎙️\nVoice\", \"web_app\": {\"url\": \"https://cpc.claude.do/#voice&token=${CPC_AUTH_TOKEN}\"}},
-          {\"text\": \"📝\nScrum\"}
-        ]
-      ],
-      \"resize_keyboard\": true,
-      \"is_persistent\": true
-    }
-  }"
+  -d "$(jq -n \
+    --arg chat_id "$CHAT_ID" \
+    --arg text "Session started." \
+    --argjson reply_markup "$LAUNCHER_REPLY_MARKUP" \
+    '{chat_id: $chat_id, text: $text, reply_markup: $reply_markup}'
+  )"

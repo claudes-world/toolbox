@@ -13,14 +13,8 @@ BOTTOKEN=$(grep TELEGRAM_BOT_TOKEN /home/claude/.claude/channels/telegram/.env 2
 
 HOOK_CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
 . "$(dirname "$(readlink -f "$0")")/common.sh"
+. "$(dirname "$(readlink -f "$0")")/lib/launcher-keyboard.sh"
 CHAT_ID="$TELEGRAM_CHAT_ID"
-
-# Generate a fresh JWT for the Voice button web_app URL (matches launcher-hook).
-JWT_SECRET="${BOTTOKEN}"
-JWT_HEADER=$(echo -n '{"alg":"HS256","typ":"JWT"}' | base64 -w0 | tr '+/' '-_' | tr -d '=')
-JWT_PAYLOAD=$(echo -n "{\"sub\":\"${CHAT_ID}\",\"iat\":$(date +%s),\"exp\":$(($(date +%s) + 604800))}" | base64 -w0 | tr '+/' '-_' | tr -d '=')
-JWT_SIGNATURE=$(echo -n "${JWT_HEADER}.${JWT_PAYLOAD}" | openssl dgst -sha256 -hmac "${JWT_SECRET}" -binary | base64 -w0 | tr '+/' '-_' | tr -d '=')
-CPC_AUTH_TOKEN="${JWT_HEADER}.${JWT_PAYLOAD}.${JWT_SIGNATURE}"
 
 send_msg() {
   local text="$1"
@@ -46,7 +40,7 @@ ACTIONS_MENU='{"keyboard":[[{"text":"📊 Usage (7d)"},{"text":"📊 Usage (30d)
 # Develop button uses https://cpc.claude.do/dev/?token=... — we tried the
 # t.me/claude_do_bot/dev BotFather direct link but Telegram rejects it at
 # sendMessage with BUTTON_URL_INVALID. See launcher-hook for the full story.
-LAUNCHER="{\"keyboard\":[[{\"text\":\"⚡️\\nActions\"},{\"text\":\"📱\\nDevelop\",\"web_app\":{\"url\":\"https://cpc.claude.do/dev/?token=${CPC_AUTH_TOKEN}\"}},{\"text\":\"🎙️\\nVoice\",\"web_app\":{\"url\":\"https://cpc.claude.do/#voice&token=${CPC_AUTH_TOKEN}\"}},{\"text\":\"📝\\nScrum\"}]],\"resize_keyboard\":true,\"is_persistent\":true}"
+LAUNCHER=$(build_launcher_reply_markup "$CHAT_ID" "$BOTTOKEN")
 
 case "$CONTENT" in
   *"⚡ Actions"*|*"⚡️Actions"*)
