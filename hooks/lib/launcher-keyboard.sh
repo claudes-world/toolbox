@@ -12,7 +12,7 @@ build_cpc_auth_token() {
 
   now=$(date +%s)
   jwt_header=$(printf '%s' '{"alg":"HS256","typ":"JWT"}' | base64 -w0 | tr '+/' '-_' | tr -d '=')
-  jwt_payload=$(printf '{"sub":"%s","iat":%s,"exp":%s}' "$chat_id" "$now" "$((now + 604800))" | base64 -w0 | tr '+/' '-_' | tr -d '=')
+  jwt_payload=$(jq -cn --arg sub "$chat_id" --arg iat "$now" --arg exp "$((now + 7 * 24 * 60 * 60))" '{sub: $sub, iat: ($iat|tonumber), exp: ($exp|tonumber)}' | base64 -w0 | tr '+/' '-_' | tr -d '=')
   jwt_signature=$(printf '%s' "${jwt_header}.${jwt_payload}" | openssl dgst -sha256 -hmac "${bot_token}" -binary | base64 -w0 | tr '+/' '-_' | tr -d '=')
 
   printf '%s' "${jwt_header}.${jwt_payload}.${jwt_signature}"
