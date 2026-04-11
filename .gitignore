@@ -1,3 +1,6 @@
 .env
 *.pyc
 __pycache__/
+
+# Worktree-local port allocations from port-for (ADR 0003)
+.world/ports.lock
