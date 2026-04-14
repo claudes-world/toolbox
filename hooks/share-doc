@@ -10,6 +10,13 @@ set -euo pipefail
 TMPDIR="/home/claude/claudes-world/tmp"
 mkdir -p "$TMPDIR"
 
+NO_AUDIO=0
+for arg in "$@"; do
+  if [ "$arg" = "--no-audio" ]; then
+    NO_AUDIO=1
+  fi
+done
+
 INPUT=$(cat)
 
 # Trim leading/trailing whitespace for path detection
@@ -20,11 +27,14 @@ if [ "$(echo "$TRIMMED" | wc -l)" -eq 1 ] && echo "$TRIMMED" | grep -qE '^/.+\.m
   # --- Mode 2: Share existing file ---
   FILEPATH="$TRIMMED"
   TITLE=$(head -1 "$FILEPATH" | sed 's/^#* *//')
-  AUDIOPATH="${FILEPATH%.md}.mp3"
 
-  # Generate audio if it doesn't already exist
-  if [ ! -f "$AUDIOPATH" ] || [ ! -s "$AUDIOPATH" ]; then
-    /home/claude/bin/md-speak --no-describe --out "$AUDIOPATH" "$FILEPATH" 2>/dev/null || true
+  if [ "$NO_AUDIO" -eq 0 ]; then
+    AUDIOPATH="${FILEPATH%.md}.mp3"
+
+    # Generate audio if it doesn't already exist
+    if [ ! -f "$AUDIOPATH" ] || [ ! -s "$AUDIOPATH" ]; then
+      /home/claude/bin/md-speak --no-describe --out "$AUDIOPATH" "$FILEPATH" 2>/dev/null || true
+    fi
   fi
 else
   # --- Mode 1: Create temp file from inline content ---
@@ -48,9 +58,11 @@ else
   echo "" >> "$FILEPATH"
   echo "$BODY" >> "$FILEPATH"
 
-  # Generate audio version
-  AUDIOPATH="${FILEPATH%.md}.mp3"
-  /home/claude/bin/md-speak --no-describe --out "$AUDIOPATH" "$FILEPATH" 2>/dev/null || true
+  if [ "$NO_AUDIO" -eq 0 ]; then
+    # Generate audio version
+    AUDIOPATH="${FILEPATH%.md}.mp3"
+    /home/claude/bin/md-speak --no-describe --out "$AUDIOPATH" "$FILEPATH" 2>/dev/null || true
+  fi
 fi
 
 # Send to Telegram: audio + deep link button
@@ -61,7 +73,7 @@ if [ -n "$BOTTOKEN" ] && [ -n "$CHAT_ID" ]; then
   ENCODED_PATH=$(python3 -c "from urllib.parse import quote; print(quote('${FILEPATH}'))")
   DEEP_URL="https://cpc.claude.do/#file=${ENCODED_PATH}"
 
-  if [ -f "$AUDIOPATH" ] && [ -s "$AUDIOPATH" ]; then
+  if [ "$NO_AUDIO" -eq 0 ] && [ -n "${AUDIOPATH:-}" ] && [ -f "$AUDIOPATH" ] && [ -s "$AUDIOPATH" ]; then
     # Send audio with inline keyboard button for deep link
     curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendAudio" \
       -F "chat_id=${CHAT_ID}" \
