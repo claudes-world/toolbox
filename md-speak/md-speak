@@ -439,19 +439,24 @@ def split_large_segment(seg: Segment) -> list[Segment]:
     Never truncates. Every byte of original text appears in exactly one output segment.
     First sub-segment inherits pause_before; last inherits pause_after; middle get zero pauses.
     """
-    # Leave room for <speak>\n\n</speak> wrapper and <p></p> tags + <break> tags
-    max_text_bytes = SSML_BYTE_LIMIT - len("<speak>\n\n</speak>".encode('utf-8')) - 30
+    # Leave room for <speak>\n\n</speak> wrapper (17 bytes), <p></p> tags (7 bytes),
+    # and up to two <break time="30000ms"/> tags (44 bytes). Total overhead: ~68 bytes.
+    max_text_bytes = SSML_BYTE_LIMIT - len("<speak>\n\n</speak>".encode('utf-8')) - 68
 
     # Fast path: segment fits as-is
     if len(seg.text.encode('utf-8')) <= max_text_bytes:
         return [seg]
 
-    def chunk_texts(texts: list[str], max_bytes: int) -> list[str]:
-        """Greedily pack texts into byte-limited chunks. Never truncates."""
+    def chunk_texts(texts: list[str], max_bytes: int, join_sep: str = ' ') -> list[str]:
+        """Greedily pack texts into byte-limited chunks using join_sep between tokens.
+
+        join_sep=' ' for word/sentence tokens; join_sep='' for grapheme (char) tokens.
+        Never truncates — every input character appears in exactly one output chunk.
+        """
         chunks: list[str] = []
         current = ''
         for t in texts:
-            candidate = (current + ' ' + t) if current else t
+            candidate = (current + join_sep + t) if current else t
             if len(candidate.encode('utf-8')) <= max_bytes:
                 current = candidate
             else:
@@ -462,13 +467,14 @@ def split_large_segment(seg: Segment) -> list[Segment]:
                     # Word boundary split
                     words = [w for w in t.split(' ') if w]
                     if len(words) > 1:
-                        sub_chunks = chunk_texts(words, max_bytes)
+                        sub_chunks = chunk_texts(words, max_bytes, join_sep=' ')
                         chunks.extend(sub_chunks[:-1])
                         current = sub_chunks[-1] if sub_chunks else ''
                     else:
                         # Single word too large — grapheme split (Unicode codepoints)
+                        # Must use join_sep='' to avoid injecting spaces between chars
                         chars = list(t)
-                        sub_chunks = chunk_texts(chars, max_bytes)
+                        sub_chunks = chunk_texts(chars, max_bytes, join_sep='')
                         chunks.extend(sub_chunks[:-1])
                         current = sub_chunks[-1] if sub_chunks else ''
                 else:
