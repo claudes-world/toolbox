@@ -419,39 +419,138 @@ def ssml_break(ms: int) -> str:
     return f'<break time="{ms}ms"/>'
 
 
+SSML_BYTE_LIMIT = 4500  # 500-byte safety margin below Google TTS 5000-byte hard limit
+
+
+def build_ssml(parts: list[str]) -> str:
+    """Build a complete SSML string from a list of SSML part strings."""
+    ssml_body = "\n".join(parts)
+    return f"<speak>\n{ssml_body}\n</speak>"
+
+
+def split_large_segment(seg: Segment) -> list[Segment]:
+    """Split a segment whose text exceeds SSML_BYTE_LIMIT into smaller segments.
+
+    Splitting hierarchy:
+    1. Sentence boundaries (. ! ?)
+    2. Word boundaries (space)
+    3. Grapheme cluster boundaries (UTF-8 codepoints) — for URLs, CJK runs, etc.
+
+    Never truncates. Every byte of original text appears in exactly one output segment.
+    First sub-segment inherits pause_before; last inherits pause_after; middle get zero pauses.
+    """
+    # Leave room for <speak>\n\n</speak> wrapper (17 bytes), <p></p> tags (7 bytes),
+    # and up to two <break time="30000ms"/> tags (44 bytes). Total overhead: ~68 bytes.
+    max_text_bytes = SSML_BYTE_LIMIT - len("<speak>\n\n</speak>".encode('utf-8')) - 68
+
+    # Fast path: segment fits as-is
+    if len(seg.text.encode('utf-8')) <= max_text_bytes:
+        return [seg]
+
+    def chunk_texts(texts: list[str], max_bytes: int, join_sep: str = ' ') -> list[str]:
+        """Greedily pack texts into byte-limited chunks using join_sep between tokens.
+
+        join_sep=' ' for word/sentence tokens; join_sep='' for grapheme (char) tokens.
+        Never truncates — every input character appears in exactly one output chunk.
+        """
+        chunks: list[str] = []
+        current = ''
+        for t in texts:
+            candidate = (current + join_sep + t) if current else t
+            if len(candidate.encode('utf-8')) <= max_bytes:
+                current = candidate
+            else:
+                if current:
+                    chunks.append(current)
+                # Single item too large — split further
+                if len(t.encode('utf-8')) > max_bytes:
+                    # Word boundary split
+                    words = [w for w in t.split(' ') if w]
+                    if len(words) > 1:
+                        sub_chunks = chunk_texts(words, max_bytes, join_sep=' ')
+                        chunks.extend(sub_chunks[:-1])
+                        current = sub_chunks[-1] if sub_chunks else ''
+                    else:
+                        # Single word too large — grapheme split (Unicode codepoints)
+                        # Must use join_sep='' to avoid injecting spaces between chars
+                        chars = list(t)
+                        sub_chunks = chunk_texts(chars, max_bytes, join_sep='')
+                        chunks.extend(sub_chunks[:-1])
+                        current = sub_chunks[-1] if sub_chunks else ''
+                else:
+                    current = t
+        if current:
+            chunks.append(current)
+        return chunks
+
+    # Split on sentence boundaries; keep sentences without trailing space so Segment.strip() is a no-op
+    sentences = re.split(r'(?<=[.!?]) ', seg.text)
+
+    text_chunks = chunk_texts(sentences, max_text_bytes)
+
+    # Build sub-segments from chunks
+    result: list[Segment] = []
+    for i, chunk_text in enumerate(text_chunks):
+        pause_before = seg.pause_before if i == 0 else 0.0
+        pause_after = seg.pause_after if i == len(text_chunks) - 1 else 0.0
+        result.append(Segment(
+            text=chunk_text,
+            voice=seg.voice,
+            pause_before=pause_before,
+            pause_after=pause_after,
+        ))
+
+    return result if result else [seg]
+
+
 def segments_to_ssml_batches(segments: list[Segment]) -> list[tuple[str, str]]:
     """Group consecutive same-voice segments into SSML batches.
-    Returns list of (ssml_string, voice_name) tuples."""
+
+    Flush triggers:
+    1. Voice change (existing behavior)
+    2. Next segment would push batch over SSML_BYTE_LIMIT (new)
+
+    Returns list of (ssml_string, voice_name) tuples.
+    """
     batches: list[tuple[str, str]] = []
-    current_voice = None
+    current_voice: str | None = None
     current_parts: list[str] = []
 
     def flush():
         nonlocal current_voice, current_parts
         if current_parts and current_voice:
-            ssml_body = "\n".join(current_parts)
-            ssml = f"<speak>\n{ssml_body}\n</speak>"
-            batches.append((ssml, current_voice))
+            batches.append((build_ssml(current_parts), current_voice))
         current_parts = []
 
     for seg in segments:
-        # Voice change — flush current batch
-        if seg.voice != current_voice:
-            flush()
-            current_voice = seg.voice
+        # Expand oversized segments before adding to batch
+        expanded_segs = split_large_segment(seg)
 
-        # Pre-pause
-        if seg.pause_before > 0:
-            current_parts.append(ssml_break(int(seg.pause_before * 1000)))
+        for eseg in expanded_segs:
+            # Voice change — flush current batch
+            if eseg.voice != current_voice:
+                flush()
+                current_voice = eseg.voice
 
-        # Text content
-        if seg.text:
-            escaped = escape_ssml(seg.text)
-            current_parts.append(f"<p>{escaped}</p>")
+            # Build candidate SSML parts for this segment
+            new_parts: list[str] = []
+            if eseg.pause_before > 0:
+                new_parts.append(ssml_break(int(eseg.pause_before * 1000)))
+            if eseg.text:
+                escaped = escape_ssml(eseg.text)
+                new_parts.append(f"<p>{escaped}</p>")
+            if eseg.pause_after > 0:
+                new_parts.append(ssml_break(int(eseg.pause_after * 1000)))
 
-        # Post-pause
-        if seg.pause_after > 0:
-            current_parts.append(ssml_break(int(seg.pause_after * 1000)))
+            # Measure byte size via actual serialization
+            candidate_parts = current_parts + new_parts
+            if len(build_ssml(candidate_parts).encode('utf-8')) > SSML_BYTE_LIMIT:
+                # Flush and start new batch with same voice
+                flush()
+                current_voice = eseg.voice
+                current_parts = new_parts
+            else:
+                current_parts = candidate_parts
 
     flush()
     return batches
@@ -570,7 +669,10 @@ def main():
 
     # Batch into SSML by voice
     batches = segments_to_ssml_batches(segments)
-    print(f"Batched into {len(batches)} SSML calls (was {len(segments)} segments)", file=sys.stderr)
+    chunk_count = len(batches)
+    print(f"Batched into {chunk_count} SSML calls (was {len(segments)} segments)", file=sys.stderr)
+    if chunk_count > 20:
+        print(f"warning: high chunk count ({chunk_count}) — document may be very long or segmentation is fragmented", file=sys.stderr)
 
     # Generate audio for each batch
     tmpdir = tempfile.mkdtemp(prefix="md-speak-")
