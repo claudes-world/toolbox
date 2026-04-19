@@ -40,9 +40,22 @@ TOOL_NAME="$(printf '%s' "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)"
 CMD="$(printf '%s' "$INPUT" | jq -r '.tool_input.command // ""' 2>/dev/null)"
 [ -n "$CMD" ] || emit_empty
 
+# Fast reject: not a git worktree remove invocation at all.
+# Match on "worktree remove" (not "git worktree remove") so that
+# `git -C <dir> worktree remove` is not silently dropped before
+# the Python parser can handle the -C flag.
 case "$CMD" in
-  *"git worktree remove"*) ;;
+  *"worktree remove"*) ;;
   *) emit_empty ;;
+esac
+
+# Shell-operator bail-out: `||` and `;` allow later commands to mask a failed
+# `git worktree remove` with exit 0, making the exit-code gate below unreliable.
+# We cannot safely tell if the remove succeeded, so skip port release entirely.
+# `&&` is fine — a failed remove short-circuits the chain and yields non-zero.
+case "$CMD" in
+  *"||"*|*";"*|*"|"*)
+    emit_empty ;;
 esac
 
 # PostToolUse: only release ports if the remove actually succeeded.

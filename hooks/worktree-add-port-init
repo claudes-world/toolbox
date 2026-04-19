@@ -39,9 +39,22 @@ CMD="$(printf '%s' "$INPUT" | jq -r '.tool_input.command // ""' 2>/dev/null)"
 [ -n "$CMD" ] || emit_empty
 
 # Fast reject: not a git worktree add invocation at all.
+# Match on "worktree add" (not "git worktree add") so that
+# `git -C <dir> worktree add` is not silently dropped before
+# the Python parser can handle the -C flag.
 case "$CMD" in
-  *"git worktree add"*) ;;
+  *"worktree add"*) ;;
   *) emit_empty ;;
+esac
+
+# Shell-operator bail-out: `||` and `;` allow later commands to mask a failed
+# `git worktree add` with exit 0, making the exit-code gate below unreliable.
+# We cannot safely determine which segment succeeded, so skip allocation for
+# commands that use these operators. `&&` is fine because a failed add
+# short-circuits the chain and yields non-zero exit overall.
+case "$CMD" in
+  *"||"*|*";"*|*"|"*)
+    emit_empty ;;
 esac
 
 # Best-effort PostToolUse exit-code check. If the tool failed, don't allocate.
@@ -83,7 +96,11 @@ WORKTREE_FLAGS_NO_ARG = {
     "--force", "-f", "--detach", "--checkout", "--no-checkout",
     "--guess-remote", "--no-guess-remote", "--track", "--no-track",
     "--quiet", "-q", "--relative-paths", "--no-relative-paths",
-    "--lock", "--orphan",
+    "--lock",
+    # --orphan is a boolean flag (creates an unborn branch); the branch name
+    # is still provided via -b/-B or derived from the worktree path.
+    # git worktree add --orphan <path>  (no branch name after --orphan)
+    "--orphan",
 }
 
 for seg in segments:
