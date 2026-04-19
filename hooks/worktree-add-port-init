@@ -77,13 +77,13 @@ for sep in ("&&", "||", ";", "|"):
     segments = out
 
 WORKTREE_FLAGS_WITH_ARG = {
-    "-b", "-B", "--orphan", "--reason",
+    "-b", "-B", "--reason",
 }
 WORKTREE_FLAGS_NO_ARG = {
     "--force", "-f", "--detach", "--checkout", "--no-checkout",
     "--guess-remote", "--no-guess-remote", "--track", "--no-track",
     "--quiet", "-q", "--relative-paths", "--no-relative-paths",
-    "--lock",
+    "--lock", "--orphan",
 }
 
 for seg in segments:
@@ -93,12 +93,18 @@ for seg in segments:
         continue
     if len(tokens) < 4:
         continue
-    # Locate "git ... worktree add"
-    try:
-        git_idx = tokens.index("git")
-    except ValueError:
+    # Locate "git" as the lead command, allowing env-var prefix tokens
+    # (FOO=bar git worktree add) but rejecting "echo git worktree add".
+    git_idx = None
+    for _i, _tok in enumerate(tokens):
+        if _tok == "git":
+            git_idx = _i
+            break
+        # Allow only key=value env-var assignments before git.
+        if "=" not in _tok or _tok.startswith("-"):
+            break
+    if git_idx is None:
         continue
-    # Allow `git` prefixed by env vars like `FOO=bar git worktree add`
     sub = tokens[git_idx + 1:]
     # Skip global git flags like -C <dir> before "worktree".
     # Track -C <dir> so relative worktree paths can be resolved against it.
@@ -108,6 +114,10 @@ for seg in segments:
         if sub[i] == "-C" and i + 1 < len(sub):
             git_cwd = sub[i + 1]
             i += 2
+        elif sub[i].startswith("-C") and len(sub[i]) > 2:
+            # -C<dir> no-space form (e.g. git -Cfoo worktree add)
+            git_cwd = sub[i][2:]
+            i += 1
         elif sub[i] == "-c" and i + 1 < len(sub):
             i += 2
         else:
@@ -141,42 +151,52 @@ for seg in segments:
         if git_cwd and not os.path.isabs(path):
             path = os.path.join(git_cwd, path)
         print(os.path.abspath(os.path.expanduser(path)))
-        sys.exit(0)
-sys.exit(0)
+        # Do NOT exit — continue scanning remaining segments for chained commands.
 PY
 )"
 
 [ -n "$WT_PATH" ] || emit_empty
-
-# If the path does not exist yet (tool reported success but directory missing),
-# nothing to allocate — bail quietly.
-[ -d "$WT_PATH" ] || emit_empty
-
-# If the worktree does not declare ports, do nothing at all. We intentionally
-# do NOT inject context for these cases — zero-noise for un-migrated repos.
-[ -f "$WT_PATH/.world/ports.yml" ] || emit_empty
 
 # port-for may not be installed yet — fail silently in that case.
 command -v port-for >/dev/null 2>&1 || PORT_FOR="$HOME/bin/port-for"
 [ -n "$PORT_FOR" ] || PORT_FOR="$(command -v port-for 2>/dev/null)"
 [ -x "$PORT_FOR" ] || emit_empty
 
-PF_OUT="$("$PORT_FOR" --json --init "$WT_PATH" 2>&1)"
-PF_EXIT=$?
+# Process each extracted path (one per line — handles chained commands like
+# `git worktree add /a main && git worktree add /b main`).
+CONTEXT_PARTS=""
+while IFS= read -r wt; do
+  [ -n "$wt" ] || continue
+  # If the path does not exist yet (tool reported success but directory missing),
+  # nothing to allocate — skip quietly.
+  [ -d "$wt" ] || continue
+  # If the worktree does not declare ports, do nothing at all. We intentionally
+  # do NOT inject context for these cases — zero-noise for un-migrated repos.
+  [ -f "$wt/.world/ports.yml" ] || continue
 
-if [ "$PF_EXIT" -ne 0 ]; then
-  emit_context "port-for --init failed for worktree $WT_PATH (exit $PF_EXIT). Output: $PF_OUT. The worktree was created successfully; allocate ports manually with: port-for --init $WT_PATH"
-fi
+  PF_OUT="$("$PORT_FOR" --json --init "$wt" 2>&1)"
+  PF_EXIT=$?
 
-# Render the allocation map as a short, human-friendly string.
-SUMMARY="$(printf '%s' "$PF_OUT" | jq -r '
-  if (.ports | length) == 0 then
-    (.warning // "no ports declared")
-  else
-    [.ports | to_entries[] | "\(.key)=\(.value)"] | join(", ")
-  end
-' 2>/dev/null)"
+  if [ "$PF_EXIT" -ne 0 ]; then
+    CONTEXT_PARTS="${CONTEXT_PARTS}port-for --init failed for worktree $wt (exit $PF_EXIT). Output: $PF_OUT. The worktree was created successfully; allocate ports manually with: port-for --init $wt\n"
+    continue
+  fi
 
-[ -n "$SUMMARY" ] || SUMMARY="(port-for returned no summary)"
+  # Render the allocation map as a short, human-friendly string.
+  SUMMARY="$(printf '%s' "$PF_OUT" | jq -r '
+    if (.ports | length) == 0 then
+      (.warning // "no ports declared")
+    else
+      [.ports | to_entries[] | "\(.key)=\(.value)"] | join(", ")
+    end
+  ' 2>/dev/null)"
 
-emit_context "Ports allocated for worktree ${WT_PATH}: ${SUMMARY}. Lock file: ${WT_PATH}/.world/ports.lock. Use \`port-for <purpose>\` from inside the worktree to look up a port."
+  [ -n "$SUMMARY" ] || SUMMARY="(port-for returned no summary)"
+  CONTEXT_PARTS="${CONTEXT_PARTS}Ports allocated for worktree ${wt}: ${SUMMARY}. Lock file: ${wt}/.world/ports.lock. Use \`port-for <purpose>\` from inside the worktree to look up a port.\n"
+done <<< "$WT_PATH"
+
+[ -n "$CONTEXT_PARTS" ] || emit_empty
+
+# Strip trailing newline for clean output.
+CONTEXT_MSG="$(printf '%b' "$CONTEXT_PARTS" | sed 's/\\n$//')"
+emit_context "$CONTEXT_MSG"
