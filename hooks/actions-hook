@@ -121,6 +121,73 @@ JSON
     send_msg "Done." "" "$LAUNCHER"
     echo '{"suppressOutput":true}'
     ;;
+  *latitude*longitude*|*longitude*latitude*)
+    # Per ADR 0014: runtime config lives in ~/claudes-world/.world/
+    LOCATION_FILE="$HOME/claudes-world/.world/user-location.json"
+    mkdir -p "$(dirname "$LOCATION_FILE")"
+
+    # Try parsing as JSON first; fall back to grep/sed text extraction.
+    LAT=$(echo "$CONTENT" | jq -r '.latitude // empty' 2>/dev/null || true)
+    LON=$(echo "$CONTENT" | jq -r '.longitude // empty' 2>/dev/null || true)
+    if [ -z "$LAT" ] || [ -z "$LON" ]; then
+      LAT=$(echo "$CONTENT" | grep -oE '"latitude"[[:space:]]*:[[:space:]]*-?[0-9]+(\.[0-9]+)?' | sed -E 's/.*:[[:space:]]*//' | head -n1)
+      LON=$(echo "$CONTENT" | grep -oE '"longitude"[[:space:]]*:[[:space:]]*-?[0-9]+(\.[0-9]+)?' | sed -E 's/.*:[[:space:]]*//' | head -n1)
+    fi
+    if [ -z "$LAT" ] || [ -z "$LON" ]; then
+      send_msg "📍 Could not parse location coordinates." "" "$LAUNCHER"
+      echo '{"suppressOutput":true}'
+      exit 0
+    fi
+
+    CITY=$(curl -s "https://nominatim.openstreetmap.org/reverse?lat=${LAT}&lon=${LON}&format=json" \
+      | jq -r '.address.city // .address.town // .address.village // "Unknown"' 2>/dev/null || echo "Unknown")
+    [ -z "$CITY" ] && CITY="Unknown"
+
+    UPDATED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    # Build current + history schema per ADR 0014.
+    # If an existing current exists, archive it into history with
+    # arrived_at = old.updated_at and departed_at = new UPDATED_AT.
+    # History capped at 50 entries (drop oldest).
+    if [ -f "$LOCATION_FILE" ]; then
+      EXISTING=$(cat "$LOCATION_FILE" 2>/dev/null || echo '{}')
+    else
+      EXISTING='{}'
+    fi
+
+    NEW_JSON=$(jq -n \
+      --argjson existing "$EXISTING" \
+      --argjson lat "$LAT" \
+      --argjson lon "$LON" \
+      --arg city "$CITY" \
+      --arg updated_at "$UPDATED_AT" \
+      '
+      ($existing.history // []) as $prior_history |
+      ($existing.current // null) as $prior_current |
+      (if $prior_current then
+         $prior_history + [{
+           latitude: $prior_current.latitude,
+           longitude: $prior_current.longitude,
+           city: $prior_current.city,
+           arrived_at: $prior_current.updated_at,
+           departed_at: $updated_at
+         }]
+       else
+         $prior_history
+       end) as $combined |
+      {
+        current: {latitude: $lat, longitude: $lon, city: $city, updated_at: $updated_at},
+        history: ($combined | (if length > 50 then .[length - 50:] else . end))
+      }
+      ')
+
+    echo "$NEW_JSON" > "$LOCATION_FILE"
+
+    send_msg "📍 Location updated: ${CITY} (${LAT}, ${LON})"
+    send_msg "Done." "" "$LAUNCHER"
+    echo '{"suppressOutput":true}'
+    exit 0
+    ;;
   *)
     exit 0
     ;;
