@@ -121,6 +121,40 @@ JSON
     send_msg "Done." "" "$LAUNCHER"
     echo '{"suppressOutput":true}'
     ;;
+  *latitude*longitude*|*longitude*latitude*)
+    mkdir -p ~/.claude/state/
+
+    # Try parsing as JSON first; fall back to grep/sed text extraction.
+    LAT=$(echo "$CONTENT" | jq -r '.latitude // empty' 2>/dev/null || true)
+    LON=$(echo "$CONTENT" | jq -r '.longitude // empty' 2>/dev/null || true)
+    if [ -z "$LAT" ] || [ -z "$LON" ]; then
+      LAT=$(echo "$CONTENT" | grep -oE '"latitude"[[:space:]]*:[[:space:]]*-?[0-9]+(\.[0-9]+)?' | sed -E 's/.*:[[:space:]]*//' | head -n1)
+      LON=$(echo "$CONTENT" | grep -oE '"longitude"[[:space:]]*:[[:space:]]*-?[0-9]+(\.[0-9]+)?' | sed -E 's/.*:[[:space:]]*//' | head -n1)
+    fi
+    if [ -z "$LAT" ] || [ -z "$LON" ]; then
+      send_msg "📍 Could not parse location coordinates." "" "$LAUNCHER"
+      echo '{"suppressOutput":true}'
+      exit 0
+    fi
+
+    CITY=$(curl -s "https://nominatim.openstreetmap.org/reverse?lat=${LAT}&lon=${LON}&format=json" \
+      | jq -r '.address.city // .address.town // .address.village // "Unknown"' 2>/dev/null || echo "Unknown")
+    [ -z "$CITY" ] && CITY="Unknown"
+
+    UPDATED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    jq -n \
+      --argjson lat "$LAT" \
+      --argjson lon "$LON" \
+      --arg city "$CITY" \
+      --arg updated_at "$UPDATED_AT" \
+      '{latitude: $lat, longitude: $lon, city: $city, updated_at: $updated_at}' \
+      > ~/.claude/state/user-location.json
+
+    send_msg "📍 Location updated: ${CITY} (${LAT}, ${LON})"
+    send_msg "Done." "" "$LAUNCHER"
+    echo '{"suppressOutput":true}'
+    exit 0
+    ;;
   *)
     exit 0
     ;;

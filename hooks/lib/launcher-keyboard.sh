@@ -26,12 +26,17 @@ build_launcher_reply_markup() {
   cpc_auth_token=$(build_cpc_auth_token "$chat_id" "$bot_token")
 
   jq -cn --arg token "$cpc_auth_token" '{
-    keyboard: [[
-      {text: "⚡️\nActions"},
-      {text: "📱\nDevelop", web_app: {url: ("https://cpc.claude.do/dev/?token=" + $token)}},
-      {text: "🎙️\nVoice", web_app: {url: ("https://cpc.claude.do/#voice&token=" + $token)}},
-      {text: "📝\nScrum"}
-    ]],
+    keyboard: [
+      [
+        {text: "⚡️\nActions"},
+        {text: "📱\nDevelop", web_app: {url: ("https://cpc.claude.do/dev/?token=" + $token)}},
+        {text: "🎙️\nVoice", web_app: {url: ("https://cpc.claude.do/#voice&token=" + $token)}},
+        {text: "📝\nScrum"}
+      ],
+      [
+        {text: "📍\nLocation", request_location: true}
+      ]
+    ],
     resize_keyboard: true,
     is_persistent: true
   }'
