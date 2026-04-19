@@ -52,6 +52,7 @@ if not cmd:
     sys.exit(0)
 
 segments = []
+# NOTE: simple heuristic — doesn't handle quoted && or ; (e.g. echo "a && b").
 for sep in ("&&", "||", ";", "|"):
     if not segments:
         segments = [cmd]
