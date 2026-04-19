@@ -54,7 +54,7 @@ esac
 # Parse the command with Python — handles quoted paths, shell flags, chained
 # commands, and the various forms of `git worktree add`. Python is already a
 # hard dependency of port-for, so this is safe.
-WT_PATH="$(python3 - "$CMD" <<'PY' 2>/dev/null
+WT_PATH="$(python3 -- - "$CMD" <<'PY' 2>/dev/null
 import os
 import shlex
 import sys
@@ -66,6 +66,7 @@ if not cmd:
 # Split on common shell chaining so we can scan each segment independently.
 # This is not a full shell parser — it only looks for `git worktree add`
 # clauses, which is sufficient for the hook's needs.
+# NOTE: simple heuristic — doesn't handle quoted && or ; (e.g. echo "a && b").
 segments = []
 for sep in ("&&", "||", ";", "|"):
     if not segments:
@@ -76,7 +77,7 @@ for sep in ("&&", "||", ";", "|"):
     segments = out
 
 WORKTREE_FLAGS_WITH_ARG = {
-    "-b", "-B", "--orphan", "--reason", "--lock",
+    "-b", "-B", "--orphan", "--reason",
 }
 WORKTREE_FLAGS_NO_ARG = {
     "--force", "-f", "--detach", "--checkout", "--no-checkout",
@@ -99,10 +100,15 @@ for seg in segments:
         continue
     # Allow `git` prefixed by env vars like `FOO=bar git worktree add`
     sub = tokens[git_idx + 1:]
-    # Skip global git flags like -C <dir> before "worktree"
+    # Skip global git flags like -C <dir> before "worktree".
+    # Track -C <dir> so relative worktree paths can be resolved against it.
     i = 0
+    git_cwd = None
     while i < len(sub) and sub[i].startswith("-"):
-        if sub[i] in ("-C", "-c"):
+        if sub[i] == "-C" and i + 1 < len(sub):
+            git_cwd = sub[i + 1]
+            i += 2
+        elif sub[i] == "-c" and i + 1 < len(sub):
             i += 2
         else:
             i += 1
@@ -130,6 +136,10 @@ for seg in segments:
         continue
     path = args[j]
     if path:
+        # If git was invoked with -C <dir>, resolve relative paths against
+        # that directory rather than cwd.
+        if git_cwd and not os.path.isabs(path):
+            path = os.path.join(git_cwd, path)
         print(os.path.abspath(os.path.expanduser(path)))
         sys.exit(0)
 sys.exit(0)
@@ -147,7 +157,7 @@ PY
 [ -f "$WT_PATH/.world/ports.yml" ] || emit_empty
 
 # port-for may not be installed yet — fail silently in that case.
-command -v port-for >/dev/null 2>&1 || PORT_FOR="/home/claude/bin/port-for"
+command -v port-for >/dev/null 2>&1 || PORT_FOR="$HOME/bin/port-for"
 [ -n "$PORT_FOR" ] || PORT_FOR="$(command -v port-for 2>/dev/null)"
 [ -x "$PORT_FOR" ] || emit_empty
 

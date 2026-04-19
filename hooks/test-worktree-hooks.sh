@@ -29,7 +29,7 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 0
 fi
 
-if ! command -v port-for >/dev/null 2>&1 && [ ! -x /home/claude/bin/port-for ]; then
+if ! command -v port-for >/dev/null 2>&1 && [ ! -x "$HOME/bin/port-for" ]; then
   printf 'port-for not found, skipping integration test\n'
   exit 0
 fi
@@ -220,18 +220,24 @@ port-for --release-worktree "$WT_PATH2" >/dev/null 2>&1 || true
 # Also drop the sticky project slot entries from the global registry so
 # re-runs start clean. Option D sharding persists project→slot mapping
 # across releases.
-if [ -f /home/claude/.world/ports/active.json ] && command -v python3 >/dev/null 2>&1; then
+if [ -f "$HOME/.world/ports/active.json" ] && command -v python3 >/dev/null 2>&1; then
   python3 - <<'PYCLEAN' >/dev/null 2>&1 || true
-import json
-p = '/home/claude/.world/ports/active.json'
+import json, os, tempfile
+p = os.path.join(os.environ['HOME'], '.world', 'ports', 'active.json')
 with open(p) as f:
     d = json.load(f)
 projects = d.get('__projects__', {})
 for k in list(projects.keys()):
     if k.startswith('hooks-test-repo'):
         del projects[k]
-with open(p, 'w') as f:
-    json.dump(d, f, indent=2)
+tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(p))
+try:
+    with os.fdopen(tmp_fd, 'w') as f:
+        json.dump(d, f, indent=2)
+    os.replace(tmp_path, p)
+except Exception:
+    os.unlink(tmp_path)
+    raise
 PYCLEAN
 fi
 
