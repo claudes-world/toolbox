@@ -39,10 +39,11 @@ fetch_weather() {
   local out="$TMPDIR_BRIEF/weather"
   local err="$TMPDIR_BRIEF/weather_err"
   local location="NewYork"
-  local loc_file="$HOME/.claude/state/user-location.json"
+  # Per ADR 0014: runtime config lives in ~/claudes-world/.world/
+  local loc_file="$HOME/claudes-world/.world/user-location.json"
   if [[ -f "$loc_file" ]]; then
     local saved_city
-    saved_city=$(jq -r '.city // empty' "$loc_file" 2>/dev/null || true)
+    saved_city=$(jq -r '.current.city // empty' "$loc_file" 2>/dev/null || true)
     if [[ -n "$saved_city" ]]; then
       location="$saved_city"
     fi

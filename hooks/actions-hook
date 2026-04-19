@@ -122,7 +122,9 @@ JSON
     echo '{"suppressOutput":true}'
     ;;
   *latitude*longitude*|*longitude*latitude*)
-    mkdir -p ~/.claude/state/
+    # Per ADR 0014: runtime config lives in ~/claudes-world/.world/
+    LOCATION_FILE="$HOME/claudes-world/.world/user-location.json"
+    mkdir -p "$(dirname "$LOCATION_FILE")"
 
     # Try parsing as JSON first; fall back to grep/sed text extraction.
     LAT=$(echo "$CONTENT" | jq -r '.latitude // empty' 2>/dev/null || true)
@@ -142,13 +144,44 @@ JSON
     [ -z "$CITY" ] && CITY="Unknown"
 
     UPDATED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    jq -n \
+
+    # Build current + history schema per ADR 0014.
+    # If an existing current exists, archive it into history with
+    # arrived_at = old.updated_at and departed_at = new UPDATED_AT.
+    # History capped at 50 entries (drop oldest).
+    if [ -f "$LOCATION_FILE" ]; then
+      EXISTING=$(cat "$LOCATION_FILE" 2>/dev/null || echo '{}')
+    else
+      EXISTING='{}'
+    fi
+
+    NEW_JSON=$(jq -n \
+      --argjson existing "$EXISTING" \
       --argjson lat "$LAT" \
       --argjson lon "$LON" \
       --arg city "$CITY" \
       --arg updated_at "$UPDATED_AT" \
-      '{latitude: $lat, longitude: $lon, city: $city, updated_at: $updated_at}' \
-      > ~/.claude/state/user-location.json
+      '
+      ($existing.history // []) as $prior_history |
+      ($existing.current // null) as $prior_current |
+      (if $prior_current then
+         $prior_history + [{
+           latitude: $prior_current.latitude,
+           longitude: $prior_current.longitude,
+           city: $prior_current.city,
+           arrived_at: $prior_current.updated_at,
+           departed_at: $updated_at
+         }]
+       else
+         $prior_history
+       end) as $combined |
+      {
+        current: {latitude: $lat, longitude: $lon, city: $city, updated_at: $updated_at},
+        history: ($combined | (if length > 50 then .[length - 50:] else . end))
+      }
+      ')
+
+    echo "$NEW_JSON" > "$LOCATION_FILE"
 
     send_msg "📍 Location updated: ${CITY} (${LAT}, ${LON})"
     send_msg "Done." "" "$LAUNCHER"
