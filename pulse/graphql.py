@@ -345,8 +345,8 @@ class GraphQLClient:
                 if on_page_response is not None:
                     try:
                         on_page_response(body)
-                    except PRNodeNotFound:
-                        raise  # null-node sentinel: stop pagination immediately
+                    except (PRNodeNotFound, ScopeMissing):
+                        raise  # sentinel exceptions: stop pagination immediately
                     except Exception:
                         pass  # other callback failures must not interrupt pagination
 
@@ -382,7 +382,7 @@ class GraphQLClient:
 
                 variables[cursor_var] = end_cursor
 
-        except (RunDeadlineExceeded, RetriesExhausted, CostBudgetExceeded, RuntimeError, PRNodeNotFound):
+        except (RunDeadlineExceeded, RetriesExhausted, CostBudgetExceeded, RuntimeError, PRNodeNotFound, ScopeMissing):
             # Interrupted — save cursor so next run resumes instead of restarting from page 1
             if use_checkpoint and last_cursor:
                 try:
@@ -544,10 +544,6 @@ class GraphQLClient:
             )
 
         accumulated_cost = [0]
-        # Mutable flag: on_page_response sets this when INSUFFICIENT_SCOPES detected.
-        # paginate() swallows all exceptions except PRNodeNotFound from on_page_response,
-        # so we signal via flag and raise after paginate() returns.
-        scope_missing_msg: list[str] = []
 
         def _on_page(resp: dict) -> None:
             data = resp.get("data") or {}
@@ -559,11 +555,11 @@ class GraphQLClient:
                 logger.warning(
                     "GitHub rate limit remaining=%d — approaching limit", remaining
                 )
-            # Check for INSUFFICIENT_SCOPES error (flag — not raise, paginate() swallows it)
+            # Raise ScopeMissing directly — paginate() re-raises it (same as PRNodeNotFound).
             errors = resp.get("errors") or []
             for err in errors:
                 if err.get("type") == "INSUFFICIENT_SCOPES":
-                    scope_missing_msg.append(
+                    raise ScopeMissing(
                         f"Token lacks required scope for vulnerabilityAlerts: {err.get('message', '')}"
                     )
 
@@ -582,10 +578,6 @@ class GraphQLClient:
         finally:
             if cumulative_cost is not None:
                 cumulative_cost[0] += accumulated_cost[0]
-
-        # Raise ScopeMissing after paginate() completes if flag was set
-        if scope_missing_msg:
-            raise ScopeMissing(scope_missing_msg[0])
 
         # Convert nodes to VulnerabilityAlert, dedup by (ghsa_id, package_name)
         seen: set[tuple[str, str]] = set()
