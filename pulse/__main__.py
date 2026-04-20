@@ -520,5 +520,22 @@ def _run_dry_run(repo_override: str | None = None) -> None:
     click.echo(str(out_path))
 
 
+@main.command("migrate")
+def cmd_migrate() -> None:
+    """Migrate pulse.db from v0 to v1 (idempotent)."""
+    from pulse.migrate import run_migration
+
+    db_path = _DEFAULT_DB_PATH
+    try:
+        status = run_migration(db_path)
+        if status == "no-op":
+            click.echo("pulse.db already at v1 — no migration needed.")
+        else:
+            click.echo(f"Migration complete. Backup preserved at {db_path.parent}/pulse.db.pre-v1-*")
+    except RuntimeError as e:
+        click.echo(f"ERROR: {e}", err=True)
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     main()

@@ -22,6 +22,8 @@ class RepoData:
     parent_is_deleted: bool
     capture_status: str
     field_statuses: dict[str, FieldStatus] = field(default_factory=dict)
+    upstream: dict | None = None
+    vulnerability_alerts: list | None = None
 
 
 @dataclass
@@ -36,6 +38,7 @@ class PRData:
     is_renovate: bool
     hours_idle: float | None
     stalled: bool
+    review_events: list | None = None
 
 
 @dataclass
