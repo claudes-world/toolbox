@@ -12,6 +12,8 @@ GitHub org health monitor. Periodic GraphQL snapshots across configured orgs, st
 
 Run the installer from the toolbox root — it handles everything:
 
+> **First run only:** if `~/.world/pulse/env` doesn't exist, `install.sh` creates an empty one and stops — edit it to add your `GH_TOKEN`, then re-run `./install.sh`.
+
 ```bash
 cd ~/code/toolbox
 ./install.sh
