@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -29,11 +30,21 @@ def open_db(path: Path) -> sqlite3.Connection:
             fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             os.close(fd)
         except FileExistsError:
-            # DB already exists — best-effort fix permissions on existing file
+            # File already exists — validate before proceeding (symlink/ownership checks)
+            try:
+                st = os.lstat(str(path))  # lstat: never follow symlinks
+            except OSError as e:
+                raise DBSetupError(f"cannot stat database path {path}: {e}") from e
+            if stat.S_ISLNK(st.st_mode):
+                raise DBSetupError(f"database path {path} is a symlink — refusing to open")
+            if not stat.S_ISREG(st.st_mode):
+                raise DBSetupError(f"database path {path} is not a regular file")
+            if st.st_uid != os.getuid():
+                raise DBSetupError(f"database path {path} is not owned by current user (uid {os.getuid()})")
             try:
                 path.chmod(0o600)
-            except OSError:
-                pass
+            except OSError as e:
+                raise DBSetupError(f"cannot set permissions on {path}: {e}") from e
         conn = sqlite3.connect(str(path), timeout=5.0)
         conn.row_factory = sqlite3.Row
     except Exception as e:
@@ -44,7 +55,10 @@ def open_db(path: Path) -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode=WAL")
     except sqlite3.OperationalError as e:
         conn.close()
-        raise DBSetupError(f"PRAGMA journal_mode failed (env/permissions issue): {e}") from e
+        msg = str(e).lower()
+        if any(k in msg for k in ("malformed", "corrupt", "not a database", "disk image")):
+            raise DBCorrupt(f"database corrupt (detected during WAL setup): {e}") from e
+        raise DBSetupError(f"PRAGMA journal_mode failed: {e}") from e
     except sqlite3.DatabaseError as e:
         conn.close()
         raise DBCorrupt(f"database file is corrupt or not valid SQLite: {e}") from e
@@ -57,10 +71,15 @@ def open_db(path: Path) -> sqlite3.Connection:
         conn.execute("PRAGMA busy_timeout=5000")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA foreign_keys=ON")
-        rows = conn.execute("PRAGMA integrity_check").fetchall()
-        row_values = [tuple(r) for r in rows]
-        if row_values != [("ok",)]:
-            raise DBCorrupt(f"integrity_check failed: {row_values}")
+        try:
+            rows = conn.execute("PRAGMA integrity_check").fetchall()
+            row_values = [tuple(r) for r in rows]
+            if row_values != [("ok",)]:
+                raise DBCorrupt(f"integrity_check failed: {row_values}")
+        except DBCorrupt:
+            raise
+        except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
+            raise DBCorrupt(f"integrity_check raised exception (corrupt db): {e}") from e
         create_schema(conn)
         return conn
     except DBCorrupt:
