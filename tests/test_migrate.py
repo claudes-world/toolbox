@@ -175,7 +175,7 @@ def test_migration_post_integrity_check_fails(tmp_path: Path, monkeypatch: pytes
     conn = sqlite3.connect(str(db))
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     conn.close()
-    assert version in (_V0_USER_VERSION, 0), f"user_version should not be bumped, got {version}"
+    assert version == _V0_USER_VERSION, f"user_version should remain {_V0_USER_VERSION} after post-integrity failure, got {version}"
 
 
 def test_migration_v0_data_still_queryable(tmp_path: Path) -> None:
