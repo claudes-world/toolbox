@@ -215,6 +215,10 @@ class GraphQLClient:
                 current_nodes: list[dict] = body
                 for key in nodes_path:
                     current_nodes = current_nodes[key]
+                if not isinstance(current_nodes, list):
+                    raise TypeError(f"nodes_path resolved to {type(current_nodes).__name__}, expected list")
+                if not isinstance(page_info, dict):
+                    raise TypeError(f"page_info_path resolved to {type(page_info).__name__}, expected dict")
             except (KeyError, TypeError) as e:
                 print(f"WARNING: paginate path traversal failed: {e}", file=sys.stderr)
                 break  # _completed stays False
