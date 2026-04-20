@@ -213,6 +213,12 @@ def create_schema(conn: sqlite3.Connection) -> None:
                 -- repo is TEXT (not FK) so pagination state survives snapshot deletion/pruning
             )
         """)
+    # Set user_version=10 to mark this as a known v0 schema, but only on a
+    # fresh DB (current_version=0). Prevents downgrading an already-migrated DB.
+    # Must run OUTSIDE the transaction (DDL auto-commits in SQLite).
+    current_version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if current_version == 0:
+        conn.execute("PRAGMA user_version = 10")
 
 
 def atomic_write_json(path: Path, data: dict) -> None:
