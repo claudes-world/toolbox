@@ -128,6 +128,8 @@ def run_migration(db_path: Path) -> str:
             conn.execute("ALTER TABLE prs ADD COLUMN node_id TEXT")
         if not _column_exists(conn, "prs", "review_events"):
             conn.execute("ALTER TABLE prs ADD COLUMN review_events TEXT")
+        if not _column_exists(conn, "snapshots", "reviewer_activity_7d"):
+            conn.execute("ALTER TABLE snapshots ADD COLUMN reviewer_activity_7d TEXT")
 
         # Fix 4: integrity_check BEFORE user_version bump
         # If check fails, DB is NOT permanently tagged v1

@@ -999,6 +999,21 @@ def run_snapshot(
         capture_status=snapshot_capture_status,
     )
 
+    # Compute and cache 7-day reviewer activity rollup
+    # Local import to avoid circular dependency (rollup imports DEPENDABOT_AUTHORS from this module)
+    try:
+        from pulse.rollup import compute_reviewer_activity_7d
+        rollup = compute_reviewer_activity_7d(db_conn)
+        with db_conn:
+            db_conn.execute(
+                "UPDATE snapshots SET reviewer_activity_7d=? WHERE id=?",
+                (json.dumps(rollup), snapshot_id),
+            )
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            "reviewer_activity_7d rollup failed for snapshot %s: %s", snapshot_id, e
+        )
+
     # Write JSON artifacts
     if output_dir is not None:
         current_data = _build_current_json(db_conn, snapshot_id)
