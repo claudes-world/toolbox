@@ -523,6 +523,8 @@ def _run_dry_run(repo_override: str | None = None) -> None:
 @main.command("migrate")
 def cmd_migrate() -> None:
     """Migrate pulse.db from v0 to v1 (idempotent)."""
+    import sqlite3 as _sqlite3
+
     from pulse.migrate import run_migration
 
     db_path = _DEFAULT_DB_PATH
@@ -533,7 +535,11 @@ def cmd_migrate() -> None:
         else:
             click.echo(f"Migration complete. Backup preserved at {db_path.parent}/pulse.db.pre-v1-*")
     except RuntimeError as e:
-        click.echo(f"ERROR: {e}", err=True)
+        click.echo(f"Migration failed: {e}", err=True)
+        sys.exit(1)
+    except (_sqlite3.Error, OSError) as e:
+        click.echo(f"Migration failed ({type(e).__name__}): {e}", err=True)
+        click.echo(f"Check backup at: {db_path.parent}/pulse.db.pre-v1-* before retrying", err=True)
         sys.exit(1)
 
 

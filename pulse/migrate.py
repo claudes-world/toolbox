@@ -48,7 +48,7 @@ def run_migration(db_path: Path) -> str:
     4. Pre-migration integrity check
     5. Disk-space check (backup size × 2 ≤ free space, including WAL/SHM)
     6. Backup DB → pulse.db.pre-v1-<ISO-8601-microseconds>
-    7. ALTER TABLE with IF NOT EXISTS guards
+    7. ALTER TABLE — 3 new columns (upstream, vulnerability_alerts, review_events)
     8. Post-migration integrity check
     9. PRAGMA user_version = 11
     10. Return "migrated"
@@ -113,17 +113,14 @@ def run_migration(db_path: Path) -> str:
         # Fix 3: IF NOT EXISTS guards for ALTER TABLE
         # SQLite ALTER TABLE autocommits — with conn: does NOT roll back DDL.
         # Check column existence first to make partial migration recovery safe.
+        # 3 new columns added: upstream, vulnerability_alerts, review_events.
+        # schema_version already exists in v0 DDL (DEFAULT '1.0') — no ALTER needed.
         if not _column_exists(conn, "repos", "upstream"):
             conn.execute("ALTER TABLE repos ADD COLUMN upstream TEXT")
         if not _column_exists(conn, "repos", "vulnerability_alerts"):
             conn.execute("ALTER TABLE repos ADD COLUMN vulnerability_alerts TEXT")
         if not _column_exists(conn, "prs", "review_events"):
             conn.execute("ALTER TABLE prs ADD COLUMN review_events TEXT")
-        # schema_version already exists in v0 DDL (DEFAULT '1.0'); skip if present
-        if not _column_exists(conn, "snapshots", "schema_version"):
-            conn.execute(
-                "ALTER TABLE snapshots ADD COLUMN schema_version TEXT DEFAULT '1.1'"
-            )
 
         # Fix 4: integrity_check BEFORE user_version bump
         # If check fails, DB is NOT permanently tagged v1
