@@ -37,7 +37,6 @@ VOICES = {
     "heading": os.environ.get("MD_VOICE_HEADING", "en-US-Wavenet-B"),
     "body": os.environ.get("MD_VOICE_BODY", "en-US-Wavenet-J"),
     "special": os.environ.get("MD_VOICE_SPECIAL", "en-US-Neural2-C"),
-    "table": os.environ.get("MD_VOICE_TABLE", "en-US-Neural2-F"),
     "table_key": os.environ.get("MD_VOICE_TABLE_KEY", "en-US-Neural2-H"),    # col 0 — row labels
     "table_val": os.environ.get("MD_VOICE_TABLE_VAL", "en-US-Neural2-F"),    # col 1+ — values
     "quote": os.environ.get("MD_VOICE_QUOTE", "en-US-Wavenet-D"),
