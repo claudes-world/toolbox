@@ -168,19 +168,27 @@ class GraphQLClient:
 
             if resp.status_code in (403, 429):
                 is_secondary = "secondary rate limit" in resp.text.lower()
+                has_retry_after = "retry-after" in resp.headers
                 try:
-                    has_retry_after = "retry-after" in resp.headers
                     is_primary_exhausted = int(resp.headers.get("x-ratelimit-remaining", 1)) == 0
-                except (ValueError, KeyError):
-                    has_retry_after = False
+                except ValueError:
                     is_primary_exhausted = False
 
                 if is_secondary or has_retry_after or is_primary_exhausted:
-                    try:
-                        retry_after = int(resp.headers.get("retry-after", 60))
-                    except ValueError:
-                        retry_after = 60
-                    wait = min(retry_after * (1.5**attempt), 600)
+                    # Determine wait base: prefer retry-after header, then x-ratelimit-reset epoch
+                    wait_base = 60  # default
+                    if has_retry_after:
+                        try:
+                            wait_base = int(resp.headers.get("retry-after", 60))
+                        except ValueError:
+                            wait_base = 60
+                    elif is_primary_exhausted:
+                        try:
+                            reset_epoch = int(resp.headers.get("x-ratelimit-reset", 0))
+                            wait_base = max(0, int(reset_epoch - time.time())) + 1
+                        except ValueError:
+                            wait_base = 60
+                    wait = min(wait_base * (1.5**attempt), 600)
                     if deadline_monotonic is not None:
                         dl_remaining = deadline_monotonic - time.monotonic()
                         if dl_remaining <= 0:
