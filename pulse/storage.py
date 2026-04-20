@@ -46,6 +46,12 @@ def open_db(path: Path) -> sqlite3.Connection:
                 path.chmod(0o600)
             except OSError as e:
                 raise DBSetupError(f"cannot set permissions on {path}: {e}") from e
+        # Residual TOCTOU: stdlib sqlite3 only accepts a path string; there is no
+        # fd-based open equivalent in Python without apsw. A narrow window exists
+        # between lstat validation above and this connect() call. Practical closure:
+        # parent dir is 0o700 (owner-only), single-UID threat model (VPS). Adding
+        # apsw or a Linux /proc/self/fd hack is not justified for this use case.
+        # See: org-pulse SOP §"Known limitations" (lands with #45).
         conn = sqlite3.connect(str(path), timeout=5.0)
         conn.row_factory = sqlite3.Row
     except DBSetupError:
