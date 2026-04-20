@@ -81,17 +81,17 @@ def compute_reviewer_activity_7d(conn: sqlite3.Connection) -> dict:
         if bucket not in buckets:
             buckets[bucket] = {"total": 0, "approved": 0, "change_requested": 0, "commented": 0, "dismissed": 0}
         b = buckets[bucket]
-        b["total"] += 1
-        if state == "APPROVED":
-            b["approved"] += 1
-        elif state == "CHANGES_REQUESTED":
-            b["change_requested"] += 1
-        elif event_type == "IssueComment" or (state in ("COMMENTED", None) and event_type == "PULL_REQUEST_REVIEW"):
-            b["commented"] += 1
-        elif state == "DISMISSED":
-            b["dismissed"] += 1
-        elif event_type in ("REVIEW_REQUESTED_EVENT", "MERGED_EVENT", "CLOSED_EVENT", "LABELED_EVENT", "REFERENCED_EVENT"):
-            pass  # non-review events — count in total but not in sub-buckets
+        if event_type in ("PULL_REQUEST_REVIEW", "IssueComment"):
+            b["total"] += 1
+            if state == "APPROVED":
+                b["approved"] += 1
+            elif state == "CHANGES_REQUESTED":
+                b["change_requested"] += 1
+            elif event_type == "IssueComment" or state in ("COMMENTED", None):
+                b["commented"] += 1
+            elif state == "DISMISSED":
+                b["dismissed"] += 1
+        # non-review timeline events (MERGED_EVENT, etc.) — not counted in any bucket
 
     return buckets
 
