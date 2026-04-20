@@ -103,6 +103,17 @@ class GraphQLClient:
                     time.sleep(wait)
                     continue
 
+                if not isinstance(body, dict):
+                    # non-dict JSON body (null, array) — treat as transient
+                    wait = min(30, 2**attempt)
+                    if deadline_monotonic is not None:
+                        dl_remaining = deadline_monotonic - time.monotonic()
+                        if dl_remaining <= 0:
+                            raise RunDeadlineExceeded()
+                        wait = min(wait, max(0, dl_remaining - 1))
+                    time.sleep(wait)
+                    continue
+
                 if body.get("data") is None and body.get("errors"):
                     print(
                         f"WARNING: GraphQL returned null data with errors: {body['errors'][:2]}",
@@ -190,7 +201,7 @@ class GraphQLClient:
         collection must persist nodes eagerly per page rather than relying on the
         full return value.
         """
-        variables = dict(variables)
+        variables = dict(variables or {})
         use_checkpoint = db_conn is not None and org and repo and field
 
         if use_checkpoint:
