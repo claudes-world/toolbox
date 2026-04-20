@@ -128,6 +128,8 @@ Full documentation: [`pulse/README.md`](pulse/README.md)
 pip install -e ~/code/toolbox/
 mkdir -p ~/.world/pulse && chmod 700 ~/.world/pulse
 echo "GH_TOKEN=ghp_yourtoken" > ~/.world/pulse/env && chmod 600 ~/.world/pulse/env
+cp ~/code/toolbox/systemd/user/config.yml ~/.world/pulse/config.yml
+# edit ~/.world/pulse/config.yml — set your org name under `orgs:`
 export $(grep -v '^#' ~/.world/pulse/env | xargs)
 pulse --self-check    # validate token, config, storage
 pulse --now           # run snapshot + render digest
