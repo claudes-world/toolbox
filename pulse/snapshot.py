@@ -624,6 +624,7 @@ def _build_current_json(
                         "is_dependabot": bool(r["is_dependabot"]),
                         "is_renovate": bool(r["is_renovate"]),
                         "stalled": bool(r["stalled"]),
+                        "review_events": json.loads(r["review_events"]) if r["review_events"] else None,
                     }
                     for r in pr_rows
                 ],
