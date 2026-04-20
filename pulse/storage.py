@@ -63,96 +63,103 @@ def open_db(path: Path) -> sqlite3.Connection:
 
 def create_schema(conn: sqlite3.Connection) -> None:
     """Create all pulse tables if they do not exist."""
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS snapshots (
-            id TEXT PRIMARY KEY,
-            captured_at_utc TEXT NOT NULL,
-            captured_at_et TEXT NOT NULL,
-            duration_ms INTEGER,
-            orgs_queried TEXT NOT NULL,
-            repos_succeeded INTEGER NOT NULL DEFAULT 0,
-            repos_failed INTEGER NOT NULL DEFAULT 0,
-            repos_partial INTEGER NOT NULL DEFAULT 0,
-            schema_version TEXT NOT NULL DEFAULT '1.0',
-            capture_status TEXT NOT NULL DEFAULT 'success'
-        );
-
-        CREATE TABLE IF NOT EXISTS repos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            snapshot_id TEXT NOT NULL REFERENCES snapshots(id),
-            org TEXT NOT NULL,
-            name TEXT NOT NULL,
-            default_branch TEXT,
-            is_fork INTEGER NOT NULL DEFAULT 0,
-            is_archived INTEGER NOT NULL DEFAULT 0,
-            parent_owner TEXT,
-            parent_name TEXT,
-            parent_is_deleted INTEGER NOT NULL DEFAULT 0,
-            capture_status TEXT NOT NULL DEFAULT 'success',
-            field_statuses TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS prs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            repo_id INTEGER NOT NULL REFERENCES repos(id),
-            number INTEGER NOT NULL,
-            title TEXT NOT NULL,
-            author TEXT,
-            created_at TEXT,
-            updated_at TEXT,
-            is_draft INTEGER NOT NULL DEFAULT 0,
-            is_dependabot INTEGER NOT NULL DEFAULT 0,
-            is_renovate INTEGER NOT NULL DEFAULT 0,
-            hours_idle REAL,
-            stalled INTEGER NOT NULL DEFAULT 0,
-            UNIQUE(repo_id, number)
-        );
-
-        CREATE TABLE IF NOT EXISTS issues (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            repo_id INTEGER NOT NULL REFERENCES repos(id),
-            number INTEGER NOT NULL,
-            title TEXT NOT NULL,
-            author TEXT,
-            created_at TEXT,
-            updated_at TEXT,
-            labels TEXT,
-            hours_idle REAL,
-            stalled INTEGER NOT NULL DEFAULT 0,
-            UNIQUE(repo_id, number)
-        );
-
-        CREATE TABLE IF NOT EXISTS releases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            repo_id INTEGER NOT NULL REFERENCES repos(id),
-            tag_name TEXT NOT NULL,
-            name TEXT,
-            created_at TEXT,
-            is_prerelease INTEGER NOT NULL DEFAULT 0,
-            UNIQUE(repo_id, tag_name)
-        );
-
-        CREATE TABLE IF NOT EXISTS alerts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            repo_id INTEGER NOT NULL REFERENCES repos(id),
-            severity TEXT,
-            ghsa_id TEXT,
-            package_name TEXT,
-            ecosystem TEXT,
-            age_days INTEGER,
-            dependabot_pr_number INTEGER
-        );
-
-        CREATE TABLE IF NOT EXISTS pagination_state (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            repo TEXT NOT NULL,
-            field TEXT NOT NULL,
-            last_cursor TEXT NOT NULL,
-            timestamp TEXT NOT NULL,
-            UNIQUE(repo, field)
-        );
-    """)
-    conn.commit()
+    with conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS snapshots (
+                id TEXT PRIMARY KEY,
+                captured_at_utc TEXT NOT NULL,
+                captured_at_et TEXT NOT NULL,
+                duration_ms INTEGER,
+                orgs_queried TEXT NOT NULL,
+                repos_succeeded INTEGER NOT NULL DEFAULT 0,
+                repos_failed INTEGER NOT NULL DEFAULT 0,
+                repos_partial INTEGER NOT NULL DEFAULT 0,
+                schema_version TEXT NOT NULL DEFAULT '1.0',
+                capture_status TEXT NOT NULL DEFAULT 'success'
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS repos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_id TEXT NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+                org TEXT NOT NULL,
+                name TEXT NOT NULL,
+                default_branch TEXT,
+                is_fork INTEGER NOT NULL DEFAULT 0,
+                is_archived INTEGER NOT NULL DEFAULT 0,
+                parent_owner TEXT,
+                parent_name TEXT,
+                parent_is_deleted INTEGER NOT NULL DEFAULT 0,
+                capture_status TEXT NOT NULL DEFAULT 'success',
+                field_statuses TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS prs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+                number INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                author TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                is_draft INTEGER NOT NULL DEFAULT 0,
+                is_dependabot INTEGER NOT NULL DEFAULT 0,
+                is_renovate INTEGER NOT NULL DEFAULT 0,
+                hours_idle REAL,
+                stalled INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(repo_id, number)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS issues (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+                number INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                author TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                labels TEXT,
+                hours_idle REAL,
+                stalled INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(repo_id, number)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS releases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+                tag_name TEXT NOT NULL,
+                name TEXT,
+                created_at TEXT,
+                is_prerelease INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(repo_id, tag_name)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+                severity TEXT,
+                ghsa_id TEXT,
+                package_name TEXT,
+                ecosystem TEXT,
+                age_days INTEGER,
+                dependabot_pr_number INTEGER
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pagination_state (
+                -- repo is TEXT (not FK) so pagination state survives snapshot deletion/pruning
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo TEXT NOT NULL,
+                field TEXT NOT NULL,
+                last_cursor TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                UNIQUE(repo, field)
+            )
+        """)
 
 
 def atomic_write_json(path: Path, data: dict) -> None:
