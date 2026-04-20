@@ -135,7 +135,7 @@ def render_digest(db_conn: sqlite3.Connection, cfg: PulseConfig) -> str:
     normal_prs = [(rl, rn, pr) for rl, rn, pr in all_prs if not pr["stalled"]]
     ordered_prs = stalled_prs + normal_prs
 
-    pr_repo_count = len({rn for _, rn, _ in ordered_prs})
+    pr_repo_count = len({rl for rl, _rn, _ in ordered_prs})
     lines.append(f"## Open PRs  ({len(ordered_prs)} across {pr_repo_count} repos)")
     lines.append("")
     for repo_label, _rn, pr in ordered_prs:
@@ -165,7 +165,7 @@ def render_digest(db_conn: sqlite3.Connection, cfg: PulseConfig) -> str:
     normal_issues = [(rl, rn, i) for rl, rn, i in all_issues if not i["stalled"]]
     ordered_issues = stalled_issues + normal_issues
 
-    issue_repo_count = len({rn for _, rn, _ in ordered_issues})
+    issue_repo_count = len({rl for rl, _rn, _ in ordered_issues})
     lines.append(f"## Open Issues  ({len(ordered_issues)} across {issue_repo_count} repos)")
     lines.append("")
     for repo_label, _rn, issue in ordered_issues:
@@ -206,28 +206,27 @@ def render_digest(db_conn: sqlite3.Connection, cfg: PulseConfig) -> str:
     lines.append("")
 
     # ---- Dependabot ----
-    repos_with_alerts: list[tuple[str, list[sqlite3.Row]]] = []
+    # Derived from prs table (is_dependabot=True) — vulnerabilityAlerts is v1 scope
+    repos_with_dependabot_prs: list[tuple[str, list[sqlite3.Row]]] = []
     total_dependabot_prs = 0
     for repo_row in repo_rows:
         repo_label = f"{md_escape(repo_row['org'])}/{md_escape(repo_row['name'])}"
-        alert_rows = db_conn.execute(
-            "SELECT * FROM alerts WHERE repo_id=?", (repo_row["id"],)
+        dep_pr_rows = db_conn.execute(
+            "SELECT * FROM prs WHERE repo_id=? AND is_dependabot=1", (repo_row["id"],)
         ).fetchall()
-        if alert_rows:
-            repos_with_alerts.append((repo_label, list(alert_rows)))
-            total_dependabot_prs += sum(
-                1 for a in alert_rows if a["dependabot_pr_number"] is not None
-            )
+        if dep_pr_rows:
+            repos_with_dependabot_prs.append((repo_label, list(dep_pr_rows)))
+            total_dependabot_prs += len(dep_pr_rows)
 
-    lines.append(f"## Dependabot  ({total_dependabot_prs} open PRs across {len(repos_with_alerts)} repos)")
+    lines.append(f"## Dependabot  ({total_dependabot_prs} open PRs across {len(repos_with_dependabot_prs)} repos)")
     lines.append("")
-    for repo_label, alert_rows in repos_with_alerts:
-        age_days_list = [a["age_days"] for a in alert_rows if a["age_days"] is not None]
-        oldest = max(age_days_list) if age_days_list else None
-        oldest_str = f"{oldest} days" if oldest is not None else "unknown"
-        lines.append(f"- {repo_label}: {len(alert_rows)} open alerts (oldest: {oldest_str})")
-    if not repos_with_alerts:
-        lines.append("_No open Dependabot alerts._")
+    for repo_label, dep_prs in repos_with_dependabot_prs:
+        updated_ats = [p["updated_at"] for p in dep_prs if p["updated_at"] is not None]
+        oldest_updated = min(updated_ats) if updated_ats else None
+        oldest_str = oldest_updated or "unknown"
+        lines.append(f"- {repo_label}: {len(dep_prs)} open Dependabot PRs (oldest updated: {oldest_str})")
+    if not repos_with_dependabot_prs:
+        lines.append("_No open Dependabot PRs._")
     lines.append("")
 
     # ---- Footer ----

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from pulse.config import PulseConfig
 from pulse.graphql import GraphQLClient
-from pulse.schema import AlertData, FieldStatus, IssueData, PRData, ReleaseData, RepoData
+from pulse.schema import FieldStatus, IssueData, PRData, ReleaseData, RepoData
 from pulse.storage import atomic_write_json
 
 DEPENDABOT_AUTHORS = {"dependabot[bot]", "dependabot-preview[bot]", "app/dependabot"}
@@ -88,25 +88,6 @@ query($org: String!, $repo: String!, $first: Int!) {
 }
 """
 
-DEPENDABOT_QUERY = """
-query($org: String!, $repo: String!) {
-  rateLimit { cost remaining resetAt used }
-  repository(owner: $org, name: $repo) {
-    vulnerabilityAlerts(first: 30, states: OPEN) {
-      totalCount
-      nodes {
-        securityVulnerability {
-          severity
-          package { name ecosystem }
-          advisory { ghsaId publishedAt }
-        }
-        dependabotUpdate { pullRequest { number updatedAt } }
-      }
-    }
-  }
-}
-"""
-
 
 def _parse_dt(s: str | None) -> datetime | None:
     if not s:
@@ -136,36 +117,26 @@ def _capture_prs(
     fingerprint: str,
 ) -> tuple[list[PRData], FieldStatus]:
     try:
-        # First check totalCount via a cheap query
+        # Single execute — max_prs <= 100 so fits in one page
         body = gql.execute(
             PRS_QUERY,
-            variables={"org": org, "repo": repo_name, "first": min(max_prs, 100), "cursor": None},
+            {"org": org, "repo": repo_name, "first": max_prs, "cursor": None},
             deadline_monotonic=deadline,
         )
-        total_count = (
-            (body.get("data") or {})
-            .get("repository", {})
-            .get("pullRequests", {})
-            .get("totalCount", 0)
-        )
+        repo_data = (body.get("data") or {}).get("repository") or {}
+        pr_conn = repo_data.get("pullRequests") or {}
+        total_count = pr_conn.get("totalCount", 0)
+        nodes = pr_conn.get("nodes") or []
 
-        nodes = gql.paginate(
-            PRS_QUERY,
-            variables={"org": org, "repo": repo_name, "first": min(max_prs, 100)},
-            page_info_path=["data", "repository", "pullRequests", "pageInfo"],
-            nodes_path=["data", "repository", "pullRequests", "nodes"],
-            deadline_monotonic=deadline,
-            db_conn=db_conn,
-            org=org,
-            repo=repo_name,
-            field="prs",
-            fingerprint=fingerprint,
-        )
+        field_status = FieldStatus(status="success")
+        if total_count > max_prs:
+            field_status = FieldStatus(
+                status="partial",
+                error_note=f"truncated, {total_count} total, fetched {len(nodes)}",
+            )
 
-        # Truncate to max
-        fetched = nodes[:max_prs]
         prs: list[PRData] = []
-        for node in fetched:
+        for node in nodes:
             author_login = (node.get("author") or {}).get("login") or None
             idle = _hours_idle(node.get("updatedAt"), now)
             prs.append(
@@ -183,13 +154,7 @@ def _capture_prs(
                 )
             )
 
-        fetched_count = len(fetched)
-        if total_count > max_prs:
-            return prs, FieldStatus(
-                status="partial",
-                error_note=f"truncated, {total_count} total, fetched {fetched_count}",
-            )
-        return prs, FieldStatus(status="success")
+        return prs, field_status
 
     except Exception as e:
         return [], FieldStatus(status="failed", error_note=str(e)[:200])
@@ -207,34 +172,26 @@ def _capture_issues(
     fingerprint: str,
 ) -> tuple[list[IssueData], FieldStatus]:
     try:
+        # Single execute — max_issues <= 100 so fits in one page
         body = gql.execute(
             ISSUES_QUERY,
-            variables={"org": org, "repo": repo_name, "first": min(max_issues, 100), "cursor": None},
+            {"org": org, "repo": repo_name, "first": max_issues, "cursor": None},
             deadline_monotonic=deadline,
         )
-        total_count = (
-            (body.get("data") or {})
-            .get("repository", {})
-            .get("issues", {})
-            .get("totalCount", 0)
-        )
+        repo_data = (body.get("data") or {}).get("repository") or {}
+        issue_conn = repo_data.get("issues") or {}
+        total_count = issue_conn.get("totalCount", 0)
+        nodes = issue_conn.get("nodes") or []
 
-        nodes = gql.paginate(
-            ISSUES_QUERY,
-            variables={"org": org, "repo": repo_name, "first": min(max_issues, 100)},
-            page_info_path=["data", "repository", "issues", "pageInfo"],
-            nodes_path=["data", "repository", "issues", "nodes"],
-            deadline_monotonic=deadline,
-            db_conn=db_conn,
-            org=org,
-            repo=repo_name,
-            field="issues",
-            fingerprint=fingerprint,
-        )
+        field_status = FieldStatus(status="success")
+        if total_count > max_issues:
+            field_status = FieldStatus(
+                status="partial",
+                error_note=f"truncated, {total_count} total, fetched {len(nodes)}",
+            )
 
-        fetched = nodes[:max_issues]
         issues: list[IssueData] = []
-        for node in fetched:
+        for node in nodes:
             author_login = (node.get("author") or {}).get("login") or None
             idle = _hours_idle(node.get("updatedAt"), now)
             label_nodes = (node.get("labels") or {}).get("nodes") or []
@@ -252,13 +209,7 @@ def _capture_issues(
                 )
             )
 
-        fetched_count = len(fetched)
-        if total_count > max_issues:
-            return issues, FieldStatus(
-                status="partial",
-                error_note=f"truncated, {total_count} total, fetched {fetched_count}",
-            )
-        return issues, FieldStatus(status="success")
+        return issues, field_status
 
     except Exception as e:
         return [], FieldStatus(status="failed", error_note=str(e)[:200])
@@ -296,52 +247,6 @@ def _capture_releases(
     except Exception as e:
         return [], FieldStatus(status="failed", error_note=str(e)[:200])
 
-
-def _capture_alerts(
-    gql: GraphQLClient,
-    org: str,
-    repo_name: str,
-    deadline: float | None,
-) -> tuple[list[AlertData], FieldStatus]:
-    try:
-        body = gql.execute(
-            DEPENDABOT_QUERY,
-            variables={"org": org, "repo": repo_name},
-            deadline_monotonic=deadline,
-        )
-        nodes = (
-            (body.get("data") or {})
-            .get("repository", {})
-            .get("vulnerabilityAlerts", {})
-            .get("nodes") or []
-        )
-        alerts: list[AlertData] = []
-        for n in nodes:
-            vuln = n.get("securityVulnerability") or {}
-            advisory = vuln.get("advisory") or {}
-            pkg = vuln.get("package") or {}
-            dep_update = n.get("dependabotUpdate") or {}
-            dep_pr = dep_update.get("pullRequest") or {}
-
-            published_at = _parse_dt(advisory.get("publishedAt"))
-            age_days: int | None = None
-            if published_at is not None:
-                now_utc = datetime.now(timezone.utc)
-                age_days = int((now_utc - published_at).total_seconds() / 86400)
-
-            alerts.append(
-                AlertData(
-                    severity=vuln.get("severity"),
-                    ghsa_id=advisory.get("ghsaId"),
-                    package_name=pkg.get("name"),
-                    ecosystem=pkg.get("ecosystem"),
-                    age_days=age_days,
-                    dependabot_pr_number=dep_pr.get("number"),
-                )
-            )
-        return alerts, FieldStatus(status="success")
-    except Exception as e:
-        return [], FieldStatus(status="failed", error_note=str(e)[:200])
 
 
 def _insert_snapshot_placeholder(
@@ -397,7 +302,6 @@ def _persist_repo(
     prs: list[PRData],
     issues: list[IssueData],
     releases: list[ReleaseData],
-    alerts: list[AlertData],
 ) -> None:
     field_statuses_json = json.dumps(
         {k: {"status": v.status, "error_note": v.error_note} for k, v in repo.field_statuses.items()}
@@ -486,23 +390,6 @@ def _persist_repo(
                 ),
             )
 
-        for alert in alerts:
-            db_conn.execute(
-                """
-                INSERT INTO alerts
-                  (repo_id, severity, ghsa_id, package_name, ecosystem, age_days, dependabot_pr_number)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    repo_id,
-                    alert.severity,
-                    alert.ghsa_id,
-                    alert.package_name,
-                    alert.ecosystem,
-                    alert.age_days,
-                    alert.dependabot_pr_number,
-                ),
-            )
 
 
 def _prune_old_snapshots(
@@ -552,18 +439,38 @@ def _build_current_json(
         pr_rows = db_conn.execute("SELECT * FROM prs WHERE repo_id=?", (repo_id,)).fetchall()
         issue_rows = db_conn.execute("SELECT * FROM issues WHERE repo_id=?", (repo_id,)).fetchall()
         release_rows = db_conn.execute("SELECT * FROM releases WHERE repo_id=?", (repo_id,)).fetchall()
-        alert_rows = db_conn.execute("SELECT * FROM alerts WHERE repo_id=?", (repo_id,)).fetchall()
 
         result["repos"].append(
             {
                 "org": repo_row["org"],
                 "name": repo_row["name"],
+                "default_branch": repo_row["default_branch"],
+                "is_fork": bool(repo_row["is_fork"]),
+                "is_archived": bool(repo_row["is_archived"]),
+                "parent_owner": repo_row["parent_owner"],
+                "parent_name": repo_row["parent_name"],
+                "parent_is_deleted": bool(repo_row["parent_is_deleted"]),
                 "capture_status": repo_row["capture_status"],
                 "field_statuses": json.loads(repo_row["field_statuses"] or "{}"),
-                "prs": [dict(r) for r in pr_rows],
-                "issues": [dict(r) for r in issue_rows],
+                "prs": [
+                    {
+                        **dict(r),
+                        "is_draft": bool(r["is_draft"]),
+                        "is_dependabot": bool(r["is_dependabot"]),
+                        "is_renovate": bool(r["is_renovate"]),
+                        "stalled": bool(r["stalled"]),
+                    }
+                    for r in pr_rows
+                ],
+                "issues": [
+                    {
+                        **dict(r),
+                        "labels": json.loads(r["labels"] or "[]"),
+                        "stalled": bool(r["stalled"]),
+                    }
+                    for r in issue_rows
+                ],
                 "releases": [dict(r) for r in release_rows],
-                "alerts": [dict(r) for r in alert_rows],
             }
         )
 
@@ -580,7 +487,7 @@ def run_snapshot(
     """Run one full snapshot, persist to SQLite, write current/prev JSON. Returns snapshot_id."""
     start_time = time.monotonic()
     now_utc = datetime.now(timezone.utc)
-    snapshot_id = now_utc.strftime("%Y%m%dT%H%M%SZ")
+    snapshot_id = now_utc.strftime("%Y%m%dT%H%M%S.%fZ")
 
     # ET offset: simple approach using environment or fixed offset
     try:
@@ -696,10 +603,6 @@ def run_snapshot(
             )
             repo.field_statuses["releases"] = release_status
 
-            # Capture alerts
-            alerts, alert_status = _capture_alerts(gql, org_name, repo_name, deadline)
-            repo.field_statuses["alerts"] = alert_status
-
             # Determine overall repo status
             field_statuses = list(repo.field_statuses.values())
             failed_fields = [fs for fs in field_statuses if fs.status == "failed"]
@@ -715,7 +618,7 @@ def run_snapshot(
 
             # Persist to SQLite
             try:
-                _persist_repo(db_conn, snapshot_id, repo, prs, issues, releases, alerts)
+                _persist_repo(db_conn, snapshot_id, repo, prs, issues, releases)
             except Exception as e:
                 print(f"ERROR: failed to persist {org_name}/{repo_name}: {e}", file=sys.stderr)
                 repos_failed += 1
@@ -726,7 +629,12 @@ def run_snapshot(
 
     duration_ms = int((time.monotonic() - start_time) * 1000)
 
-    snapshot_capture_status = "partial" if org_errors else "success"
+    if repos_failed > 0 and repos_succeeded == 0 and repos_partial == 0:
+        snapshot_capture_status = "failed"
+    elif repos_partial > 0 or repos_failed > 0 or org_errors:
+        snapshot_capture_status = "partial"
+    else:
+        snapshot_capture_status = "success"
     _finalize_snapshot(
         db_conn,
         snapshot_id=snapshot_id,

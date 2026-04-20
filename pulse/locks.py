@@ -22,6 +22,12 @@ class PulseLock:
     """Context manager that acquires an exclusive non-blocking flock.
 
     Raises LockHeld immediately if the lock is already held.
+
+    Safety note: when invoked via systemd ExecStart (flock -n /path pulse_binary),
+    the pulse process inherits the flock fd. Calling PulseLock() then opens a NEW fd
+    to the same path. Linux flock(2) allows the same process to re-acquire — the new
+    LOCK_EX succeeds immediately. Concurrent manual `pulse --now` from a DIFFERENT
+    process correctly gets LOCK_NB rejected → LockHeld. No deadlock risk.
     """
 
     def __init__(self, path: Path | None = None) -> None:

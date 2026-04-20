@@ -11,7 +11,6 @@ import pytest
 from pulse.snapshot import (
     DEPENDABOT_AUTHORS,
     RENOVATE_AUTHORS,
-    _capture_alerts,
     _capture_issues,
     _capture_prs,
     _capture_releases,
@@ -139,31 +138,6 @@ def _make_releases_body(tag: str = "v1.0.0") -> dict:
     }
 
 
-def _make_alerts_body(count: int = 1) -> dict:
-    return {
-        "data": {
-            "rateLimit": {"cost": 1, "remaining": 4000, "resetAt": "", "used": 1000},
-            "repository": {
-                "vulnerabilityAlerts": {
-                    "totalCount": count,
-                    "nodes": [
-                        {
-                            "securityVulnerability": {
-                                "severity": "HIGH",
-                                "package": {"name": "lodash", "ecosystem": "NPM"},
-                                "advisory": {
-                                    "ghsaId": "GHSA-xxxx-xxxx-xxxx",
-                                    "publishedAt": "2025-01-01T00:00:00Z",
-                                },
-                            },
-                            "dependabotUpdate": {"pullRequest": {"number": 42, "updatedAt": "2026-01-01T00:00:00Z"}},
-                        }
-                    ],
-                }
-            },
-        }
-    }
-
 
 def _make_repos_body(
     repo_name: str = "testrepo",
@@ -202,16 +176,6 @@ def test_field_status_success():
     db = _make_db()
     gql = MagicMock()
     gql.execute.return_value = _make_pr_body(total_count=1)
-    gql.paginate.return_value = [
-        {
-            "number": 1,
-            "title": "PR",
-            "author": {"login": "alice"},
-            "createdAt": "2026-01-01T00:00:00Z",
-            "updatedAt": "2026-01-01T00:00:00Z",
-            "isDraft": False,
-        }
-    ]
 
     prs, status = _capture_prs(gql, "org", "repo", 30, 12.0, _now(), db, None, "snap")
     assert status.status == "success"
@@ -221,9 +185,8 @@ def test_field_status_success():
 def test_field_status_partial_prs():
     db = _make_db()
     gql = MagicMock()
-    # totalCount=47 but we cap at 30
-    gql.execute.return_value = _make_pr_body(total_count=47)
-    gql.paginate.return_value = [
+    # totalCount=47 but we fetch at most max_prs=30; build a response with 30 nodes
+    nodes = [
         {
             "number": i,
             "title": f"PR {i}",
@@ -232,8 +195,11 @@ def test_field_status_partial_prs():
             "updatedAt": "2026-01-01T00:00:00Z",
             "isDraft": False,
         }
-        for i in range(1, 31)  # 30 nodes
+        for i in range(1, 31)
     ]
+    body = _make_pr_body(total_count=47)
+    body["data"]["repository"]["pullRequests"]["nodes"] = nodes
+    gql.execute.return_value = body
 
     prs, status = _capture_prs(gql, "org", "repo", 30, 12.0, _now(), db, None, "snap")
     assert status.status == "partial"
@@ -260,17 +226,14 @@ def test_field_status_issues_disabled():
                 "parent": None,
             }
         ],
-        # prs paginate (returns empty)
-        [],
     ]
-    gql.execute.return_value = _make_pr_body(total_count=0)
+    # execute is used for single-page PR fetch (returns empty nodes)
+    gql.execute.return_value = _make_pr_body(total_count=0, has_next_page=False)
 
-    # Mock releases and alerts
-    with patch("pulse.snapshot._capture_releases") as mock_rel, \
-         patch("pulse.snapshot._capture_alerts") as mock_alr:
+    # Mock releases only — no more _capture_alerts
+    with patch("pulse.snapshot._capture_releases") as mock_rel:
         from pulse.schema import FieldStatus
         mock_rel.return_value = ([], FieldStatus(status="success"))
-        mock_alr.return_value = ([], FieldStatus(status="success"))
 
         cfg = _make_cfg()
         db_conn = _make_db()
@@ -315,14 +278,12 @@ def test_repos_succeeded_count():
 
     with patch("pulse.snapshot._capture_prs") as mock_prs, \
          patch("pulse.snapshot._capture_issues") as mock_iss, \
-         patch("pulse.snapshot._capture_releases") as mock_rel, \
-         patch("pulse.snapshot._capture_alerts") as mock_alr:
+         patch("pulse.snapshot._capture_releases") as mock_rel:
         from pulse.schema import FieldStatus
         success_fs = FieldStatus(status="success")
         mock_prs.return_value = ([], success_fs)
         mock_iss.return_value = ([], success_fs)
         mock_rel.return_value = ([], success_fs)
-        mock_alr.return_value = ([], success_fs)
 
         cfg = _make_cfg()
         db_conn = _make_db()
@@ -353,13 +314,11 @@ def test_repos_partial_count():
 
     with patch("pulse.snapshot._capture_prs") as mock_prs, \
          patch("pulse.snapshot._capture_issues") as mock_iss, \
-         patch("pulse.snapshot._capture_releases") as mock_rel, \
-         patch("pulse.snapshot._capture_alerts") as mock_alr:
+         patch("pulse.snapshot._capture_releases") as mock_rel:
         from pulse.schema import FieldStatus
         mock_prs.return_value = ([], FieldStatus(status="failed", error_note="boom"))
         mock_iss.return_value = ([], FieldStatus(status="success"))
         mock_rel.return_value = ([], FieldStatus(status="success"))
-        mock_alr.return_value = ([], FieldStatus(status="success"))
 
         cfg = _make_cfg()
         db_conn = _make_db()
@@ -376,16 +335,6 @@ def test_dependabot_author_pattern():
     for bot_login in DEPENDABOT_AUTHORS:
         gql = MagicMock()
         gql.execute.return_value = _make_pr_body(total_count=1, author=bot_login)
-        gql.paginate.return_value = [
-            {
-                "number": 1,
-                "title": "Bump dep",
-                "author": {"login": bot_login},
-                "createdAt": "2026-01-01T00:00:00Z",
-                "updatedAt": "2026-01-01T00:00:00Z",
-                "isDraft": False,
-            }
-        ]
         prs, _ = _capture_prs(gql, "org", "repo", 30, 12.0, _now(), db, None, "snap")
         assert prs[0].is_dependabot is True, f"Expected is_dependabot=True for {bot_login}"
         assert prs[0].is_renovate is False
@@ -393,16 +342,6 @@ def test_dependabot_author_pattern():
     for bot_login in RENOVATE_AUTHORS:
         gql = MagicMock()
         gql.execute.return_value = _make_pr_body(total_count=1, author=bot_login)
-        gql.paginate.return_value = [
-            {
-                "number": 1,
-                "title": "Update dep",
-                "author": {"login": bot_login},
-                "createdAt": "2026-01-01T00:00:00Z",
-                "updatedAt": "2026-01-01T00:00:00Z",
-                "isDraft": False,
-            }
-        ]
         prs, _ = _capture_prs(gql, "org", "repo", 30, 12.0, _now(), db, None, "snap")
         assert prs[0].is_renovate is True, f"Expected is_renovate=True for {bot_login}"
         assert prs[0].is_dependabot is False
@@ -418,16 +357,6 @@ def test_stall_detection():
 
     gql = MagicMock()
     gql.execute.return_value = _make_pr_body(total_count=1, updated_at=updated_at)
-    gql.paginate.return_value = [
-        {
-            "number": 1,
-            "title": "Old PR",
-            "author": {"login": "alice"},
-            "createdAt": "2026-01-01T00:00:00Z",
-            "updatedAt": updated_at,
-            "isDraft": False,
-        }
-    ]
 
     now = datetime.now(timezone.utc)
     prs, _ = _capture_prs(gql, "org", "repo", 30, 12.0, now, db, None, "snap")
