@@ -82,10 +82,8 @@ def _render_reviewer_activity(
         if oldest_utc:
             oldest_dt = datetime.fromisoformat(oldest_utc.replace("Z", "+00:00"))
             fill_date = (oldest_dt + dt.timedelta(days=7)).strftime("%Y-%m-%d")
-            days_so_far = max(1, actual_count * cadence_minutes // (24 * 60))
             lines.append(
-                f"_Reviewer activity: showing {days_so_far} day(s) of data "
-                f"(7-day window fills at {fill_date})_"
+                f"_Reviewer activity: {actual_count} snapshot(s) collected — 7-day window fills at {fill_date}_"
             )
         else:
             lines.append("_Reviewer activity: no data yet_")

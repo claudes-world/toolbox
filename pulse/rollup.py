@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import json
 import logging
 import sqlite3
 import time
@@ -55,15 +54,19 @@ def compute_reviewer_activity_7d(conn: sqlite3.Connection) -> dict:
             json_extract(evt.value, '$.author') as author,
             json_extract(evt.value, '$.state') as state,
             json_extract(evt.value, '$.type') as type
-        FROM snapshots s
-        JOIN repos r ON r.snapshot_id = s.id
+        FROM (
+            SELECT MAX(id) as snap_id FROM snapshots
+            WHERE capture_status != 'failed'
+              AND captured_at_utc >= ?
+        ) latest
+        JOIN repos r ON r.snapshot_id = latest.snap_id
         JOIN prs p ON p.repo_id = r.id,
         json_each(p.review_events) AS evt
-        WHERE s.captured_at_utc >= ?
-          AND s.capture_status != 'failed'
-          AND p.review_events IS NOT NULL
+        WHERE p.review_events IS NOT NULL
           AND p.review_events != 'null'
-    """, (seven_days_ago,)).fetchall()
+          AND (json_extract(evt.value, '$.submitted_at') >= ?
+               OR json_extract(evt.value, '$.submitted_at') IS NULL)
+    """, (seven_days_ago, seven_days_ago)).fetchall()
 
     elapsed = time.monotonic() - start
     if elapsed > 2.0:
@@ -83,7 +86,7 @@ def compute_reviewer_activity_7d(conn: sqlite3.Connection) -> dict:
             b["approved"] += 1
         elif state == "CHANGES_REQUESTED":
             b["change_requested"] += 1
-        elif state in ("COMMENTED", None) and event_type == "PULL_REQUEST_REVIEW":
+        elif event_type == "IssueComment" or (state in ("COMMENTED", None) and event_type == "PULL_REQUEST_REVIEW"):
             b["commented"] += 1
         elif state == "DISMISSED":
             b["dismissed"] += 1
