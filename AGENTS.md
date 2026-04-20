@@ -40,7 +40,7 @@ For tools that ship as a proper Python package (entry point in `pyproject.toml`)
 
 1. Create `<tool-name>/` directory with `__init__.py` and supporting modules
 2. Add an entry point in `pyproject.toml` under `[project.scripts]`: `tool-name = "tool_name.__main__:main"`
-3. Install into the shared venv: `pip install -e ~/code/toolbox/`
+3. Install into the shared venv: `~/venvs/transcribe/bin/pip install -e ~/code/toolbox/`
 4. Add a `<tool-name>/README.md` documenting: overview, installation, configuration, CLI subcommands, storage, and troubleshooting
 5. Update the root `README.md` with the new tool entry and a link to the package README
 6. Update `AGENTS.md` with any ADR cross-references for architectural decisions the tool introduces
