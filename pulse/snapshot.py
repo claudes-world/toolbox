@@ -301,7 +301,7 @@ def _capture_upstream(
         return
 
     fork_branch = repo.default_branch
-    parent_branch = repo.parent_default_branch if hasattr(repo, "parent_default_branch") else None
+    parent_branch = repo.parent_default_branch
 
     if not fork_branch or not parent_branch:
         upstream_blob = {
@@ -374,6 +374,11 @@ def _capture_vuln_alerts(
         logging.getLogger(__name__).warning(
             "SCOPE MISSING: vulnerability alerts require security_events scope on token (repo=%s/%s): %s",
             repo.org, repo.name, e,
+        )
+    except CostBudgetExceeded:
+        alerts_blob = {"status": "partial", "error_note": "skipped: cumulative cost budget reached"}
+        repo.field_statuses["vulnerability_alerts"] = FieldStatus(
+            status="partial", error_note="skipped: cumulative cost budget reached"
         )
     except Exception as e:
         alerts_blob = {"status": "failed", "error_note": str(e)[:200]}
@@ -727,6 +732,8 @@ def _build_current_json(
                 "parent_is_deleted": bool(repo_row["parent_is_deleted"]),
                 "capture_status": repo_row["capture_status"],
                 "field_statuses": json.loads(repo_row["field_statuses"] or "{}"),
+                "upstream": json.loads(repo_row["upstream"]) if repo_row["upstream"] else None,
+                "vulnerability_alerts": json.loads(repo_row["vulnerability_alerts"]) if repo_row["vulnerability_alerts"] else None,
                 "prs": [
                     {
                         **dict(r),

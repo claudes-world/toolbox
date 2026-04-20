@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from urllib.parse import quote
 
 import httpx
 
@@ -50,9 +51,11 @@ class GHRestClient:
         Returns upstream status dict for repos.upstream JSON blob.
         NEVER hardcodes branch names — uses captured default_branch values.
         """
+        encoded_fork_branch = quote(fork_default_branch, safe="")
+        encoded_parent_branch = quote(parent_default_branch, safe="")
         url = (
             f"/repos/{fork_owner}/{fork_repo}/compare"
-            f"/{parent_owner}:{parent_default_branch}...{fork_owner}:{fork_default_branch}"
+            f"/{parent_owner}:{encoded_parent_branch}...{fork_owner}:{encoded_fork_branch}"
         )
         resp = self._client.get(url)
         self._check_ratelimit_header(resp)

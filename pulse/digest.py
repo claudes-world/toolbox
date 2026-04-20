@@ -114,7 +114,12 @@ def render_digest(db_conn: sqlite3.Connection, cfg: PulseConfig) -> str:
             status = fs_data.get("status", "success")
             error_note = fs_data.get("error_note") or ""
             error_note_escaped = md_escape(str(error_note))
-            if status == "failed":
+            if status == "scope_missing":
+                alert_lines.append(
+                    f"- 🔴 **SCOPE MISSING — {repo_label}**: {field_name} — token lacks required permissions. "
+                    f"Run `pulse --self-check` and ensure GH\\_TOKEN has `read:security\\_events` scope."
+                )
+            elif status == "failed":
                 alert_lines.append(f"- ❌ **{repo_label}**: {field_name} failed — {error_note_escaped}")
             elif status == "disabled":
                 alert_lines.append(f"- ⚠️ **{repo_label}**: {field_name} field disabled")
