@@ -1,0 +1,219 @@
+#!/bin/bash
+# worktree-add-port-init
+#
+# PostToolUse hook for Bash tool calls.
+# When the agent runs `git worktree add ...`, this parses the command,
+# extracts the new worktree path, and calls `port-for --init <path>` to
+# allocate ports declared in that worktree's .world/ports.yml (per ADR 0003).
+#
+# Output is a PostToolUse hookSpecificOutput JSON so the allocation summary
+# is injected back into the agent's context.
+#
+# Always exits 0 — a port-allocation failure must never block the agent.
+# Silently no-ops for non-git-worktree Bash calls.
+
+set +e
+
+emit_empty() {
+  printf '{}\n'
+  exit 0
+}
+
+emit_context() {
+  msg="$1"
+  jq -n --arg msg "$msg" \
+    '{hookSpecificOutput:{hookEventName:"PostToolUse",additionalContext:$msg}}' \
+    2>/dev/null || printf '{}\n'
+  exit 0
+}
+
+command -v jq >/dev/null 2>&1 || emit_empty
+
+INPUT="$(cat 2>/dev/null)"
+[ -n "$INPUT" ] || emit_empty
+
+TOOL_NAME="$(printf '%s' "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)"
+[ "$TOOL_NAME" = "Bash" ] || emit_empty
+
+CMD="$(printf '%s' "$INPUT" | jq -r '.tool_input.command // ""' 2>/dev/null)"
+[ -n "$CMD" ] || emit_empty
+
+# Fast reject: not a git worktree add invocation at all.
+# Match on "worktree add" (not "git worktree add") so that
+# `git -C <dir> worktree add` is not silently dropped before
+# the Python parser can handle the -C flag.
+case "$CMD" in
+  *"worktree add"*) ;;
+  *) emit_empty ;;
+esac
+
+# Shell-operator bail-out: `||` and `;` allow later commands to mask a failed
+# `git worktree add` with exit 0, making the exit-code gate below unreliable.
+# We cannot safely determine which segment succeeded, so skip allocation for
+# commands that use these operators. `&&` is fine because a failed add
+# short-circuits the chain and yields non-zero exit overall.
+case "$CMD" in
+  *"||"*|*";"*|*"|"*)
+    emit_empty ;;
+esac
+
+# Best-effort PostToolUse exit-code check. If the tool failed, don't allocate.
+TOOL_EXIT="$(printf '%s' "$INPUT" | jq -r '.tool_response.exit_code // .tool_response.exitCode // 0' 2>/dev/null)"
+case "$TOOL_EXIT" in
+  ''|0) ;;
+  *) emit_empty ;;
+esac
+
+# Parse the command with Python — handles quoted paths, shell flags, chained
+# commands, and the various forms of `git worktree add`. Python is already a
+# hard dependency of port-for, so this is safe.
+WT_PATH="$(python3 -- - "$CMD" <<'PY' 2>/dev/null
+import os
+import shlex
+import sys
+
+cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+if not cmd:
+    sys.exit(0)
+
+# Split on common shell chaining so we can scan each segment independently.
+# This is not a full shell parser — it only looks for `git worktree add`
+# clauses, which is sufficient for the hook's needs.
+# NOTE: simple heuristic — doesn't handle quoted && or ; (e.g. echo "a && b").
+segments = []
+for sep in ("&&", "||", ";", "|"):
+    if not segments:
+        segments = [cmd]
+    out = []
+    for s in segments:
+        out.extend(s.split(sep))
+    segments = out
+
+WORKTREE_FLAGS_WITH_ARG = {
+    "-b", "-B", "--reason",
+}
+WORKTREE_FLAGS_NO_ARG = {
+    "--force", "-f", "--detach", "--checkout", "--no-checkout",
+    "--guess-remote", "--no-guess-remote", "--track", "--no-track",
+    "--quiet", "-q", "--relative-paths", "--no-relative-paths",
+    "--lock",
+    # --orphan is a boolean flag (creates an unborn branch); the branch name
+    # is still provided via -b/-B or derived from the worktree path.
+    # git worktree add --orphan <path>  (no branch name after --orphan)
+    "--orphan",
+}
+
+for seg in segments:
+    try:
+        tokens = shlex.split(seg.strip(), posix=True)
+    except ValueError:
+        continue
+    if len(tokens) < 4:
+        continue
+    # Locate "git" as the lead command, allowing env-var prefix tokens
+    # (FOO=bar git worktree add) but rejecting "echo git worktree add".
+    git_idx = None
+    for _i, _tok in enumerate(tokens):
+        if _tok == "git":
+            git_idx = _i
+            break
+        # Allow only key=value env-var assignments before git.
+        if "=" not in _tok or _tok.startswith("-"):
+            break
+    if git_idx is None:
+        continue
+    sub = tokens[git_idx + 1:]
+    # Skip global git flags like -C <dir> before "worktree".
+    # Track -C <dir> so relative worktree paths can be resolved against it.
+    i = 0
+    git_cwd = None
+    while i < len(sub) and sub[i].startswith("-"):
+        if sub[i] == "-C" and i + 1 < len(sub):
+            git_cwd = sub[i + 1]
+            i += 2
+        elif sub[i].startswith("-C") and len(sub[i]) > 2:
+            # -C<dir> no-space form (e.g. git -Cfoo worktree add)
+            git_cwd = sub[i][2:]
+            i += 1
+        elif sub[i] == "-c" and i + 1 < len(sub):
+            i += 2
+        else:
+            i += 1
+    if i + 1 >= len(sub):
+        continue
+    if sub[i] != "worktree" or sub[i + 1] != "add":
+        continue
+    args = sub[i + 2:]
+    # Skip flags until we hit the positional <path>.
+    j = 0
+    while j < len(args):
+        tok = args[j]
+        if not tok.startswith("-"):
+            break
+        if tok in WORKTREE_FLAGS_WITH_ARG:
+            j += 2
+        elif "=" in tok and tok.startswith("--"):
+            j += 1
+        elif tok in WORKTREE_FLAGS_NO_ARG:
+            j += 1
+        else:
+            # Unknown flag — assume it does not take an arg to stay moving.
+            j += 1
+    if j >= len(args):
+        continue
+    path = args[j]
+    if path:
+        # If git was invoked with -C <dir>, resolve relative paths against
+        # that directory rather than cwd.
+        if git_cwd and not os.path.isabs(path):
+            path = os.path.join(git_cwd, path)
+        print(os.path.abspath(os.path.expanduser(path)))
+        # Do NOT exit — continue scanning remaining segments for chained commands.
+PY
+)"
+
+[ -n "$WT_PATH" ] || emit_empty
+
+# port-for may not be installed yet — fail silently in that case.
+command -v port-for >/dev/null 2>&1 || PORT_FOR="$HOME/bin/port-for"
+[ -n "$PORT_FOR" ] || PORT_FOR="$(command -v port-for 2>/dev/null)"
+[ -x "$PORT_FOR" ] || emit_empty
+
+# Process each extracted path (one per line — handles chained commands like
+# `git worktree add /a main && git worktree add /b main`).
+CONTEXT_PARTS=""
+while IFS= read -r wt; do
+  [ -n "$wt" ] || continue
+  # If the path does not exist yet (tool reported success but directory missing),
+  # nothing to allocate — skip quietly.
+  [ -d "$wt" ] || continue
+  # If the worktree does not declare ports, do nothing at all. We intentionally
+  # do NOT inject context for these cases — zero-noise for un-migrated repos.
+  [ -f "$wt/.world/ports.yml" ] || continue
+
+  PF_OUT="$("$PORT_FOR" --json --init "$wt" 2>&1)"
+  PF_EXIT=$?
+
+  if [ "$PF_EXIT" -ne 0 ]; then
+    CONTEXT_PARTS="${CONTEXT_PARTS}port-for --init failed for worktree $wt (exit $PF_EXIT). Output: $PF_OUT. The worktree was created successfully; allocate ports manually with: port-for --init $wt\n"
+    continue
+  fi
+
+  # Render the allocation map as a short, human-friendly string.
+  SUMMARY="$(printf '%s' "$PF_OUT" | jq -r '
+    if (.ports | length) == 0 then
+      (.warning // "no ports declared")
+    else
+      [.ports | to_entries[] | "\(.key)=\(.value)"] | join(", ")
+    end
+  ' 2>/dev/null)"
+
+  [ -n "$SUMMARY" ] || SUMMARY="(port-for returned no summary)"
+  CONTEXT_PARTS="${CONTEXT_PARTS}Ports allocated for worktree ${wt}: ${SUMMARY}. Lock file: ${wt}/.world/ports.lock. Use \`port-for <purpose>\` from inside the worktree to look up a port.\n"
+done <<< "$WT_PATH"
+
+[ -n "$CONTEXT_PARTS" ] || emit_empty
+
+# Strip trailing newline for clean output.
+CONTEXT_MSG="$(printf '%b' "$CONTEXT_PARTS" | sed 's/\\n$//')"
+emit_context "$CONTEXT_MSG"
