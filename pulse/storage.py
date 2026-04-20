@@ -97,7 +97,13 @@ def open_db(path: Path) -> sqlite3.Connection:
             if any(k in msg for k in ("malformed", "corrupt", "not a database", "disk image")):
                 raise DBCorrupt(f"integrity_check raised exception (corrupt db): {e}") from e
             raise DBSetupError(f"integrity_check failed (env error): {e}") from e
+        tables = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+        fresh = not tables
         create_schema(conn)
+        if fresh:
+            conn.execute("PRAGMA user_version = 11")  # fresh v1 install
         return conn
     except DBCorrupt:
         conn.close()
@@ -160,6 +166,8 @@ def create_schema(conn: sqlite3.Connection) -> None:
                 is_renovate INTEGER NOT NULL DEFAULT 0,
                 hours_idle REAL,
                 stalled INTEGER NOT NULL DEFAULT 0,
+                node_id TEXT,
+                review_events TEXT,
                 UNIQUE(repo_id, number)
             )
         """)
@@ -213,12 +221,6 @@ def create_schema(conn: sqlite3.Connection) -> None:
                 -- repo is TEXT (not FK) so pagination state survives snapshot deletion/pruning
             )
         """)
-    # Set user_version=10 to mark this as a known v0 schema, but only on a
-    # fresh DB (current_version=0). Prevents downgrading an already-migrated DB.
-    # Must run OUTSIDE the transaction (DDL auto-commits in SQLite).
-    current_version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if current_version == 0:
-        conn.execute("PRAGMA user_version = 10")
 
 
 def atomic_write_json(path: Path, data: dict) -> None:
