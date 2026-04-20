@@ -18,29 +18,39 @@ class DBSetupError(Exception):
 def open_db(path: Path) -> sqlite3.Connection:
     """Open (or create) the SQLite database at path with WAL mode and integrity check."""
     path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Stage 1: open the file. Failure here is an environment/permissions problem, not corruption.
     try:
         conn = sqlite3.connect(str(path), timeout=5.0)
         conn.row_factory = sqlite3.Row
-    except sqlite3.DatabaseError as e:
-        raise DBCorrupt(f"cannot open database: {e}") from e
+    except Exception as e:
+        raise DBSetupError(f"cannot open database at {path}: {e}") from e
+
+    # Stage 2: detect corrupt file — first execute triggers SQLite's lazy file validation.
+    # sqlite3.DatabaseError here means the file exists but is not valid SQLite.
     try:
         conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.DatabaseError as e:
+        conn.close()
+        raise DBCorrupt(f"database file is corrupt or not valid SQLite: {e}") from e
+    except Exception as e:
+        conn.close()
+        raise DBSetupError(f"PRAGMA journal_mode failed: {e}") from e
+
+    # Stage 3: remaining PRAGMAs + integrity check + schema. Failures here are setup/env issues.
+    try:
         conn.execute("PRAGMA busy_timeout=5000")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA foreign_keys=ON")
         rows = conn.execute("PRAGMA integrity_check").fetchall()
         row_values = [tuple(r) for r in rows]
         if row_values != [("ok",)]:
-            conn.close()
             raise DBCorrupt(f"integrity_check failed: {row_values}")
         create_schema(conn)
         return conn
     except DBCorrupt:
         conn.close()
         raise
-    except sqlite3.DatabaseError as e:
-        conn.close()
-        raise DBCorrupt(f"cannot read database: {e}") from e
     except Exception as e:
         conn.close()
         raise DBSetupError(f"database setup failed: {e}") from e

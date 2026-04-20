@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -64,15 +65,19 @@ def _run_self_check() -> None:
 
     # 2. ~/.world/pulse/ dir writeable
     pulse_dir = Path.home() / ".world" / "pulse"
+    write_test = pulse_dir / f".write_test.{os.getpid()}"
     try:
         pulse_dir.mkdir(parents=True, exist_ok=True)
-        test_file = pulse_dir / ".write_test"
-        test_file.write_text("ok")
-        test_file.unlink()
+        write_test.write_text("ok")
         click.echo(f"[OK] dir writable: {pulse_dir}")
     except Exception as e:
         errors.append(f"dir writeable: {e}")
         click.echo(f"[FAIL] dir writeable: {e}", err=True)
+    finally:
+        try:
+            write_test.unlink()
+        except FileNotFoundError:
+            pass
 
     # 3. SQLite open + integrity_check
     db_path = _DEFAULT_DB_PATH

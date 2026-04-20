@@ -2,7 +2,7 @@
 import sys
 import os
 # Ensure the repo root (parent of this script's dir) is on sys.path for dev use
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from pulse.__main__ import main
 
