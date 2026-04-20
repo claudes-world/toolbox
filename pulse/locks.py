@@ -26,12 +26,20 @@ class PulseLock:
     or error reporting. This is intentional: pulse runs are time-bounded and queueing would
     cause cascading delays.
 
-    PulseLock is the sole concurrency guard — do NOT wrap the service invocation
-    with an external flock(1) command. If systemd ExecStart uses flock -n, the
-    inherited fd and the new fd opened here are two independent open-file-descriptions;
-    Linux flock(2) treats them independently and PulseLock will fail with LockHeld on
-    every invocation (Linux flock man page: a lock on one fd may be denied by a lock
-    the same process holds on another fd). Call `pulse --now` directly from ExecStart.
+    Two separate invocation paths share this lock file for mutual exclusion:
+
+    - ``pulse --now`` (manual / ad-hoc): acquires PulseLock directly. No external
+      flock(1) wrapper involved.
+    - bare ``pulse`` (systemd service path via ExecStart): wrapped by external
+      ``flock -n`` in the unit's ExecStart line. The service calls
+      ``_run_now_no_lock()`` internally, deliberately skipping PulseLock so
+      there is no double-lock within the same process.
+
+    Both paths contend on the same lock file as separate processes, which is
+    exactly what flock(2) is designed to handle — correct mutual exclusion is
+    maintained. The two-path split exists so the service can use an external
+    flock as its sole guard while the manual path uses PulseLock directly,
+    avoiding any same-process re-entrancy issue.
     """
 
     def __init__(self, path: Path | None = None) -> None:

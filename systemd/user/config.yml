@@ -1,9 +1,8 @@
 schema_version: "1.0"
-orgs:
-  # Add your GitHub org(s) here
-  # example-org:
-  #   ignore: []
-  #   stall_overrides: {}
+orgs: {}  # Add your GitHub org(s) — see example below
+# example-org:
+#   ignore: []
+#   stall_overrides: {}
 defaults:
   github_api_base: "https://api.github.com"
   stall_pr_hours: 48.0
