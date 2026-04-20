@@ -48,7 +48,7 @@ def _column_names(conn: sqlite3.Connection, table: str) -> list[str]:
 # ── tests ─────────────────────────────────────────────────────────────────────
 
 def test_migration_adds_columns(tmp_path: Path) -> None:
-    """Fresh v0 DB → migrated to v1; 4 new columns exist, user_version=11."""
+    """Fresh v0 DB → migrated to v1; 3 new columns added, user_version=11."""
     db = tmp_path / "pulse.db"
     _make_v0_db(db)
 
@@ -61,8 +61,8 @@ def test_migration_adds_columns(tmp_path: Path) -> None:
         assert "upstream" in _column_names(conn, "repos")
         assert "vulnerability_alerts" in _column_names(conn, "repos")
         assert "review_events" in _column_names(conn, "prs")
-        # snapshots already has schema_version in v0 DDL — migration adds a second one
-        # but SQLite deduplicates column names in table_info; just check migration ran
+        # schema_version already exists in v0 DDL; _column_exists guard skips ALTER TABLE.
+        # Only 3 new columns added by this migration.
         schema_cols = _column_names(conn, "snapshots")
         assert "schema_version" in schema_cols
     finally:
@@ -154,6 +154,28 @@ def test_migration_pre_integrity_check(tmp_path: Path, monkeypatch: pytest.Monke
 
     with pytest.raises(RuntimeError, match="pre-migration integrity_check failed"):
         run_migration(db)
+
+
+def test_migration_post_integrity_check_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Post-migration integrity_check failure must NOT bump user_version to 11."""
+    db = tmp_path / "pulse.db"
+    _make_v0_db(db)
+    call_count = {"n": 0}
+    import pulse.migrate as migrate_mod
+    original_check = migrate_mod._integrity_check
+    def fake_integrity(conn: sqlite3.Connection) -> bool:
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            return False
+        return original_check(conn)
+    monkeypatch.setattr(migrate_mod, "_integrity_check", fake_integrity)
+    with pytest.raises(RuntimeError, match="post-migration integrity_check failed"):
+        run_migration(db)
+    # user_version must still be v0 — NOT bumped to 11
+    conn = sqlite3.connect(str(db))
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    conn.close()
+    assert version in (_V0_USER_VERSION, 0), f"user_version should not be bumped, got {version}"
 
 
 def test_migration_v0_data_still_queryable(tmp_path: Path) -> None:
