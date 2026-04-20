@@ -80,7 +80,18 @@ class GraphQLClient:
                 continue
 
             if resp.status_code == 200:
-                body = resp.json()
+                try:
+                    body = resp.json()
+                except Exception:
+                    # treat malformed body as transient
+                    time.sleep(min(30, 2**attempt))
+                    continue
+
+                if body.get("data") is None and body.get("errors"):
+                    print(
+                        f"WARNING: GraphQL returned null data with errors: {body['errors'][:2]}",
+                        file=sys.stderr,
+                    )
 
                 rate_limit = (body.get("data") or {}).get("rateLimit") or {}
                 cost = rate_limit.get("cost", 0)
@@ -94,18 +105,37 @@ class GraphQLClient:
                         file=sys.stderr,
                     )
 
-                remaining = int(resp.headers.get("x-ratelimit-remaining", 5000))
+                try:
+                    remaining = int(resp.headers.get("x-ratelimit-remaining", 5000))
+                except ValueError:
+                    remaining = 5000
                 if remaining < 100:
-                    reset = int(resp.headers.get("x-ratelimit-reset", 0))
+                    try:
+                        reset = int(resp.headers.get("x-ratelimit-reset", 0))
+                    except ValueError:
+                        reset = 0
                     wait = min(max(0, reset - time.time()) + 1, 120)
+                    if deadline_monotonic is not None:
+                        dl_remaining = deadline_monotonic - time.monotonic()
+                        if dl_remaining <= 0:
+                            raise RunDeadlineExceeded()
+                        wait = min(wait, dl_remaining - 1)
                     time.sleep(wait)
 
                 return body
 
             if resp.status_code in (403, 429):
                 if "secondary rate limit" in resp.text.lower():
-                    retry_after = int(resp.headers.get("retry-after", 60))
+                    try:
+                        retry_after = int(resp.headers.get("retry-after", 60))
+                    except ValueError:
+                        retry_after = 60
                     wait = min(retry_after * (1.5**attempt), 600)
+                    if deadline_monotonic is not None:
+                        dl_remaining = deadline_monotonic - time.monotonic()
+                        if dl_remaining <= 0:
+                            raise RunDeadlineExceeded()
+                        wait = min(wait, dl_remaining - 1)
                     time.sleep(wait)
                     continue
 
@@ -127,6 +157,14 @@ class GraphQLClient:
         field: str = "",
         cursor_var: str = "cursor",
     ) -> list[dict]:
+        """Walk a paginated GraphQL connection, returning all collected nodes.
+
+        On resume (when a checkpoint cursor exists in pagination_state), returns
+        only nodes from the saved cursor forward. Callers requiring crash-durable
+        collection must persist nodes eagerly per page rather than relying on the
+        full return value.
+        """
+        variables = dict(variables)
         use_checkpoint = db_conn is not None and org and repo and field
 
         if use_checkpoint:
@@ -140,21 +178,21 @@ class GraphQLClient:
         nodes: list[dict] = []
 
         while True:
-            try:
-                body = self.execute(query, variables, deadline_monotonic=deadline_monotonic)
+            body = self.execute(query, variables, deadline_monotonic=deadline_monotonic)
 
+            # Navigate to page_info and nodes — log and stop on path miss
+            try:
                 page_info: dict = body
                 for key in page_info_path:
                     page_info = page_info[key]
-
                 current_nodes: list[dict] = body
                 for key in nodes_path:
                     current_nodes = current_nodes[key]
+            except (KeyError, TypeError) as e:
+                print(f"WARNING: paginate path traversal failed: {e}", file=sys.stderr)
+                break
 
-                nodes.extend(current_nodes)
-
-            except (KeyError, TypeError):
-                return nodes
+            nodes.extend(current_nodes)
 
             end_cursor = page_info.get("endCursor")
 

@@ -164,6 +164,23 @@ def test_paginate_resume() -> None:
     assert row is None
 
 
+def test_execute_null_data_errors_only() -> None:
+    """200 response with null data and errors array must be returned as-is."""
+    body = {
+        "data": None,
+        "errors": [{"message": "Could not resolve to a Repository", "type": "NOT_FOUND"}],
+    }
+    ok_resp = _make_response(200, body)
+
+    client = _make_client()
+
+    with patch.object(client._client, "send", return_value=ok_resp):
+        result = client.execute("{ repository(owner: \"x\", name: \"y\") { name } }")
+
+    assert result["data"] is None
+    assert result["errors"][0]["type"] == "NOT_FOUND"
+
+
 def test_cost_budget_abort() -> None:
     """Query cost exceeding COST_ABORT_THRESHOLD must raise CostBudgetExceeded."""
     body = {"data": {"rateLimit": {"cost": 51, "remaining": 4900}}}
