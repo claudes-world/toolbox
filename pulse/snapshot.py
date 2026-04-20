@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import sys
 import time
+
+import click
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -567,7 +568,7 @@ def run_snapshot(
             )
         except Exception as e:
             msg = f"failed to enumerate repos for {org_name}: {e}"
-            print(f"ERROR: {msg}", file=sys.stderr)
+            click.echo(f"ERROR: {msg}", err=True)
             org_errors.append(msg)
             continue
 
@@ -653,7 +654,7 @@ def run_snapshot(
             try:
                 _persist_repo(db_conn, snapshot_id, repo, prs, issues, releases)
             except Exception as e:
-                print(f"ERROR: failed to persist {org_name}/{repo_name}: {e}", file=sys.stderr)
+                click.echo(f"ERROR: failed to persist {org_name}/{repo_name}: {e}", err=True)
                 repos_failed += 1
                 if counted_as == "partial":
                     repos_partial -= 1
