@@ -273,3 +273,41 @@ def test_warmup_banner_absent_when_full_window() -> None:
     lines = _render_reviewer_activity(conn, snap, cfg)
     combined = "\n".join(lines)
     assert "7-day window fills at" not in combined
+
+
+def test_non_review_events_excluded_from_total() -> None:
+    """Non-review timeline events (MERGED_EVENT etc.) must not inflate total."""
+    events = [
+        {"type": "PULL_REQUEST_REVIEW", "author": "alice", "state": "APPROVED",
+         "label": None, "submitted_at": None, "created_at": None},
+        {"type": "MERGED_EVENT", "author": "alice", "state": None,
+         "label": None, "submitted_at": None, "created_at": None},
+        {"type": "LABELED_EVENT", "author": "alice", "state": None,
+         "label": None, "submitted_at": None, "created_at": None},
+    ]
+    conn = _db_with_events(events)
+    result = compute_reviewer_activity_7d(conn)
+    # Only the PULL_REQUEST_REVIEW counts — MERGED_EVENT and LABELED_EVENT must not inflate total
+    assert result == {"human:alice": {"total": 1, "approved": 1, "change_requested": 0, "commented": 0, "dismissed": 0}}
+
+
+def test_no_double_count_across_snapshots() -> None:
+    """Non-review events mixed with review events across multiple snapshots must not inflate total."""
+    conn = _make_db()
+    # Each snapshot has 1 review + 2 non-review events
+    events = [
+        {"type": "PULL_REQUEST_REVIEW", "author": "alice", "state": "APPROVED",
+         "label": None, "submitted_at": None, "created_at": None},
+        {"type": "MERGED_EVENT", "author": "alice", "state": None,
+         "label": None, "submitted_at": None, "created_at": None},
+        {"type": "CLOSED_EVENT", "author": "alice", "state": None,
+         "label": None, "submitted_at": None, "created_at": None},
+    ]
+    for i in range(3):
+        snap_id = f"multi-snap-{i}"
+        _insert_snapshot(conn, snap_id, _utc_iso(0.5))
+        repo_id = _insert_repo(conn, snap_id)
+        _insert_pr_with_events(conn, repo_id, 1, events)
+    rollup = compute_reviewer_activity_7d(conn)
+    # SQL uses MAX(id) — only the latest snapshot is queried; non-review events (MERGED, CLOSED) excluded from total
+    assert rollup == {"human:alice": {"total": 1, "approved": 1, "change_requested": 0, "commented": 0, "dismissed": 0}}
