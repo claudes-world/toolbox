@@ -25,6 +25,7 @@ def open_db(path: Path) -> sqlite3.Connection:
     # Stage 1: open the file. Failure here is an environment/permissions problem, not corruption.
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.chmod(0o700)
         # Pre-create with 0o600 to avoid umask race. O_EXCL ensures atomic creation.
         try:
             fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -79,10 +80,16 @@ def open_db(path: Path) -> sqlite3.Connection:
         except DBCorrupt:
             raise
         except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
-            raise DBCorrupt(f"integrity_check raised exception (corrupt db): {e}") from e
+            msg = str(e).lower()
+            if any(k in msg for k in ("malformed", "corrupt", "not a database", "disk image")):
+                raise DBCorrupt(f"integrity_check raised exception (corrupt db): {e}") from e
+            raise DBSetupError(f"integrity_check failed (env error): {e}") from e
         create_schema(conn)
         return conn
     except DBCorrupt:
+        conn.close()
+        raise
+    except DBSetupError:
         conn.close()
         raise
     except Exception as e:
