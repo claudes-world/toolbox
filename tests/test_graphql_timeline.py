@@ -456,3 +456,55 @@ def test_event_to_review_event_mapping() -> None:
     })
     assert merged.type == "MergedEvent"
     assert merged.label is None
+
+
+# ---------------------------------------------------------------------------
+# Test 10: Pre-fetch gate — CostBudgetExceeded raised before any HTTP call
+# ---------------------------------------------------------------------------
+
+def test_pre_fetch_gate_skips_without_http_call() -> None:
+    """Budget already exhausted: fetch_pr_timeline raises before making any HTTP request."""
+    client = _make_client()
+    from unittest.mock import patch
+    with patch.object(client._client, "send") as mock_send:
+        with pytest.raises(CostBudgetExceeded):
+            client.fetch_pr_timeline("PR_abc123", cumulative_cost=[TIMELINE_CUMULATIVE_WARN])
+    mock_send.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Test 11: All PRs missing node_id → review_events field_status = "partial"
+# ---------------------------------------------------------------------------
+
+def test_all_prs_missing_node_id_sets_partial_status() -> None:
+    """When every PR in a repo lacks node_id, review_events status should be 'partial'."""
+    from pulse.schema import FieldStatus, RepoData
+
+    conn = _make_db()
+    repo_id, _ = _insert_repo_and_pr(conn, pr_number=1, node_id=None)
+    _insert_repo_and_pr(conn, pr_number=2, node_id=None, repo_id=repo_id)
+
+    prs = [
+        PRData(number=1, title="PR 1", author="a", created_at=None, updated_at=None,
+               is_draft=False, is_dependabot=False, is_renovate=False,
+               hours_idle=None, stalled=False, node_id=None),
+        PRData(number=2, title="PR 2", author="b", created_at=None, updated_at=None,
+               is_draft=False, is_dependabot=False, is_renovate=False,
+               hours_idle=None, stalled=False, node_id=None),
+    ]
+
+    client = _make_client()
+    repo = RepoData(
+        org="o", name="r", default_branch="main", is_fork=False,
+        is_archived=False, has_issues_enabled=True, parent_owner=None,
+        parent_name=None, parent_is_deleted=False, capture_status="success",
+    )
+
+    # No HTTP calls should be made — all PRs skipped due to missing node_id
+    with patch.object(client._client, "send") as mock_send:
+        _capture_pr_timelines(client, conn, repo_id, prs, repo, None, [0])
+    mock_send.assert_not_called()
+
+    assert "review_events" in repo.field_statuses
+    assert repo.field_statuses["review_events"].status == "partial"
+    assert "2/2" in (repo.field_statuses["review_events"].error_note or "")

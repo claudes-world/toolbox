@@ -405,7 +405,7 @@ def _capture_pr_timelines(
         if "review_events" not in repo.field_statuses:
             repo.field_statuses["review_events"] = FieldStatus(
                 status="partial",
-                error_note=f"all {len(prs)} PRs lack node_id; timeline capture skipped",
+                error_note=f"{skipped_no_node_id}/{len(prs)} PRs lack node_id; timeline capture skipped",
             )
     else:
         repo.field_statuses["review_events"] = FieldStatus(status="success")
