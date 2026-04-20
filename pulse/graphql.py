@@ -418,15 +418,26 @@ class GraphQLClient:
             if remaining is not None:
                 last_remaining[0] = remaining
 
-        nodes = self.paginate(
-            query=PR_TIMELINE_QUERY,
-            variables={"prId": pr_node_id, "cursor": None},
-            page_info_path=["data", "node", "timelineItems", "pageInfo"],
-            nodes_path=["data", "node", "timelineItems", "nodes"],
-            deadline_monotonic=deadline_monotonic,
-            cursor_var="cursor",
-            on_page_response=_on_page,
-        )
+        # try/finally ensures cost is flushed even if paginate() raises mid-walk
+        try:
+            nodes = self.paginate(
+                query=PR_TIMELINE_QUERY,
+                variables={"prId": pr_node_id, "cursor": None},
+                page_info_path=["data", "node", "timelineItems", "pageInfo"],
+                nodes_path=["data", "node", "timelineItems", "nodes"],
+                deadline_monotonic=deadline_monotonic,
+                cursor_var="cursor",
+                on_page_response=_on_page,
+            )
+        finally:
+            # Always flush accumulated cost, even if paginate() raised
+            if cumulative_cost is not None:
+                cumulative_cost[0] += accumulated_cost[0]
+                if cumulative_cost[0] >= TIMELINE_CUMULATIVE_WARN:
+                    raise CostBudgetExceeded(
+                        f"cumulative timeline cost {cumulative_cost[0]} >= {TIMELINE_CUMULATIVE_WARN}; "
+                        "skipping remaining timeline fetches for this run"
+                    )
 
         if node_not_found[0]:
             raise PRNodeNotFound(f"PR node_id not found on GitHub: {pr_node_id}")
@@ -434,7 +445,6 @@ class GraphQLClient:
         if cumulative_cost is not None:
             cost = accumulated_cost[0]
             remaining = last_remaining[0]
-            cumulative_cost[0] += cost
             if cost > TIMELINE_COST_WARN:
                 print(
                     f"WARNING: timeline query cost {cost} exceeds threshold {TIMELINE_COST_WARN}",
@@ -444,11 +454,6 @@ class GraphQLClient:
                 print(
                     f"CRITICAL: rateLimit.remaining={remaining} — approaching rate limit",
                     file=sys.stderr,
-                )
-            if cumulative_cost[0] >= TIMELINE_CUMULATIVE_WARN:
-                raise CostBudgetExceeded(
-                    f"cumulative timeline cost {cumulative_cost[0]} >= {TIMELINE_CUMULATIVE_WARN}; "
-                    "skipping remaining timeline fetches for this run"
                 )
 
         return nodes
