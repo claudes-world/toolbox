@@ -18,18 +18,27 @@ _DEFAULT_DB_PATH = Path.home() / ".world" / "pulse" / "pulse.db"
 @click.group(invoke_without_command=True)
 @click.option("--config-check", is_flag=True, default=False, help="Validate config and print effective config as YAML.")
 @click.option("--self-check", is_flag=True, default=False, help="Run config + storage health checks.")
+@click.option("--now", "run_now", is_flag=True, default=False, help="Run one snapshot and render digest.")
+@click.option("--digest", "print_digest", is_flag=True, default=False, help="Print current digest to stdout.")
 @click.version_option(__version__, prog_name="pulse")
 @click.pass_context
-def main(ctx: click.Context, config_check: bool, self_check: bool) -> None:
+def main(ctx: click.Context, config_check: bool, self_check: bool, run_now: bool, print_digest: bool) -> None:
     """pulse — org health monitor."""
     apply_ipv4_patch()
-    if config_check and self_check:
-        click.echo("ERROR: --config-check and --self-check are mutually exclusive", err=True)
+
+    active_flags = sum([config_check, self_check, run_now, print_digest])
+    if active_flags > 1:
+        click.echo("ERROR: --config-check, --self-check, --now, and --digest are mutually exclusive", err=True)
         sys.exit(1)
+
     if config_check:
         _run_config_check()
     elif self_check:
         _run_self_check()
+    elif run_now:
+        _run_now()
+    elif print_digest:
+        _run_digest()
     elif ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
 
@@ -95,6 +104,84 @@ def _run_self_check() -> None:
     if errors:
         sys.exit(1)
     sys.exit(0)
+
+
+def _run_now() -> None:
+    from pulse.config import ConfigError, load_config
+    from pulse.digest import atomic_write_text, render_digest
+    from pulse.graphql import GraphQLClient, make_deadline
+    from pulse.locks import LockHeld, PulseLock
+    from pulse.snapshot import run_snapshot
+    from pulse.storage import open_db
+
+    config_path = _DEFAULT_CONFIG_PATH
+    db_path = _DEFAULT_DB_PATH
+    output_dir = db_path.parent
+
+    try:
+        cfg = load_config(config_path)
+    except ConfigError as e:
+        click.echo(f"ERROR: config: {e}", err=True)
+        sys.exit(1)
+
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if not token:
+        click.echo("ERROR: GH_TOKEN environment variable not set", err=True)
+        sys.exit(1)
+
+    try:
+        with PulseLock():
+            db_conn = open_db(db_path)
+            try:
+                with GraphQLClient(token=token, base_url=cfg.defaults.github_api_base) as gql:
+                    deadline = make_deadline()
+                    snapshot_id = run_snapshot(
+                        cfg=cfg,
+                        db_conn=db_conn,
+                        gql=gql,
+                        deadline=deadline,
+                        output_dir=output_dir,
+                    )
+                digest_text = render_digest(db_conn, cfg)
+            finally:
+                db_conn.close()
+
+        digest_path = output_dir / "digest-latest.md"
+        atomic_write_text(digest_path, digest_text)
+        click.echo(str(digest_path))
+    except LockHeld:
+        click.echo("pulse already running", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"ERROR: {e}", err=True)
+        sys.exit(1)
+
+
+def _run_digest() -> None:
+    from pulse.config import ConfigError, load_config
+    from pulse.digest import render_digest
+    from pulse.storage import open_db
+
+    config_path = _DEFAULT_CONFIG_PATH
+    db_path = _DEFAULT_DB_PATH
+
+    try:
+        cfg = load_config(config_path)
+    except ConfigError as e:
+        click.echo(f"ERROR: config: {e}", err=True)
+        sys.exit(1)
+
+    try:
+        db_conn = open_db(db_path)
+        try:
+            digest_text = render_digest(db_conn, cfg)
+        finally:
+            db_conn.close()
+    except Exception as e:
+        click.echo(f"ERROR: {e}", err=True)
+        sys.exit(1)
+
+    click.echo(digest_text, nl=False)
 
 
 if __name__ == "__main__":
