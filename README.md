@@ -119,41 +119,25 @@ md-speak --no-describe document.md      # skip AI descriptions
 
 ### pulse
 
-CLI tool for snapshotting GitHub org activity. Queries open PRs, issues, releases, and Dependabot PR counts across all repos in configured orgs. Stores rolling 7-day history in SQLite; exports JSON + markdown digest.
+GitHub org activity monitor. Periodic GraphQL snapshots — open PRs, issues, Dependabot PRs, releases — stored in SQLite, rendered to a markdown digest.
 
-**Setup:**
-- `GH_TOKEN` in `~/.world/pulse/env` (chmod 600). Token needs `repo`, `read:org` scopes.
-- `~/.world/pulse/config.yml` — see `pulse/` package for schema. Create with:
-  ```yaml
-  schema_version: "1.0"
-  orgs:
-    claudes-world:
-      ignore: []
-  defaults:
-    stall_pr_hours: 12
-    stall_issue_hours: 72
-    history_days: 7
-    cadence_minutes: 30
-    github_api_base: "https://api.github.com"
-    max_prs_per_repo: 30
-    max_issues_per_repo: 50
-    max_releases_per_repo: 10
-  ```
-- Install: `pip install -e ~/code/toolbox/` (installs `pulse` CLI entry point)
+Full documentation: [`pulse/README.md`](pulse/README.md)
 
-**Usage:**
+**Quick start:**
 ```
-pulse --config-check          # validate config + print effective config
-pulse --self-check            # config + storage + writability health check
-pulse --version
+pip install -e ~/code/toolbox/
+source ~/.world/pulse/env   # or export GH_TOKEN=...
+pulse --now                  # run snapshot + render digest
+pulse --self-check           # validate token, config, storage
 ```
 
 **Files:**
-- `pulse/` — Python package (config, storage, ipv4 patch)
+- `pulse/` — Python package (config, storage, GraphQL, snapshot, digest)
 - `bin/pulse` — executable entry point
+- `systemd/user/` — service + timer units
 - `tests/test_config.py`, `tests/test_storage.py` — unit tests
 
-**Cost:** No paid API calls in scaffold phase. GraphQL queries use GitHub PAT (free tier).
+**Cost:** No paid API calls. GraphQL queries use GitHub PAT (free tier).
 
 ---
 
