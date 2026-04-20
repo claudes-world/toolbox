@@ -364,7 +364,7 @@ def process_markdown(md_text: str, use_ai: bool = True) -> list[Segment]:
                         if not val:
                             continue
                         voice = VOICES["table_key"] if j == 0 else VOICES["table_val"]
-                        text = f"{header_texts[j]}, {val}" if j < len(header_texts) else val
+                        text = f"{header_texts[j]}, {val}" if j < len(header_texts) and header_texts[j] else val
                         segments.append(Segment(
                             text=text,
                             voice=voice,
