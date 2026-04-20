@@ -76,7 +76,13 @@ class GraphQLClient:
                     json={"query": query, "variables": variables or {}},
                 )
             except (httpx.NetworkError, httpx.TimeoutException):
-                time.sleep(min(30, 2**attempt))
+                wait = min(30, 2**attempt)
+                if deadline_monotonic is not None:
+                    dl_remaining = deadline_monotonic - time.monotonic()
+                    if dl_remaining <= 0:
+                        raise RunDeadlineExceeded()
+                    wait = min(wait, max(0, dl_remaining - 1))
+                time.sleep(wait)
                 continue
 
             if resp.status_code == 200:
@@ -84,7 +90,13 @@ class GraphQLClient:
                     body = resp.json()
                 except Exception:
                     # treat malformed body as transient
-                    time.sleep(min(30, 2**attempt))
+                    wait = min(30, 2**attempt)
+                    if deadline_monotonic is not None:
+                        dl_remaining = deadline_monotonic - time.monotonic()
+                        if dl_remaining <= 0:
+                            raise RunDeadlineExceeded()
+                        wait = min(wait, max(0, dl_remaining - 1))
+                    time.sleep(wait)
                     continue
 
                 if body.get("data") is None and body.get("errors"):
@@ -119,7 +131,7 @@ class GraphQLClient:
                         dl_remaining = deadline_monotonic - time.monotonic()
                         if dl_remaining <= 0:
                             raise RunDeadlineExceeded()
-                        wait = min(wait, dl_remaining - 1)
+                        wait = min(wait, max(0, dl_remaining - 1))
                     time.sleep(wait)
 
                 return body
@@ -135,9 +147,19 @@ class GraphQLClient:
                         dl_remaining = deadline_monotonic - time.monotonic()
                         if dl_remaining <= 0:
                             raise RunDeadlineExceeded()
-                        wait = min(wait, dl_remaining - 1)
+                        wait = min(wait, max(0, dl_remaining - 1))
                     time.sleep(wait)
                     continue
+
+            if resp.status_code >= 500:
+                wait = min(30, 2**attempt)
+                if deadline_monotonic is not None:
+                    dl_remaining = deadline_monotonic - time.monotonic()
+                    if dl_remaining <= 0:
+                        raise RunDeadlineExceeded()
+                    wait = min(wait, max(0, dl_remaining - 1))
+                time.sleep(wait)
+                continue
 
             if resp.status_code >= 400:
                 raise RuntimeError(f"gql {resp.status_code}: {resp.text[:500]}")
@@ -176,6 +198,7 @@ class GraphQLClient:
                 variables[cursor_var] = row[0]
 
         nodes: list[dict] = []
+        _completed = False
 
         while True:
             body = self.execute(query, variables, deadline_monotonic=deadline_monotonic)
@@ -190,7 +213,7 @@ class GraphQLClient:
                     current_nodes = current_nodes[key]
             except (KeyError, TypeError) as e:
                 print(f"WARNING: paginate path traversal failed: {e}", file=sys.stderr)
-                break
+                break  # _completed stays False
 
             nodes.extend(current_nodes)
 
@@ -206,11 +229,12 @@ class GraphQLClient:
                     )
 
             if not page_info.get("hasNextPage") or end_cursor is None:
+                _completed = True
                 break
 
             variables[cursor_var] = end_cursor
 
-        if use_checkpoint:
+        if use_checkpoint and _completed:
             with db_conn:
                 db_conn.execute(
                     "DELETE FROM pagination_state WHERE org=? AND repo=? AND field=?",
