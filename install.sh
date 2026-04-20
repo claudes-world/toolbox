@@ -37,14 +37,16 @@ cp "$SCRIPT_DIR/systemd/user/pulse.timer" "$HOME/.config/systemd/user/pulse.time
 
 systemctl --user daemon-reload
 
-# Self-check before enabling timer — source env to load GH_TOKEN
-# shellcheck disable=SC1091
-set +u
-source "$HOME/.world/pulse/env"
-export GH_TOKEN
-# Also export GITHUB_TOKEN if it was set in env file
-[ -n "${GITHUB_TOKEN:-}" ] && export GITHUB_TOKEN
-set -u
+# Self-check before enabling timer — parse env file as key=value (no shell execution)
+while IFS='=' read -r key val; do
+    # Skip blank lines and comments
+    [[ -z "${key// /}" ]] && continue
+    [[ "$key" =~ ^[[:space:]]*# ]] && continue
+    key="${key%%[[:space:]]*}"  # strip trailing spaces from key
+    val="${val#\"}"             # strip optional leading quote
+    val="${val%\"}"             # strip optional trailing quote
+    export "$key"="$val"
+done < "$HOME/.world/pulse/env"
 if ! "$HOME/code/toolbox/bin/pulse" --self-check; then
     echo "ERROR: pulse --self-check failed. Fix issues above before enabling the timer." >&2
     exit 1

@@ -25,6 +25,17 @@ query {
 }
 """
 
+SCOPE_PROBE_QUERY = """
+query($org: String!) {
+  organization(login: $org) {
+    name
+    repositories(first: 1) {
+      totalCount
+    }
+  }
+}
+"""
+
 
 @click.group(invoke_without_command=True)
 @click.option("--config-check", is_flag=True, default=False, help="Validate config and print effective config as YAML.")
@@ -32,6 +43,7 @@ query {
 @click.option("--now", "run_now", is_flag=True, default=False, help="Run one snapshot and render digest.")
 @click.option("--digest", "print_digest", is_flag=True, default=False, help="Print current digest to stdout.")
 @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Snapshot a single repo to /tmp without touching production paths.")
+@click.option("--service", "service", is_flag=True, default=False, help="Reserved for systemd ExecStart — runs without PulseLock (external flock handles concurrency).")
 @click.option("--repo", "repo_override", default=None, help="OWNER/NAME override for --dry-run.")
 @click.version_option(__version__, prog_name="pulse")
 @click.pass_context
@@ -42,14 +54,15 @@ def main(
     run_now: bool,
     print_digest: bool,
     dry_run: bool,
+    service: bool,
     repo_override: str | None,
 ) -> None:
     """pulse — org health monitor."""
     apply_ipv4_patch()
 
-    active_flags = sum([config_check, self_check, run_now, print_digest, dry_run])
+    active_flags = sum([config_check, self_check, run_now, print_digest, dry_run, service])
     if active_flags > 1:
-        click.echo("ERROR: --config-check, --self-check, --now, --digest, and --dry-run are mutually exclusive", err=True)
+        click.echo("ERROR: --config-check, --self-check, --now, --digest, --dry-run, and --service are mutually exclusive", err=True)
         sys.exit(1)
 
     if repo_override and not dry_run:
@@ -66,8 +79,14 @@ def main(
         _run_digest()
     elif dry_run:
         _run_dry_run(repo_override)
-    elif ctx.invoked_subcommand is None:
+    elif service:
         _run_now_no_lock()  # service path — external flock handles concurrency
+    elif ctx.invoked_subcommand is None:
+        click.echo(
+            "ERROR: use `pulse --now` for manual runs or `pulse --service` is reserved for systemd ExecStart",
+            err=True,
+        )
+        sys.exit(1)
 
 
 def _run_config_check() -> None:
@@ -208,9 +227,47 @@ def _run_self_check() -> None:
                 if not missing:
                     click.echo(f"[OK] token: scopes present ({', '.join(sorted(scopes))})")
                 elif not scopes_header:
-                    # GitHub Apps / fine-grained tokens don't return x-oauth-scopes
-                    # — treat as informational, not a hard fail
-                    click.echo("[OK] token: x-oauth-scopes header absent (fine-grained token or GitHub App — verify permissions manually)")
+                    # GitHub Apps / fine-grained tokens don't return x-oauth-scopes — probe with real queries
+                    if cfg is None:
+                        click.echo("[WARN] token: fine-grained token detected but config load failed — cannot probe scopes", err=True)
+                    elif not cfg.orgs:
+                        click.echo("[WARN] token: fine-grained token — cannot verify scopes without configured orgs in config.yml")
+                    else:
+                        first_org = next(iter(cfg.orgs))
+                        probe_resp = httpx.post(
+                            _graphql_url,
+                            json={"query": SCOPE_PROBE_QUERY, "variables": {"org": first_org}},
+                            headers={
+                                "Authorization": f"bearer {token}",
+                                "Accept": "application/vnd.github+json",
+                                "X-GitHub-Api-Version": "2022-11-28",
+                            },
+                            timeout=15.0,
+                        )
+                        if probe_resp.status_code == 200:
+                            probe_body = probe_resp.json()
+                            probe_errors = probe_body.get("errors") or []
+                            scope_error = next(
+                                (
+                                    e for e in probe_errors
+                                    if "INSUFFICIENT_SCOPES" in str(e.get("type", "")).upper()
+                                    or "Resource not accessible by integration" in str(e.get("message", ""))
+                                ),
+                                None,
+                            )
+                            if scope_error:
+                                err_msg = scope_error.get("message", str(scope_error))
+                                errors.append(f"token: fine-grained token lacks required scopes (read:org or repo): {err_msg}")
+                                click.echo(
+                                    f"[FAIL] token: fine-grained token lacks required scopes (read:org or repo): {err_msg}",
+                                    err=True,
+                                )
+                            else:
+                                click.echo("[OK] token: fine-grained token — scope probe passed (org+repo read verified)")
+                        else:
+                            err_msg = f"scope probe returned HTTP {probe_resp.status_code}"
+                            errors.append(f"token: fine-grained token scope probe failed: {err_msg}")
+                            click.echo(f"[FAIL] token: fine-grained token scope probe failed: {err_msg}", err=True)
                 else:
                     errors.append(f"token: missing required scopes: {', '.join(sorted(missing))}")
                     click.echo(f"[FAIL] token: missing required scopes: {', '.join(sorted(missing))} (have: {scopes_header})", err=True)
@@ -286,7 +343,7 @@ def _run_now() -> None:
 
 
 def _run_now_no_lock() -> None:
-    """Service path — external flock (in ExecStart) handles concurrency, no PulseLock."""
+    """Invoked via `pulse --service` (systemd ExecStart path) — external flock handles concurrency, no PulseLock."""
     try:
         digest_path = _do_snapshot_and_digest()
         click.echo(digest_path)
@@ -436,7 +493,7 @@ def _run_dry_run(repo_override: str | None = None) -> None:
         "releases": [dataclasses.asdict(r) for r in releases],
     }
 
-    fd, tmp_str = tempfile.mkstemp(dir=tempfile.gettempdir(), prefix=f"pulse-dry-run-{ts}-", suffix=".json")
+    fd, tmp_str = tempfile.mkstemp(dir="/tmp", prefix=f"pulse-dry-run-{ts}-", suffix=".json")
     out_path = Path(tmp_str)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:

@@ -142,14 +142,78 @@ def test_self_check_env_wrong_perms(pulse_env: Path):
     assert result.exit_code == 1
 
 
-def test_self_check_fine_grained_token_no_scopes_header(pulse_env: Path):
-    """GitHub App / fine-grained token: missing x-oauth-scopes header → [OK] informational."""
-    mock_resp = _mock_httpx_response(200, "")
-    mock_resp.headers = {}  # no x-oauth-scopes at all
+def test_self_check_fine_grained_token_probe_pass(pulse_env: Path):
+    """Fine-grained token: no x-oauth-scopes header, scope probe succeeds → [OK]."""
+    # First call: SCOPE_CHECK_QUERY (no scopes header); second call: SCOPE_PROBE_QUERY (data returned)
+    initial_resp = _mock_httpx_response(200, "")
+    initial_resp.headers = {}  # no x-oauth-scopes at all
+
+    probe_resp = MagicMock()
+    probe_resp.status_code = 200
+    probe_resp.json.return_value = {
+        "data": {"organization": {"name": "example-org", "repositories": {"totalCount": 5}}}
+    }
 
     runner = CliRunner()
-    with patch("httpx.post", return_value=mock_resp):
+    with patch("httpx.post", side_effect=[initial_resp, probe_resp]):
         result = runner.invoke(main, ["--self-check"])
 
-    assert result.exit_code == 0
-    assert "fine-grained" in result.output or "absent" in result.output
+    assert result.exit_code == 0, result.output + (result.stderr if hasattr(result, "stderr") else "")
+    combined = result.output
+    assert "fine-grained" in combined and "probe passed" in combined
+
+
+def test_self_check_fine_grained_token_probe_fail(pulse_env: Path):
+    """Fine-grained token: no x-oauth-scopes header, probe returns INSUFFICIENT_SCOPES → [FAIL]."""
+    initial_resp = _mock_httpx_response(200, "")
+    initial_resp.headers = {}
+
+    probe_resp = MagicMock()
+    probe_resp.status_code = 200
+    probe_resp.json.return_value = {
+        "data": None,
+        "errors": [{"type": "INSUFFICIENT_SCOPES", "message": "Your token has not been granted the required scopes."}],
+    }
+
+    runner = CliRunner(mix_stderr=False)
+    with patch("httpx.post", side_effect=[initial_resp, probe_resp]):
+        result = runner.invoke(main, ["--self-check"])
+
+    assert result.exit_code == 1
+    combined = result.output + result.stderr
+    assert "fine-grained" in combined
+    assert "insufficient" in combined.lower() or "lacks required scopes" in combined.lower()
+
+
+def test_self_check_fine_grained_token_no_orgs(pulse_env: Path, monkeypatch: pytest.MonkeyPatch):
+    """Fine-grained token: no x-oauth-scopes, no configured orgs → [WARN], exit 0."""
+    from pulse.config import load_config
+
+    # Write config with empty orgs
+    empty_orgs_config = """\
+schema_version: "1.0"
+orgs: {}
+defaults:
+  stall_pr_hours: 12
+  stall_issue_hours: 72
+  history_days: 7
+  cadence_minutes: 30
+  github_api_base: "https://api.github.com"
+  max_prs_per_repo: 30
+  max_issues_per_repo: 50
+  max_releases_per_repo: 10
+"""
+    config_path = pulse_env / "config.yml"
+    config_path.write_text(empty_orgs_config)
+
+    initial_resp = _mock_httpx_response(200, "")
+    initial_resp.headers = {}  # no x-oauth-scopes
+
+    runner = CliRunner()
+    with patch("httpx.post", return_value=initial_resp):
+        result = runner.invoke(main, ["--self-check"])
+
+    assert result.exit_code == 0, result.output
+    combined = result.output
+    assert "WARN" in combined
+    assert "fine-grained" in combined
