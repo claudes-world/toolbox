@@ -149,7 +149,9 @@ def create_schema(conn: sqlite3.Connection) -> None:
                 parent_name TEXT,
                 parent_is_deleted INTEGER NOT NULL DEFAULT 0,
                 capture_status TEXT NOT NULL DEFAULT 'success',
-                field_statuses TEXT
+                field_statuses TEXT,
+                upstream TEXT,
+                vulnerability_alerts TEXT
             )
         """)
         conn.execute("""
