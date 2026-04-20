@@ -278,16 +278,19 @@ class GraphQLClient:
 
                 variables[cursor_var] = end_cursor
 
-        except (RunDeadlineExceeded, RetriesExhausted, CostBudgetExceeded, RuntimeError):
+        except (RunDeadlineExceeded, RetriesExhausted, CostBudgetExceeded):
             # Interrupted — save cursor so next run resumes instead of restarting from page 1
             if use_checkpoint and last_cursor:
-                with db_conn:
-                    db_conn.execute(
-                        "INSERT OR REPLACE INTO pagination_state"
-                        " (org, repo, field, last_cursor, timestamp)"
-                        " VALUES (?, ?, ?, ?, datetime('now'))",
-                        (org, repo, effective_field, last_cursor),
-                    )
+                try:
+                    with db_conn:
+                        db_conn.execute(
+                            "INSERT OR REPLACE INTO pagination_state"
+                            " (org, repo, field, last_cursor, timestamp)"
+                            " VALUES (?, ?, ?, ?, datetime('now'))",
+                            (org, repo, effective_field, last_cursor),
+                        )
+                except Exception as db_err:
+                    print(f"WARNING: could not save pagination checkpoint: {db_err}", file=sys.stderr)
             raise  # propagate to caller
 
         if use_checkpoint:

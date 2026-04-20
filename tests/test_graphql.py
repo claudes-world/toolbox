@@ -229,3 +229,95 @@ def test_execute_500_retry() -> None:
         result = client.execute("{ viewer { login } }")
 
     assert result["data"]["viewer"]["login"] == "user"
+
+
+def test_paginate_interrupt_saves_checkpoint() -> None:
+    """RetriesExhausted mid-walk saves last_cursor to pagination_state."""
+    conn = sqlite3.connect(":memory:")
+    _pagination_state_schema(conn)
+
+    # First page succeeds, second page raises RetriesExhausted
+    page1_body = {
+        "data": {
+            "rateLimit": {"cost": 1, "remaining": 4999, "resetAt": "2026-04-20T00:00:00Z", "used": 1},
+            "repository": {
+                "prs": {
+                    "nodes": [{"number": 1}],
+                    "pageInfo": {"hasNextPage": True, "endCursor": "cursor-page1"},
+                }
+            },
+        }
+    }
+    ok_resp = _make_response(200, page1_body)
+
+    client = _make_client()
+    call_count = 0
+
+    def fake_send(request, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return ok_resp
+        raise httpx.NetworkError("rate limit")  # will exhaust retries
+
+    with patch.object(client._client, "send", side_effect=fake_send), \
+         patch("pulse.graphql.time.sleep"):
+        with pytest.raises(RetriesExhausted):
+            client.paginate(
+                query="query($cursor: String) { ... }",
+                variables={"cursor": None},
+                page_info_path=["data", "repository", "prs", "pageInfo"],
+                nodes_path=["data", "repository", "prs", "nodes"],
+                db_conn=conn,
+                org="org",
+                repo="repo",
+                field="prs",
+            )
+
+    # Checkpoint should be saved with the cursor from the completed page
+    row = conn.execute(
+        "SELECT last_cursor FROM pagination_state WHERE org='org' AND repo='repo' AND field='prs'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "cursor-page1"
+
+
+def test_paginate_bad_cursor_deletes_checkpoint() -> None:
+    """Path traversal failure on response with errors deletes the checkpoint."""
+    conn = sqlite3.connect(":memory:")
+    _pagination_state_schema(conn)
+
+    # Pre-insert a stale checkpoint
+    conn.execute(
+        "INSERT INTO pagination_state (org, repo, field, last_cursor, timestamp)"
+        " VALUES ('org', 'repo', 'prs', 'stale-cursor', datetime('now'))"
+    )
+    conn.commit()
+
+    # Response with null data + errors (bad cursor scenario)
+    error_body = {
+        "data": None,
+        "errors": [{"message": "invalid cursor", "type": "INVALID_CURSOR_ARGUMENTS"}],
+    }
+    ok_resp = _make_response(200, error_body)
+
+    client = _make_client()
+
+    with patch.object(client._client, "send", return_value=ok_resp):
+        nodes = client.paginate(
+            query="query($cursor: String) { ... }",
+            variables={"cursor": None},
+            page_info_path=["data", "repository", "prs", "pageInfo"],
+            nodes_path=["data", "repository", "prs", "nodes"],
+            db_conn=conn,
+            org="org",
+            repo="repo",
+            field="prs",
+        )
+
+    assert nodes == []
+    # Stale checkpoint should be deleted (bad-cursor loop guard)
+    row = conn.execute(
+        "SELECT * FROM pagination_state WHERE org='org' AND repo='repo' AND field='prs'"
+    ).fetchone()
+    assert row is None
