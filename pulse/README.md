@@ -23,6 +23,15 @@ echo "GH_TOKEN=ghp_yourtoken" > ~/.world/pulse/env
 chmod 600 ~/.world/pulse/env
 ```
 
+The systemd service automatically loads this file via `EnvironmentFile=`. For manual CLI use, source it first:
+
+```bash
+source ~/.world/pulse/env
+pulse --now
+```
+
+Or export inline: `GH_TOKEN=$(grep GH_TOKEN ~/.world/pulse/env | cut -d= -f2) pulse --now`
+
 Token needs `read:org` + `repo` scopes (classic PAT) or equivalent fine-grained permissions.
 
 ## Configuration
@@ -46,7 +55,7 @@ defaults:
   history_days: 7           # SQLite retention window (1-365)
   cadence_minutes: 30       # informational; systemd timer governs actual schedule
   github_api_base: "https://api.github.com"
-  max_prs_per_repo: 30      # GraphQL pagination cap per repo
+  max_prs_per_repo: 30      # max PRs fetched per repo (single capped query, not cursor pagination)
   max_issues_per_repo: 50
   max_releases_per_repo: 10
 ```
@@ -84,7 +93,7 @@ Location: `~/.world/pulse/pulse.db` (0o600). WAL mode, `busy_timeout=5000ms`.
 | `repos` | `snapshot_id`, `org`, `name`, `default_branch`, `is_fork`, `is_archived`, `capture_status`, `field_statuses` | Repos queried in each snapshot |
 | `prs` | `repo_id`, `number`, `title`, `author`, `created_at`, `updated_at`, `is_draft`, `is_dependabot`, `is_renovate`, `hours_idle`, `stalled` | Open PRs at snapshot time |
 | `issues` | `repo_id`, `number`, `title`, `author`, `created_at`, `updated_at`, `labels`, `hours_idle`, `stalled` | Open issues at snapshot time |
-| `releases` | `repo_id`, `tag_name`, `name`, `created_at`, `is_prerelease` | Releases within history window |
+| `releases` | `repo_id`, `tag_name`, `name`, `created_at`, `is_prerelease` | Latest N releases per repo (`max_releases_per_repo`); `history_days` governs snapshot retention, not release filtering |
 | `alerts` | `repo_id`, `severity`, `ghsa_id`, `package_name`, `ecosystem`, `age_days`, `dependabot_pr_number` | Dependabot security alerts (schema stub — not populated in v0) |
 | `pagination_state` | `org`, `repo`, `field`, `last_cursor`, `timestamp` | Cursor state for org-level repo enumeration (not per-repo collections) |
 

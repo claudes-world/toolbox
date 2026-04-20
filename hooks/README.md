@@ -1,6 +1,6 @@
 # hooks
 
-Claude Code event-driven scripts. Each hook fires on a specific Claude Code lifecycle event and receives JSON on stdin (where applicable). Hooks live in `hooks/` and are wired via `.claude/settings.json` or `settings.local.json`.
+Claude Code event-driven scripts. Each hook fires on a specific Claude Code lifecycle event and receives JSON on stdin (where applicable). Hooks live in `hooks/` and are wired via `.claude/settings.json` or `.claude/settings.local.json`.
 
 ## Hook registry
 
