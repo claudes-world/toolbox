@@ -211,6 +211,43 @@ def test_self_check_fine_grained_token_zero_scope_fails(pulse_env: Path):
     assert "insufficient" in combined.lower() or "lacks required scopes" in combined.lower()
 
 
+def test_self_check_config_fail_skips_token_check(pulse_env: Path, monkeypatch: pytest.MonkeyPatch):
+    """Bad config → token check is skipped (no httpx call), WARN printed, exit 1 due to config error."""
+    config_path = pulse_env / "config.yml"
+    config_path.write_text("this: is: not: valid: yaml: [unclosed")
+
+    runner = CliRunner(mix_stderr=False)
+    with patch("httpx.post") as mock_post:
+        result = runner.invoke(main, ["--self-check"])
+
+    assert result.exit_code == 1
+    # httpx.post must NOT have been called — token check skipped
+    mock_post.assert_not_called()
+    combined = result.output + result.stderr
+    assert "skipping token check" in combined or "fix config first" in combined
+
+
+def test_self_check_fine_grained_null_org(pulse_env: Path):
+    """Fine-grained token: probe returns null organization → [FAIL] with null-org message."""
+    initial_resp = _mock_httpx_response(200, "")
+    initial_resp.headers = {}  # no x-oauth-scopes
+
+    probe_resp = MagicMock()
+    probe_resp.status_code = 200
+    probe_resp.json.return_value = {
+        "data": {"organization": None}
+    }
+
+    runner = CliRunner(mix_stderr=False)
+    with patch("httpx.post", side_effect=[initial_resp, probe_resp]):
+        result = runner.invoke(main, ["--self-check"])
+
+    assert result.exit_code == 1
+    combined = result.output + result.stderr
+    assert "null organization" in combined
+    assert "read:org" in combined
+
+
 def test_self_check_fine_grained_token_no_orgs(pulse_env: Path, monkeypatch: pytest.MonkeyPatch):
     """Fine-grained token: no x-oauth-scopes, no configured orgs → [WARN], exit 0."""
     from pulse.config import load_config

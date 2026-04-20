@@ -189,93 +189,90 @@ def _run_self_check() -> None:
         try:
             import httpx
 
-            _api_base = (
-                cfg.defaults.github_api_base
-                if cfg is not None
-                else "https://api.github.com"
-            )
-            _graphql_url = f"{_api_base.rstrip('/')}/graphql"
             if cfg is None:
-                click.echo("WARNING: config load failed; falling back to public GitHub API for token check", err=True)
-
-            resp = httpx.post(
-                _graphql_url,
-                json={"query": SCOPE_CHECK_QUERY},
-                headers={
-                    "Authorization": f"bearer {token}",
-                    "Accept": "application/vnd.github+json",
-                    "X-GitHub-Api-Version": "2022-11-28",
-                },
-                timeout=15.0,
-            )
-            if resp.status_code == 200:
-                scopes_header = resp.headers.get("x-oauth-scopes", "")
-                scopes = {s.strip() for s in scopes_header.split(",") if s.strip()}
-                required = {"read:org", "repo"}
-                missing = required - scopes
-                if not missing:
-                    click.echo(f"[OK] token: scopes present ({', '.join(sorted(scopes))})")
-                elif not scopes_header:
-                    # GitHub Apps / fine-grained tokens don't return x-oauth-scopes — probe with real queries
-                    if cfg is None:
-                        click.echo("[WARN] token: fine-grained token detected but config load failed — cannot probe scopes", err=True)
-                    elif not cfg.orgs:
-                        click.echo("[WARN] token: fine-grained token — cannot verify scopes without configured orgs in config.yml", err=True)
-                    else:
-                        from pulse.snapshot import REPOS_QUERY
-                        first_org = next(iter(cfg.orgs))
-                        probe_resp = httpx.post(
-                            _graphql_url,
-                            json={"query": REPOS_QUERY, "variables": {"org": first_org, "cursor": None}},
-                            headers={
-                                "Authorization": f"bearer {token}",
-                                "Accept": "application/vnd.github+json",
-                                "X-GitHub-Api-Version": "2022-11-28",
-                            },
-                            timeout=15.0,
-                        )
-                        if probe_resp.status_code == 200:
-                            probe_body = probe_resp.json()
-                            probe_errors = probe_body.get("errors") or []
-                            scope_error = next(
-                                (
-                                    e for e in probe_errors
-                                    if "INSUFFICIENT_SCOPES" in str(e.get("type", "")).upper()
-                                    or "Resource not accessible by integration" in str(e.get("message", ""))
-                                ),
-                                None,
-                            )
-                            if scope_error:
-                                err_msg = scope_error.get("message", str(scope_error))
-                                errors.append(f"token: fine-grained token lacks required scopes (read:org or repo): {err_msg}")
-                                click.echo(
-                                    f"[FAIL] token: fine-grained token lacks required scopes (read:org or repo): {err_msg}",
-                                    err=True,
-                                )
-                            else:
-                                # Probe succeeds if data.organization.repositories.nodes is present (can be empty)
-                                probe_data = probe_body.get("data") or {}
-                                repo_nodes = (
-                                    (probe_data.get("organization") or {})
-                                    .get("repositories", {})
-                                    .get("nodes")
-                                )
-                                if repo_nodes is not None:
-                                    click.echo("[OK] token: fine-grained token — scope probe passed (org+repo read verified)")
-                                else:
-                                    err_msg = "scope probe returned no data.organization.repositories.nodes"
-                                    errors.append(f"token: fine-grained token scope probe failed: {err_msg}")
-                                    click.echo(f"[FAIL] token: fine-grained token scope probe failed: {err_msg}", err=True)
-                        else:
-                            err_msg = f"scope probe returned HTTP {probe_resp.status_code}"
-                            errors.append(f"token: fine-grained token scope probe failed: {err_msg}")
-                            click.echo(f"[FAIL] token: fine-grained token scope probe failed: {err_msg}", err=True)
-                else:
-                    errors.append(f"token: missing required scopes: {', '.join(sorted(missing))}")
-                    click.echo(f"[FAIL] token: missing required scopes: {', '.join(sorted(missing))} (have: {scopes_header})", err=True)
+                click.echo("[WARN] token: skipping token check — config failed to load (fix config first)", err=True)
+                # Don't append to errors — config error already recorded above
             else:
-                errors.append(f"token: GraphQL health check returned {resp.status_code}")
-                click.echo(f"[FAIL] token: GraphQL health check returned {resp.status_code}", err=True)
+                _api_base = cfg.defaults.github_api_base
+                _graphql_url = f"{_api_base.rstrip('/')}/graphql"
+
+                resp = httpx.post(
+                    _graphql_url,
+                    json={"query": SCOPE_CHECK_QUERY},
+                    headers={
+                        "Authorization": f"bearer {token}",
+                        "Accept": "application/vnd.github+json",
+                        "X-GitHub-Api-Version": "2022-11-28",
+                    },
+                    timeout=15.0,
+                )
+                if resp.status_code == 200:
+                    scopes_header = resp.headers.get("x-oauth-scopes", "")
+                    scopes = {s.strip() for s in scopes_header.split(",") if s.strip()}
+                    required = {"read:org", "repo"}
+                    missing = required - scopes
+                    if not missing:
+                        click.echo(f"[OK] token: scopes present ({', '.join(sorted(scopes))})")
+                    elif not scopes_header:
+                        # GitHub Apps / fine-grained tokens don't return x-oauth-scopes — probe with real queries
+                        if not cfg.orgs:
+                            click.echo("[WARN] token: fine-grained token — cannot verify scopes without configured orgs in config.yml", err=True)
+                        else:
+                            from pulse.snapshot import REPOS_QUERY
+                            first_org = next(iter(cfg.orgs))
+                            probe_resp = httpx.post(
+                                _graphql_url,
+                                json={"query": REPOS_QUERY, "variables": {"org": first_org, "cursor": None}},
+                                headers={
+                                    "Authorization": f"bearer {token}",
+                                    "Accept": "application/vnd.github+json",
+                                    "X-GitHub-Api-Version": "2022-11-28",
+                                },
+                                timeout=15.0,
+                            )
+                            if probe_resp.status_code == 200:
+                                probe_body = probe_resp.json()
+                                probe_errors = probe_body.get("errors") or []
+                                scope_error = next(
+                                    (
+                                        e for e in probe_errors
+                                        if "INSUFFICIENT_SCOPES" in str(e.get("type", "")).upper()
+                                        or "Resource not accessible by integration" in str(e.get("message", ""))
+                                    ),
+                                    None,
+                                )
+                                if scope_error:
+                                    err_msg = scope_error.get("message", str(scope_error))
+                                    errors.append(f"token: fine-grained token lacks required scopes (read:org or repo): {err_msg}")
+                                    click.echo(
+                                        f"[FAIL] token: fine-grained token lacks required scopes (read:org or repo): {err_msg}",
+                                        err=True,
+                                    )
+                                else:
+                                    # Probe succeeds if data.organization.repositories.nodes is present (can be empty)
+                                    probe_data = probe_body.get("data") or {}
+                                    probe_org = probe_data.get("organization") or None
+                                    if probe_org is None:
+                                        errors.append("token: scope probe — org not accessible (null organization; token may lack read:org scope or org not found)")
+                                        click.echo("[FAIL] token: scope probe — org not accessible (null organization; token may lack read:org scope or org not found)", err=True)
+                                    else:
+                                        repo_nodes = probe_org.get("repositories", {}).get("nodes")
+                                        if repo_nodes is not None:
+                                            click.echo(f"[OK] token: fine-grained token — scope probe passed for '{first_org}' (first configured org)")
+                                        else:
+                                            err_msg = "scope probe returned no data.organization.repositories.nodes"
+                                            errors.append(f"token: fine-grained token scope probe failed: {err_msg}")
+                                            click.echo(f"[FAIL] token: fine-grained token scope probe failed: {err_msg}", err=True)
+                            else:
+                                err_msg = f"scope probe returned HTTP {probe_resp.status_code}"
+                                errors.append(f"token: fine-grained token scope probe failed: {err_msg}")
+                                click.echo(f"[FAIL] token: fine-grained token scope probe failed: {err_msg}", err=True)
+                    else:
+                        errors.append(f"token: missing required scopes: {', '.join(sorted(missing))}")
+                        click.echo(f"[FAIL] token: missing required scopes: {', '.join(sorted(missing))} (have: {scopes_header})", err=True)
+                else:
+                    errors.append(f"token: GraphQL health check returned {resp.status_code}")
+                    click.echo(f"[FAIL] token: GraphQL health check returned {resp.status_code}", err=True)
         except Exception as e:
             errors.append(f"token: scope check failed: {e}")
             click.echo(f"[FAIL] token: scope check failed: {e}", err=True)
@@ -504,7 +501,7 @@ def _run_dry_run(repo_override: str | None = None) -> None:
         except Exception:
             out_path.unlink(missing_ok=True)
             raise
-    except OSError as e:
+    except Exception as e:
         click.echo(f"ERROR: could not write dry-run output to /tmp: {e}", err=True)
         sys.exit(1)
 
