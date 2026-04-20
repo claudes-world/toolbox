@@ -21,7 +21,10 @@ def _lock_path() -> Path:
 class PulseLock:
     """Context manager that acquires an exclusive non-blocking flock.
 
-    Raises LockHeld immediately if the lock is already held by another process.
+    Raises LockHeld immediately (non-blocking) if the lock is already held by another process.
+    Concurrent invocations fail-fast rather than queue — the caller is responsible for retry
+    or error reporting. This is intentional: pulse runs are time-bounded and queueing would
+    cause cascading delays.
 
     PulseLock is the sole concurrency guard — do NOT wrap the service invocation
     with an external flock(1) command. If systemd ExecStart uses flock -n, the

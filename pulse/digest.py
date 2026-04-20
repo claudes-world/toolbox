@@ -10,7 +10,9 @@ from pathlib import Path
 from pulse.config import PulseConfig
 
 
-def md_escape(s: str, max_len: int = 120) -> str:
+def md_escape(s: str | None, max_len: int = 120) -> str:
+    if s is None:
+        return ""
     # COPY VERBATIM:
     escaped = (s.replace("\\", "\\\\")
                 .replace("`", "\\`")
@@ -86,9 +88,14 @@ def render_digest(db_conn: sqlite3.Connection, cfg: PulseConfig) -> str:
     # ---- Alerts section ----
     alert_lines: list[str] = []
 
-    if snap["capture_status"] in ("partial", "failed"):
+    if snap["capture_status"] == "failed":
         alert_lines.append(
-            "- ⚠️ **Snapshot incomplete**: one or more orgs failed to enumerate"
+            "- ❌ **Snapshot failed**: could not enumerate any orgs"
+            " — check `journalctl --user -u pulse.service`"
+        )
+    elif snap["capture_status"] == "partial":
+        alert_lines.append(
+            "- ⚠️ **Snapshot partial**: one or more orgs failed to enumerate"
             " — check `journalctl --user -u pulse.service`"
         )
 

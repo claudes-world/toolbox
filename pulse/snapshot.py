@@ -466,7 +466,10 @@ def _build_current_json(
                     }
                     for r in issue_rows
                 ],
-                "releases": [dict(r) for r in release_rows],
+                "releases": [
+                    {**dict(r), "is_prerelease": bool(r["is_prerelease"])}
+                    for r in release_rows
+                ],
             }
         )
 
@@ -623,7 +626,7 @@ def run_snapshot(
 
     duration_ms = int((time.monotonic() - start_time) * 1000)
 
-    if repos_failed > 0 and repos_succeeded == 0 and repos_partial == 0:
+    if repos_succeeded == 0 and repos_partial == 0 and (repos_failed > 0 or org_errors):
         snapshot_capture_status = "failed"
     elif repos_partial > 0 or repos_failed > 0 or org_errors:
         snapshot_capture_status = "partial"
