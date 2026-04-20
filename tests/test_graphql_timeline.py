@@ -306,7 +306,8 @@ def test_partial_capture_failure_continues() -> None:
         pr_id = variables.get("prId", "")
         if pr_id == "PR_fail":
             raise httpx.NetworkError("simulated failure")
-        return ok_resp if "prId" in variables else probe_resp
+        # With real-cost tracking via on_page_response, no separate probe call is made
+        return ok_resp
 
     from pulse.schema import FieldStatus, RepoData
     repo = RepoData(org="o", name="r", default_branch="main", is_fork=False,
@@ -412,12 +413,9 @@ def test_orphan_pr_node_id_not_found() -> None:
         _capture_pr_timelines(client, conn, repo_id, prs, repo, None, [0])
 
     pr = conn.execute("SELECT review_events FROM prs WHERE repo_id=? AND number=1", (repo_id,)).fetchone()
-    # Node not found → path traversal returns [] → stored as '[]'
     assert pr is not None
-    # Either empty list (graceful) or NULL (failure path) — either is acceptable, no crash
-    if pr["review_events"] is not None:
-        parsed = json.loads(pr["review_events"])
-        assert isinstance(parsed, list)
+    # Node not found → PRNodeNotFound raised → review_events stays NULL (not a failure)
+    assert pr["review_events"] is None, "Orphaned node_id should result in NULL review_events"
 
 
 # ---------------------------------------------------------------------------
