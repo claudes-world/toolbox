@@ -1,0 +1,27 @@
+# pulse.service
+[Unit]
+Description=org-pulse GitHub API snapshot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment="PATH=/home/claude/.local/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=%h/.world/pulse/env
+WorkingDirectory=%h
+# flock -n: non-blocking concurrency guard. Pulse binary resolves the SAME
+# lock path internally (see locks.py) so the on-demand skill uses the same
+# lock. If /run/user/%U/ unavailable (early boot / no login session), the
+# binary falls back to ~/.world/pulse/pulse.lock on its own.
+ExecStart=/usr/bin/flock -n /run/user/%U/pulse.lock %h/code/toolbox/bin/pulse
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pulse
+# NOTE: NO Restart=on-failure — would cause retry storms during rate-limit
+# windows. The timer cadence drives the next attempt instead.
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=%h/.world/pulse /run/user/%U
+
+[Install]
+WantedBy=default.target

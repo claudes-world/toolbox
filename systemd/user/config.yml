@@ -1,0 +1,14 @@
+$schema_version: "1.0"
+orgs:
+  # Add your GitHub org(s) here
+  # example-org:
+  #   ignore: []
+  #   stall_overrides: {}
+defaults:
+  github_api_base: "https://api.github.com"
+  stall_pr_hours: 48.0
+  stall_issue_hours: 168.0
+  max_prs_per_repo: 30
+  max_issues_per_repo: 50
+  max_releases_per_repo: 10
+  history_days: 7

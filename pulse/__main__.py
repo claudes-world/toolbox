@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import dataclasses
+import json
 import os
-import sqlite3
+import stat
 import sys
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
@@ -14,21 +18,42 @@ from pulse.ipv4 import apply_ipv4_patch
 _DEFAULT_CONFIG_PATH = Path.home() / ".world" / "pulse" / "config.yml"
 _DEFAULT_DB_PATH = Path.home() / ".world" / "pulse" / "pulse.db"
 
+SCOPE_CHECK_QUERY = """
+query {
+  rateLimit { remaining }
+  viewer { login }
+}
+"""
+
 
 @click.group(invoke_without_command=True)
 @click.option("--config-check", is_flag=True, default=False, help="Validate config and print effective config as YAML.")
 @click.option("--self-check", is_flag=True, default=False, help="Run config + storage health checks.")
 @click.option("--now", "run_now", is_flag=True, default=False, help="Run one snapshot and render digest.")
 @click.option("--digest", "print_digest", is_flag=True, default=False, help="Print current digest to stdout.")
+@click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Snapshot a single repo to /tmp without touching production paths.")
+@click.option("--repo", "repo_override", default=None, help="OWNER/NAME override for --dry-run.")
 @click.version_option(__version__, prog_name="pulse")
 @click.pass_context
-def main(ctx: click.Context, config_check: bool, self_check: bool, run_now: bool, print_digest: bool) -> None:
+def main(
+    ctx: click.Context,
+    config_check: bool,
+    self_check: bool,
+    run_now: bool,
+    print_digest: bool,
+    dry_run: bool,
+    repo_override: str | None,
+) -> None:
     """pulse — org health monitor."""
     apply_ipv4_patch()
 
-    active_flags = sum([config_check, self_check, run_now, print_digest])
+    active_flags = sum([config_check, self_check, run_now, print_digest, dry_run])
     if active_flags > 1:
-        click.echo("ERROR: --config-check, --self-check, --now, and --digest are mutually exclusive", err=True)
+        click.echo("ERROR: --config-check, --self-check, --now, --digest, and --dry-run are mutually exclusive", err=True)
+        sys.exit(1)
+
+    if repo_override and not dry_run:
+        click.echo("ERROR: --repo requires --dry-run", err=True)
         sys.exit(1)
 
     if config_check:
@@ -39,9 +64,10 @@ def main(ctx: click.Context, config_check: bool, self_check: bool, run_now: bool
         _run_now()
     elif print_digest:
         _run_digest()
+    elif dry_run:
+        _run_dry_run(repo_override)
     elif ctx.invoked_subcommand is None:
-        click.echo(ctx.get_help())
-        sys.exit(1)
+        _run_now_no_lock()  # service path — external flock handles concurrency
 
 
 def _run_config_check() -> None:
@@ -60,6 +86,7 @@ def _run_config_check() -> None:
 
 def _run_self_check() -> None:
     from pulse.config import ConfigError, load_config
+    from pulse.graphql import GraphQLClient
     from pulse.storage import DBCorrupt, open_db
 
     errors: list[str] = []
@@ -102,16 +129,99 @@ def _run_self_check() -> None:
         errors.append(f"sqlite: {e}")
         click.echo(f"[FAIL] sqlite: {e}", err=True)
 
+    # 4. Permission checks
+    pulse_dir = Path.home() / ".world" / "pulse"
+    if pulse_dir.exists():
+        try:
+            st = pulse_dir.stat()
+            mode = stat.S_IMODE(st.st_mode)
+            if mode == 0o700:
+                click.echo(f"[OK] perms: {pulse_dir} is 0700")
+            else:
+                errors.append(f"perms: {pulse_dir} is {oct(mode)}, expected 0700")
+                click.echo(f"[FAIL] perms: {pulse_dir} is {oct(mode)}, expected 0700", err=True)
+        except Exception as e:
+            errors.append(f"perms: cannot stat {pulse_dir}: {e}")
+            click.echo(f"[FAIL] perms: cannot stat {pulse_dir}: {e}", err=True)
+
+    env_path = pulse_dir / "env"
+    if env_path.exists():
+        try:
+            st = env_path.stat()
+            mode = stat.S_IMODE(st.st_mode)
+            if mode == 0o600:
+                click.echo(f"[OK] perms: {env_path} is 0600")
+            else:
+                errors.append(f"perms: {env_path} is {oct(mode)}, expected 0600")
+                click.echo(f"[FAIL] perms: {env_path} is {oct(mode)}, expected 0600", err=True)
+        except Exception as e:
+            errors.append(f"perms: cannot stat {env_path}: {e}")
+            click.echo(f"[FAIL] perms: cannot stat {env_path}: {e}", err=True)
+
+    db_path_check = pulse_dir / "pulse.db"
+    if db_path_check.exists():
+        try:
+            st = db_path_check.stat()
+            mode = stat.S_IMODE(st.st_mode)
+            if mode == 0o600:
+                click.echo(f"[OK] perms: {db_path_check} is 0600")
+            else:
+                errors.append(f"perms: {db_path_check} is {oct(mode)}, expected 0600")
+                click.echo(f"[FAIL] perms: {db_path_check} is {oct(mode)}, expected 0600", err=True)
+        except Exception as e:
+            errors.append(f"perms: cannot stat {db_path_check}: {e}")
+            click.echo(f"[FAIL] perms: cannot stat {db_path_check}: {e}", err=True)
+
+    # 5. Token scope verification
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if not token:
+        errors.append("token: GH_TOKEN not set")
+        click.echo("[FAIL] token: GH_TOKEN not set", err=True)
+    else:
+        try:
+            import httpx
+
+            resp = httpx.post(
+                "https://api.github.com/graphql",
+                json={"query": SCOPE_CHECK_QUERY},
+                headers={
+                    "Authorization": f"bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+                timeout=15.0,
+            )
+            if resp.status_code == 200:
+                scopes_header = resp.headers.get("x-oauth-scopes", "")
+                scopes = {s.strip() for s in scopes_header.split(",") if s.strip()}
+                required = {"read:org", "repo"}
+                missing = required - scopes
+                if not missing:
+                    click.echo(f"[OK] token: scopes present ({', '.join(sorted(scopes))})")
+                elif not scopes_header:
+                    # GitHub Apps / fine-grained tokens don't return x-oauth-scopes
+                    # — treat as informational, not a hard fail
+                    click.echo("[OK] token: x-oauth-scopes header absent (fine-grained token or GitHub App — verify permissions manually)")
+                else:
+                    errors.append(f"token: missing required scopes: {', '.join(sorted(missing))}")
+                    click.echo(f"[FAIL] token: missing required scopes: {', '.join(sorted(missing))} (have: {scopes_header})", err=True)
+            else:
+                errors.append(f"token: GraphQL health check returned {resp.status_code}")
+                click.echo(f"[FAIL] token: GraphQL health check returned {resp.status_code}", err=True)
+        except Exception as e:
+            errors.append(f"token: scope check failed: {e}")
+            click.echo(f"[FAIL] token: scope check failed: {e}", err=True)
+
     if errors:
         sys.exit(1)
     sys.exit(0)
 
 
-def _run_now() -> None:
+def _do_snapshot_and_digest() -> str:
+    """Core snapshot + digest logic. Caller is responsible for concurrency guard."""
     from pulse.config import ConfigError, load_config
     from pulse.digest import atomic_write_text, render_digest
     from pulse.graphql import GraphQLClient, make_deadline
-    from pulse.locks import LockHeld, PulseLock
     from pulse.snapshot import run_snapshot
     from pulse.storage import open_db
 
@@ -130,28 +240,47 @@ def _run_now() -> None:
         click.echo("ERROR: GH_TOKEN environment variable not set", err=True)
         sys.exit(1)
 
+    db_conn = open_db(db_path)
+    try:
+        with GraphQLClient(token=token, base_url=cfg.defaults.github_api_base) as gql:
+            deadline = make_deadline()
+            run_snapshot(
+                cfg=cfg,
+                db_conn=db_conn,
+                gql=gql,
+                deadline=deadline,
+                output_dir=output_dir,
+            )
+        digest_text = render_digest(db_conn, cfg)
+    finally:
+        db_conn.close()
+
+    digest_path = output_dir / "digest-latest.md"
+    atomic_write_text(digest_path, digest_text)
+    return str(digest_path)
+
+
+def _run_now() -> None:
+    """Manual invocation path — acquires PulseLock before running."""
+    from pulse.locks import LockHeld, PulseLock
+
     try:
         with PulseLock():
-            db_conn = open_db(db_path)
-            try:
-                with GraphQLClient(token=token, base_url=cfg.defaults.github_api_base) as gql:
-                    deadline = make_deadline()
-                    snapshot_id = run_snapshot(
-                        cfg=cfg,
-                        db_conn=db_conn,
-                        gql=gql,
-                        deadline=deadline,
-                        output_dir=output_dir,
-                    )
-                digest_text = render_digest(db_conn, cfg)
-            finally:
-                db_conn.close()
-            digest_path = output_dir / "digest-latest.md"
-            atomic_write_text(digest_path, digest_text)
-        click.echo(str(digest_path))
+            digest_path = _do_snapshot_and_digest()
+        click.echo(digest_path)
     except LockHeld:
         click.echo("pulse already running", err=True)
         sys.exit(1)
+    except Exception as e:
+        click.echo(f"ERROR: {e}", err=True)
+        sys.exit(1)
+
+
+def _run_now_no_lock() -> None:
+    """Service path — external flock (in ExecStart) handles concurrency, no PulseLock."""
+    try:
+        digest_path = _do_snapshot_and_digest()
+        click.echo(digest_path)
     except Exception as e:
         click.echo(f"ERROR: {e}", err=True)
         sys.exit(1)
@@ -182,6 +311,137 @@ def _run_digest() -> None:
         sys.exit(1)
 
     click.echo(digest_text, nl=False)
+
+
+def _run_dry_run(repo_override: str | None = None) -> None:
+    """Dry-run: snapshot a single repo to /tmp. Touches no production paths."""
+    from pulse.config import ConfigError, load_config
+    from pulse.graphql import GraphQLClient, make_deadline
+
+    config_path = _DEFAULT_CONFIG_PATH
+
+    try:
+        cfg = load_config(config_path)
+    except ConfigError as e:
+        click.echo(f"ERROR: config: {e}", err=True)
+        sys.exit(1)
+
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if not token:
+        click.echo("ERROR: GH_TOKEN environment variable not set", err=True)
+        sys.exit(1)
+
+    # Determine target org/repo
+    if repo_override:
+        parts = repo_override.split("/", 1)
+        if len(parts) != 2:
+            click.echo(f"ERROR: --repo must be OWNER/NAME, got: {repo_override}", err=True)
+            sys.exit(1)
+        target_org, target_repo = parts
+        if target_org not in cfg.orgs:
+            click.echo(f"ERROR: org '{target_org}' not in config (known: {', '.join(cfg.orgs)})", err=True)
+            sys.exit(1)
+    else:
+        if not cfg.orgs:
+            click.echo("ERROR: no orgs in config", err=True)
+            sys.exit(1)
+        target_org = next(iter(cfg.orgs))
+        target_repo = None  # will use first repo from API
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out_path = Path(tempfile.gettempdir()) / f"pulse-dry-run-{ts}.json"
+
+    try:
+        with GraphQLClient(token=token, base_url=cfg.defaults.github_api_base) as gql:
+            deadline = make_deadline()
+            # Import snapshot queries directly
+            from pulse.snapshot import (
+                REPOS_QUERY,
+                _capture_prs,
+                _capture_issues,
+                _capture_releases,
+            )
+
+            now = datetime.now(timezone.utc)
+
+            # Find target repo
+            if target_repo is None:
+                body = gql.execute(
+                    REPOS_QUERY,
+                    {"org": target_org, "cursor": None},
+                    deadline_monotonic=deadline,
+                )
+                repos_data = (body.get("data") or {}).get("organization", {}).get("repositories", {})
+                nodes = repos_data.get("nodes") or []
+                if not nodes:
+                    click.echo(f"ERROR: no repositories found in org '{target_org}'", err=True, )
+                    sys.exit(1)
+                target_repo = nodes[0]["name"]
+                print(f"dry-run: using first repo: {target_org}/{target_repo}", file=sys.stderr)
+
+            org_cfg = cfg.orgs[target_org]
+            defaults = cfg.defaults
+
+            prs, pr_status = _capture_prs(
+                gql=gql,
+                org=target_org,
+                repo_name=target_repo,
+                max_prs=defaults.max_prs_per_repo,
+                stall_hours=defaults.stall_pr_hours,
+                now=now,
+                deadline=deadline,
+            )
+            issues, issue_status = _capture_issues(
+                gql=gql,
+                org=target_org,
+                repo_name=target_repo,
+                max_issues=defaults.max_issues_per_repo,
+                stall_hours=defaults.stall_issue_hours,
+                now=now,
+                deadline=deadline,
+            )
+            releases, release_status = _capture_releases(
+                gql=gql,
+                org=target_org,
+                repo_name=target_repo,
+                max_releases=defaults.max_releases_per_repo,
+            )
+
+    except Exception as e:
+        click.echo(f"ERROR: {e}", err=True)
+        sys.exit(1)
+
+    result = {
+        "dry_run": True,
+        "timestamp": ts,
+        "org": target_org,
+        "repo": target_repo,
+        "pr_count": len(prs),
+        "issue_count": len(issues),
+        "release_count": len(releases),
+        "pr_status": dataclasses.asdict(pr_status),
+        "issue_status": dataclasses.asdict(issue_status),
+        "release_status": dataclasses.asdict(release_status),
+        "prs": [dataclasses.asdict(p) for p in prs],
+        "issues": [dataclasses.asdict(i) for i in issues],
+        "releases": [dataclasses.asdict(r) for r in releases],
+    }
+
+    out_path.write_text(json.dumps(result, indent=2, default=str))
+
+    stalled_prs = sum(1 for p in prs if p.stalled)
+    stalled_issues = sum(1 for i in issues if i.stalled)
+    print(
+        f"dry-run: {target_org}/{target_repo} — "
+        f"PRs: {len(prs)} ({stalled_prs} stalled), "
+        f"issues: {len(issues)} ({stalled_issues} stalled), "
+        f"releases: {len(releases)}",
+        file=sys.stderr,
+    )
+    print(f"dry-run: pr_status={pr_status.status}, issue_status={issue_status.status}, release_status={release_status.status}", file=sys.stderr)
+
+    # stdout: output file path so scripts can capture it
+    click.echo(str(out_path))
 
 
 if __name__ == "__main__":

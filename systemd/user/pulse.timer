@@ -1,0 +1,15 @@
+# pulse.timer
+[Unit]
+Description=Run org-pulse every 30 minutes
+
+[Timer]
+OnCalendar=*:0/30
+# Catch up missed runs (requires OnCalendar, not OnUnitActiveSec)
+Persistent=true
+# systemd 257.5 regression workaround — fire ~2min post-boot regardless of timestamp mechanism
+OnBootSec=2min
+# Spread within a 30s window to avoid thundering herd
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
