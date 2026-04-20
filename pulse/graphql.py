@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 import sys
@@ -9,6 +10,8 @@ from collections.abc import Callable
 import httpx
 
 from pulse.ipv4 import apply_ipv4_patch
+
+logger = logging.getLogger(__name__)
 
 COST_WARN_THRESHOLD = 10
 COST_ABORT_THRESHOLD = 50
@@ -312,8 +315,10 @@ class GraphQLClient:
                 if on_page_response is not None:
                     try:
                         on_page_response(body)
+                    except PRNodeNotFound:
+                        raise  # null-node sentinel: stop pagination immediately
                     except Exception:
-                        pass  # callback failure must not interrupt pagination
+                        pass  # other callback failures must not interrupt pagination
 
                 try:
                     page_info: dict = body
@@ -347,7 +352,7 @@ class GraphQLClient:
 
                 variables[cursor_var] = end_cursor
 
-        except (RunDeadlineExceeded, RetriesExhausted, CostBudgetExceeded, RuntimeError):
+        except (RunDeadlineExceeded, RetriesExhausted, CostBudgetExceeded, RuntimeError, PRNodeNotFound):
             # Interrupted — save cursor so next run resumes instead of restarting from page 1
             if use_checkpoint and last_cursor:
                 try:
@@ -395,30 +400,43 @@ class GraphQLClient:
     ) -> list[dict]:
         """Fetch all timeline events for a PR, paginating if needed.
 
-        Returns list of raw event dicts. Raises CostBudgetExceeded if the
-        cumulative cost across all timeline queries in the run approaches the
-        hourly budget (TIMELINE_CUMULATIVE_WARN). If pr_node_id is not found
-        (node returns None), returns an empty list.
+        Returns list of raw event dicts. Raises CostBudgetExceeded (pre-fetch)
+        if cumulative cost is already >= TIMELINE_CUMULATIVE_WARN before this
+        call starts. If pr_node_id is not found (node returns None), raises
+        PRNodeNotFound.
 
         cumulative_cost: caller-supplied single-element list used as a mutable
         integer accumulator. Pass [0] to enable cross-PR cost tracking.
-        """
-        accumulated_cost = [0]
-        last_remaining = [5000]
-        node_not_found = [False]
 
+        Cost accounting invariants:
+        - Budget gate fires BEFORE any work; raises immediately if over budget.
+        - finally block ONLY accumulates cost; never raises (would mask paginate errors).
+        - If THIS call pushes over budget, a warning is logged but data is returned;
+          the NEXT call's pre-fetch gate will skip it.
+        """
+        # Pre-fetch gate: skip if already over budget
+        if cumulative_cost is not None and cumulative_cost[0] >= TIMELINE_CUMULATIVE_WARN:
+            raise CostBudgetExceeded(
+                f"cumulative timeline cost {cumulative_cost[0]} already >= {TIMELINE_CUMULATIVE_WARN}; "
+                "skipping remaining timeline fetches for this run"
+            )
+
+        accumulated_cost = [0]
         def _on_page(resp: dict) -> None:
             data = resp.get("data") or {}
-            if data.get("node") is None and "node" in data:
-                node_not_found[0] = True
+            # Accumulate cost FIRST so null-node responses don't silently drop their cost.
             rate = data.get("rateLimit") or {}
             page_cost = rate.get("cost", 0)
             accumulated_cost[0] += page_cost
             remaining = rate.get("remaining")
-            if remaining is not None:
-                last_remaining[0] = remaining
+            if remaining is not None and remaining < 100:
+                logger.warning("GitHub rate limit remaining=%d — approaching limit", remaining)
+            # Check for null node AFTER cost accounting, BEFORE any timelineItems traversal.
+            # Raising PRNodeNotFound here causes paginate() to re-raise it (see except clause),
+            # which propagates to our try/finally below — cost already flushed above.
+            if data.get("node") is None and "node" in data:
+                raise PRNodeNotFound(f"PR node_id not found on GitHub: {pr_node_id}")
 
-        # try/finally ensures cost is flushed even if paginate() raises mid-walk
         try:
             nodes = self.paginate(
                 query=PR_TIMELINE_QUERY,
@@ -430,31 +448,22 @@ class GraphQLClient:
                 on_page_response=_on_page,
             )
         finally:
-            # Always flush accumulated cost, even if paginate() raised
+            # Pure accumulation only — NEVER raise from finally (would mask paginate exceptions)
             if cumulative_cost is not None:
                 cumulative_cost[0] += accumulated_cost[0]
-                if cumulative_cost[0] >= TIMELINE_CUMULATIVE_WARN:
-                    raise CostBudgetExceeded(
-                        f"cumulative timeline cost {cumulative_cost[0]} >= {TIMELINE_CUMULATIVE_WARN}; "
-                        "skipping remaining timeline fetches for this run"
-                    )
 
-        if node_not_found[0]:
-            raise PRNodeNotFound(f"PR node_id not found on GitHub: {pr_node_id}")
+        # Post-fetch: warn if THIS call pushed us over budget (next call's gate will skip)
+        if cumulative_cost is not None and cumulative_cost[0] >= TIMELINE_CUMULATIVE_WARN:
+            logger.warning(
+                "Cumulative timeline cost %d >= %d after this PR; next call will be skipped",
+                cumulative_cost[0], TIMELINE_CUMULATIVE_WARN,
+            )
 
-        if cumulative_cost is not None:
-            cost = accumulated_cost[0]
-            remaining = last_remaining[0]
-            if cost > TIMELINE_COST_WARN:
-                print(
-                    f"WARNING: timeline query cost {cost} exceeds threshold {TIMELINE_COST_WARN}",
-                    file=sys.stderr,
-                )
-            if remaining < 100:
-                print(
-                    f"CRITICAL: rateLimit.remaining={remaining} — approaching rate limit",
-                    file=sys.stderr,
-                )
+        if accumulated_cost[0] > TIMELINE_COST_WARN:
+            logger.warning(
+                "Timeline query cost %d exceeds per-PR threshold %d",
+                accumulated_cost[0], TIMELINE_COST_WARN,
+            )
 
         return nodes
 
