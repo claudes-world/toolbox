@@ -7,11 +7,13 @@ Usage:
     md-speak --no-describe document.md    # skip AI descriptions of code/images
 
 Voice roles (Google Cloud TTS, overridable via env):
-    MD_VOICE_HEADING:  Headings (default: en-US-Wavenet-B, deep male)
-    MD_VOICE_BODY:     Body text (default: en-US-Wavenet-J, male)
-    MD_VOICE_SPECIAL:  Links, figures, code descriptions (default: en-US-Neural2-C, female)
-    MD_VOICE_TABLE:    Table content (default: en-US-Neural2-A, male)
-    MD_VOICE_QUOTE:    Blockquotes (default: en-US-Wavenet-D, male)
+    MD_VOICE_HEADING:    Headings (default: en-US-Wavenet-B, deep male)
+    MD_VOICE_BODY:       Body text (default: en-US-Wavenet-J, male)
+    MD_VOICE_SPECIAL:    Links, figures, code descriptions (default: en-US-Neural2-C, female)
+    MD_VOICE_TABLE:      Table content (default: en-US-Neural2-F, female)
+    MD_VOICE_TABLE_KEY:  Table col 0 / headers (default: en-US-Neural2-H, female — row labels)
+    MD_VOICE_TABLE_VAL:  Table col 1+ (default: en-US-Neural2-F, female — values)
+    MD_VOICE_QUOTE:      Blockquotes (default: en-US-Wavenet-D, male)
 
 Requires:
     - GCP service account at ~/.secrets/gcp-tts-sa.json
@@ -38,6 +40,8 @@ VOICES = {
     "special": os.environ.get("MD_VOICE_SPECIAL", "en-US-Neural2-C"),
     "table": os.environ.get("MD_VOICE_TABLE", "en-US-Neural2-F"),
     "table_header": os.environ.get("MD_VOICE_TABLE_HEADER", "en-US-Neural2-C"),
+    "table_key": os.environ.get("MD_VOICE_TABLE_KEY", "en-US-Neural2-H"),    # col 0 — row labels
+    "table_val": os.environ.get("MD_VOICE_TABLE_VAL", "en-US-Neural2-F"),    # col 1+ — values
     "quote": os.environ.get("MD_VOICE_QUOTE", "en-US-Wavenet-D"),
 }
 
@@ -356,33 +360,48 @@ def process_markdown(md_text: str, use_ai: bool = True) -> list[Segment]:
                     pass  # fall back to heuristic
 
             if use_repeat_headers:
-                # Mode B: repeat headers with every cell
+                # Mode B: repeat header inline before each value, voiced per column
                 for row in all_rows:
-                    pairs = []
                     for j, val in enumerate(row):
+                        voice = VOICES["table_key"] if j == 0 else VOICES["table_val"]
                         if j < len(header_texts):
-                            pairs.append(f"{header_texts[j]}, {val}")
+                            text = f"{header_texts[j]}, {val}"
                         else:
-                            pairs.append(val)
-                    segments.append(Segment(
-                        text=". ".join(pairs),
-                        voice=VOICES["table"],
-                        pause_after=PAUSE["between_table_rows"],
-                    ))
+                            text = val
+                        if text:
+                            segments.append(Segment(
+                                text=text,
+                                voice=voice,
+                                pause_after=PAUSE["between_table_cells"],
+                            ))
+                    # Extra pause after each row
+                    if segments and segments[-1].pause_after < PAUSE["between_table_rows"]:
+                        segments[-1].pause_after = PAUSE["between_table_rows"]
             else:
-                # Mode A: headers once, then rows
+                # Mode A: headers once (all with table_key voice), then rows cell-by-cell
+                for j, h in enumerate(header_texts):
+                    if h:
+                        segments.append(Segment(
+                            text=h,
+                            voice=VOICES["table_key"],
+                            pause_after=PAUSE["between_table_cells"],
+                        ))
                 if header_texts:
-                    segments.append(Segment(
-                        text=", ".join(header_texts),
-                        voice=VOICES["table_header"],
-                        pause_after=PAUSE["between_table_rows"],
-                    ))
+                    # Upgrade pause after last header to row-level
+                    if segments and segments[-1].pause_after < PAUSE["between_table_rows"]:
+                        segments[-1].pause_after = PAUSE["between_table_rows"]
                 for row in all_rows:
-                    segments.append(Segment(
-                        text=", ".join(row),
-                        voice=VOICES["table"],
-                        pause_after=PAUSE["between_table_rows"],
-                    ))
+                    for j, val in enumerate(row):
+                        voice = VOICES["table_key"] if j == 0 else VOICES["table_val"]
+                        if val:
+                            segments.append(Segment(
+                                text=val,
+                                voice=voice,
+                                pause_after=PAUSE["between_table_cells"],
+                            ))
+                    # Upgrade pause after last cell in row
+                    if segments and segments[-1].pause_after < PAUSE["between_table_rows"]:
+                        segments[-1].pause_after = PAUSE["between_table_rows"]
 
             segments.append(Segment(text="", voice=VOICES["body"], pause_before=PAUSE["after_table"]))
 
