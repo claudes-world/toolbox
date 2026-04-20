@@ -118,9 +118,13 @@ def _capture_prs(
         # Single execute — max_prs <= 100 so fits in one page
         body = gql.execute(
             PRS_QUERY,
-            {"org": org, "repo": repo_name, "first": max_prs, "cursor": None},
+            {"org": org, "repo": repo_name, "first": min(max_prs, 100), "cursor": None},
             deadline_monotonic=deadline,
         )
+        if body.get("data") is None:
+            errors = body.get("errors") or []
+            note = errors[0].get("message", "repository returned null data") if errors else "repository returned null data"
+            return [], FieldStatus(status="failed", error_note=note[:200])
         repo_data = (body.get("data") or {}).get("repository") or {}
         pr_conn = repo_data.get("pullRequests") or {}
         total_count = pr_conn.get("totalCount", 0)
@@ -171,9 +175,13 @@ def _capture_issues(
         # Single execute — max_issues <= 100 so fits in one page
         body = gql.execute(
             ISSUES_QUERY,
-            {"org": org, "repo": repo_name, "first": max_issues, "cursor": None},
+            {"org": org, "repo": repo_name, "first": min(max_issues, 100), "cursor": None},
             deadline_monotonic=deadline,
         )
+        if body.get("data") is None:
+            errors = body.get("errors") or []
+            note = errors[0].get("message", "repository returned null data") if errors else "repository returned null data"
+            return [], FieldStatus(status="failed", error_note=note[:200])
         repo_data = (body.get("data") or {}).get("repository") or {}
         issue_conn = repo_data.get("issues") or {}
         total_count = issue_conn.get("totalCount", 0)
@@ -516,6 +524,7 @@ def run_snapshot(
     )
 
     org_errors: list[str] = []
+    orgs_succeeded = 0
     for org_name, org_config in cfg.orgs.items():
         # Enumerate repos
         try:
@@ -536,6 +545,7 @@ def run_snapshot(
             org_errors.append(msg)
             continue
 
+        orgs_succeeded += 1
         for node in repo_nodes:
             repo_name = node.get("name", "")
             if not repo_name:
@@ -626,7 +636,7 @@ def run_snapshot(
 
     duration_ms = int((time.monotonic() - start_time) * 1000)
 
-    if repos_succeeded == 0 and repos_partial == 0 and (repos_failed > 0 or org_errors):
+    if orgs_succeeded == 0 and repos_succeeded == 0 and repos_partial == 0:
         snapshot_capture_status = "failed"
     elif repos_partial > 0 or repos_failed > 0 or org_errors:
         snapshot_capture_status = "partial"

@@ -10,9 +10,11 @@ from pathlib import Path
 from pulse.config import PulseConfig
 
 
-def md_escape(s: str | None, max_len: int = 120) -> str:
+def md_escape(s: object, max_len: int = 120) -> str:
     if s is None:
         return ""
+    if not isinstance(s, str):
+        s = str(s)
     # COPY VERBATIM:
     escaped = (s.replace("\\", "\\\\")
                 .replace("`", "\\`")
