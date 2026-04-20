@@ -97,7 +97,7 @@ def render_digest(db_conn: sqlite3.Connection, cfg: PulseConfig) -> str:
         )
     elif snap["capture_status"] == "partial":
         alert_lines.append(
-            "- ⚠️ **Snapshot partial**: one or more orgs failed to enumerate"
+            "- ⚠️ **Snapshot partial**: some repos or fields may be incomplete"
             " — check `journalctl --user -u pulse.service`"
         )
 

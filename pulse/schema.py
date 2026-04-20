@@ -58,11 +58,3 @@ class ReleaseData:
     is_prerelease: bool
 
 
-@dataclass
-class AlertData:
-    severity: str | None
-    ghsa_id: str | None
-    package_name: str | None
-    ecosystem: str | None
-    age_days: int | None
-    dependabot_pr_number: int | None
