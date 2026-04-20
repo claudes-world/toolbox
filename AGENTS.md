@@ -53,7 +53,7 @@ Hooks are event-driven scripts in `hooks/` wired via `.claude/settings.json`.
 2. Source `hooks/common.sh` if the hook needs to resolve a Telegram chat ID
 3. Make it executable: `chmod +x hooks/<hook-name>`
 4. Add a row to the hook registry table in `hooks/README.md` (name, event, purpose, status)
-5. Wire in `.claude/settings.json` or project `settings.local.json` under the appropriate event key
+5. Wire in `.claude/settings.json` or project `.claude/settings.local.json` under the appropriate event key
 6. Test with a real Claude Code session; verify output JSON shape matches the hook schema
 
 ### Tool Design Principles

@@ -66,7 +66,7 @@ For hooks that block the event pipeline (`UserPromptSubmit`): exit code 2 cancel
 2. Make it executable: `chmod +x hooks/<hook-name>`
 3. Source `common.sh` if it needs a Telegram chat ID
 4. Add a row to the registry table above
-5. Wire it in `.claude/settings.json` (or the project's `settings.local.json`):
+5. Wire it in `.claude/settings.json` (or the project's `.claude/settings.local.json`):
    ```json
    {
      "hooks": {

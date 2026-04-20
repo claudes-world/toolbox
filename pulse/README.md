@@ -86,17 +86,18 @@ Location: `~/.world/pulse/pulse.db` (0o600). WAL mode, `busy_timeout=5000ms`.
 | `issues` | `repo_id`, `number`, `title`, `author`, `created_at`, `updated_at`, `labels`, `hours_idle`, `stalled` | Open issues at snapshot time |
 | `releases` | `repo_id`, `tag_name`, `name`, `created_at`, `is_prerelease` | Releases within history window |
 | `alerts` | `repo_id`, `severity`, `ghsa_id`, `package_name`, `ecosystem`, `age_days`, `dependabot_pr_number` | Dependabot security alerts (schema stub — not populated in v0) |
-| `pagination_state` | `org`, `repo`, `field`, `last_cursor`, `timestamp` | Cursor state for incremental pagination |
+| `pagination_state` | `org`, `repo`, `field`, `last_cursor`, `timestamp` | Cursor state for org-level repo enumeration (not per-repo collections) |
 
 Full schema: `pulse/storage.py` → `create_schema()`.
 
 ## GraphQL design notes
 
 - GitHub GraphQL v4 API (`https://api.github.com/graphql`)
-- One paginated query per collection per repo (PRs, issues, releases, alerts)
-- `first: 100` cap per page; `pagination_state` table stores cursors for incremental fetches
-- Stale or truncated data surfaced as `partial` capture_status on the repo row — never silently dropped
-- IPv4 monkey-patch applied at startup (same pattern as `smart-speak`) — VPS Happy Eyeballs stall workaround
+- **Org-level repo enumeration** uses cursor pagination (`gql.paginate`) to page through all repos in an org (50 per page).
+- **Per-repo collections** (PRs, issues, releases) use a single capped query per collection (`gql.execute` with `first: max_*_per_repo`, clamped to 100). If the real count exceeds the cap, the repo is marked `partial` — data shown is real but may be incomplete.
+- `pagination_state` table stores org-level repo cursors (not per-repo PR/issue cursors).
+- Stale or truncated data surfaced as `partial` capture_status on the repo row — never silently dropped.
+- IPv4 monkey-patch applied at startup (same pattern as `smart-speak`) — VPS Happy Eyeballs stall workaround.
 
 ## GH_TOKEN scope requirements
 
