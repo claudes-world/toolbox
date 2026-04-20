@@ -9,8 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from pulse.config import PulseConfig
-from pulse.graphql import GraphQLClient
-from pulse.schema import FieldStatus, IssueData, PRData, ReleaseData, RepoData
+from pulse.graphql import CostBudgetExceeded, GraphQLClient, TIMELINE_CUMULATIVE_WARN
+from pulse.schema import FieldStatus, IssueData, PRData, ReleaseData, RepoData, ReviewEvent
 from pulse.storage import atomic_write_json
 
 DEPENDABOT_AUTHORS = {"dependabot[bot]", "dependabot-preview[bot]", "app/dependabot"}
@@ -48,6 +48,7 @@ query($org: String!, $repo: String!, $first: Int!, $cursor: String) {
       totalCount
       pageInfo { hasNextPage endCursor }
       nodes {
+        id
         number title
         author { login }
         createdAt updatedAt
@@ -160,6 +161,7 @@ def _capture_prs(
                     is_renovate=author_login in RENOVATE_AUTHORS if author_login else False,
                     hours_idle=idle,
                     stalled=idle is not None and idle > stall_hours,
+                    node_id=node.get("id"),
                 )
             )
 
@@ -280,6 +282,107 @@ def _capture_releases(
 
 
 
+def _event_to_review_event(node: dict) -> ReviewEvent:
+    """Convert a raw timeline event node to a ReviewEvent."""
+    typename = node.get("__typename", "")
+    actor = (node.get("actor") or {}).get("login") or None
+    author_obj = (node.get("author") or {}).get("login") or None
+    # PullRequestReview uses 'author', all others use 'actor'
+    author = author_obj if typename == "PullRequestReview" else actor
+    label_obj = node.get("label") or {}
+    return ReviewEvent(
+        type=typename,
+        author=author,
+        state=node.get("state") if typename == "PullRequestReview" else None,
+        label=label_obj.get("name") if typename == "LabeledEvent" else None,
+        submitted_at=node.get("submittedAt") if typename == "PullRequestReview" else None,
+        created_at=node.get("createdAt") if typename != "PullRequestReview" else None,
+    )
+
+
+def _capture_pr_timelines(
+    gql: GraphQLClient,
+    conn: sqlite3.Connection,
+    repo_id: int,
+    prs: list[PRData],
+    repo: RepoData,
+    deadline: float | None,
+    cumulative_cost: list[int],
+) -> None:
+    """Fetch timeline events for each PR and write review_events JSON to the prs table.
+
+    Graceful degradation: per-PR failures set review_events=NULL and update
+    repo.field_statuses['review_events'] to partial. CostBudgetExceeded causes
+    remaining PRs to be skipped (review_events stays NULL).
+    """
+    budget_exceeded = False
+    any_failure = False
+
+    for pr in prs:
+        if budget_exceeded:
+            # Skip remaining — leave review_events NULL
+            continue
+
+        if not pr.node_id:
+            # No node_id available — skip silently
+            continue
+
+        try:
+            raw_events = gql.fetch_pr_timeline(
+                pr.node_id,
+                deadline_monotonic=deadline,
+                cumulative_cost=cumulative_cost,
+            )
+            events = [_event_to_review_event(n) for n in raw_events if n.get("__typename")]
+            review_json = json.dumps(
+                [
+                    {
+                        "type": e.type,
+                        "author": e.author,
+                        "state": e.state,
+                        "label": e.label,
+                        "submitted_at": e.submitted_at,
+                        "created_at": e.created_at,
+                    }
+                    for e in events
+                ]
+            )
+            with conn:
+                conn.execute(
+                    "UPDATE prs SET review_events=? WHERE repo_id=? AND number=?",
+                    (review_json, repo_id, pr.number),
+                )
+
+        except CostBudgetExceeded as e:
+            import sys as _sys
+            print(f"WARNING: {e} — skipping remaining PR timelines", file=_sys.stderr)
+            budget_exceeded = True
+            any_failure = True
+
+        except Exception as e:
+            import sys as _sys
+            print(
+                f"WARNING: timeline capture failed for PR #{pr.number}: {e}",
+                file=_sys.stderr,
+            )
+            any_failure = True
+            # Leave review_events=NULL for this PR
+            existing = repo.field_statuses.get("review_events")
+            if existing is None or existing.status == "success":
+                repo.field_statuses["review_events"] = FieldStatus(
+                    status="partial",
+                    error_note=f"timeline capture failed for PR #{pr.number}: {str(e)[:100]}",
+                )
+
+    if budget_exceeded:
+        repo.field_statuses["review_events"] = FieldStatus(
+            status="partial",
+            error_note=f"skipped: cumulative cost approached {TIMELINE_CUMULATIVE_WARN}/hr limit",
+        )
+    elif not any_failure:
+        repo.field_statuses["review_events"] = FieldStatus(status="success")
+
+
 def _insert_snapshot_placeholder(
     db_conn: sqlite3.Connection,
     snapshot_id: str,
@@ -333,7 +436,7 @@ def _persist_repo(
     prs: list[PRData],
     issues: list[IssueData],
     releases: list[ReleaseData],
-) -> None:
+) -> int:
     field_statuses_json = json.dumps(
         {k: {"status": v.status, "error_note": v.error_note} for k, v in repo.field_statuses.items()}
     )
@@ -366,8 +469,9 @@ def _persist_repo(
                 """
                 INSERT OR REPLACE INTO prs
                   (repo_id, number, title, author, created_at, updated_at,
-                   is_draft, is_dependabot, is_renovate, hours_idle, stalled)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   is_draft, is_dependabot, is_renovate, hours_idle, stalled,
+                   node_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     repo_id,
@@ -381,6 +485,7 @@ def _persist_repo(
                     int(pr.is_renovate),
                     pr.hours_idle,
                     int(pr.stalled),
+                    pr.node_id,
                 ),
             )
 
@@ -421,6 +526,7 @@ def _persist_repo(
                 ),
             )
 
+    return repo_id
 
 
 def _prune_old_snapshots(
@@ -552,6 +658,8 @@ def run_snapshot(
 
     org_errors: list[str] = []
     orgs_succeeded = 0
+    # Cumulative rateLimit.cost tracker across all timeline queries in this run
+    cumulative_timeline_cost: list[int] = [0]
     for org_name, org_config in cfg.orgs.items():
         # Enumerate repos
         try:
@@ -652,7 +760,7 @@ def run_snapshot(
 
             # Persist to SQLite
             try:
-                _persist_repo(db_conn, snapshot_id, repo, prs, issues, releases)
+                repo_id = _persist_repo(db_conn, snapshot_id, repo, prs, issues, releases)
             except Exception as e:
                 click.echo(f"ERROR: failed to persist {org_name}/{repo_name}: {e}", err=True)
                 repos_failed += 1
@@ -660,6 +768,36 @@ def run_snapshot(
                     repos_partial -= 1
                 else:
                     repos_succeeded -= 1
+                continue
+
+            # Capture PR timelines (after persist so we have repo_id)
+            if repo_id is not None and prs:
+                _capture_pr_timelines(
+                    gql, db_conn, repo_id, prs, repo,
+                    deadline, cumulative_timeline_cost,
+                )
+                # Re-evaluate repo status after timeline capture
+                if "review_events" in repo.field_statuses:
+                    rev_status = repo.field_statuses["review_events"]
+                    if rev_status.status in ("partial", "failed"):
+                        if counted_as == "success":
+                            repos_succeeded -= 1
+                            repos_partial += 1
+                            repo.capture_status = "partial"
+                            counted_as = "partial"
+                # Update field_statuses in the DB row
+                try:
+                    field_statuses_json = json.dumps(
+                        {k: {"status": v.status, "error_note": v.error_note}
+                         for k, v in repo.field_statuses.items()}
+                    )
+                    with db_conn:
+                        db_conn.execute(
+                            "UPDATE repos SET field_statuses=?, capture_status=? WHERE id=?",
+                            (field_statuses_json, repo.capture_status, repo_id),
+                        )
+                except Exception as e:
+                    click.echo(f"WARNING: failed to update field_statuses for {org_name}/{repo_name}: {e}", err=True)
 
     duration_ms = int((time.monotonic() - start_time) * 1000)
 

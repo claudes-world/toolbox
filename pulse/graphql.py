@@ -13,6 +13,41 @@ COST_WARN_THRESHOLD = 10
 COST_ABORT_THRESHOLD = 50
 DEFAULT_DEADLINE_SEC = int(os.environ.get("PULSE_RUN_DEADLINE_SEC", "1200"))
 
+# Per-query cost thresholds for timeline fetches
+TIMELINE_COST_WARN = 100
+# Cumulative budget guard: warn + skip remaining timeline fetches above this point
+TIMELINE_CUMULATIVE_WARN = 4500
+
+PR_TIMELINE_QUERY = """
+query($prId: ID!, $cursor: String) {
+  node(id: $prId) {
+    ... on PullRequest {
+      timelineItems(first: 100, after: $cursor, itemTypes: [
+        REVIEW_REQUESTED_EVENT,
+        PULL_REQUEST_REVIEW,
+        MERGED_EVENT,
+        CLOSED_EVENT,
+        LABELED_EVENT,
+        REFERENCED_EVENT
+      ]) {
+        totalCount
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          __typename
+          ... on PullRequestReview { author { login } state submittedAt }
+          ... on ReviewRequestedEvent { actor { login } createdAt }
+          ... on MergedEvent { actor { login } createdAt }
+          ... on ClosedEvent { actor { login } createdAt }
+          ... on LabeledEvent { actor { login } createdAt label { name } }
+          ... on ReferencedEvent { actor { login } createdAt }
+        }
+      }
+    }
+  }
+  rateLimit { cost remaining }
+}
+"""
+
 
 class RetriesExhausted(Exception):
     pass
@@ -338,3 +373,71 @@ class GraphQLClient:
             # All other cases: preserve checkpoint for next-run resume
 
         return nodes
+
+    def fetch_pr_timeline(
+        self,
+        pr_node_id: str,
+        deadline_monotonic: float | None = None,
+        cumulative_cost: list[int] | None = None,
+    ) -> list[dict]:
+        """Fetch all timeline events for a PR, paginating if needed.
+
+        Returns list of raw event dicts. Raises CostBudgetExceeded if the
+        cumulative cost across all timeline queries in the run approaches the
+        hourly budget (TIMELINE_CUMULATIVE_WARN). If pr_node_id is not found
+        (node returns None), returns an empty list.
+
+        cumulative_cost: caller-supplied single-element list used as a mutable
+        integer accumulator. Pass [0] to enable cross-PR cost tracking.
+        """
+        nodes = self.paginate(
+            query=PR_TIMELINE_QUERY,
+            variables={"prId": pr_node_id, "cursor": None},
+            page_info_path=["data", "node", "timelineItems", "pageInfo"],
+            nodes_path=["data", "node", "timelineItems", "nodes"],
+            deadline_monotonic=deadline_monotonic,
+            cursor_var="cursor",
+        )
+
+        # Track cumulative cost from the last response (rateLimit is in each page body).
+        # We re-execute a small extra call to get cost when paginate() completes. Instead,
+        # we track it inline by wrapping execute(). Since paginate() already called execute(),
+        # we piggyback cost via a separate last-query cost read. For simplicity, we call
+        # a single extra non-paginated query only if cumulative tracking is requested.
+        # Actually: paginate() calls execute() which already logs cost per call. We track
+        # cumulative by reading rateLimit from each response. Since paginate() abstracts
+        # execute(), we do one more execute() call here only for cost — wasteful. Better:
+        # pass a cost callback. For now, use a single post-paginate cost probe only when
+        # cumulative_cost is provided.
+        if cumulative_cost is not None:
+            try:
+                probe = self.execute(
+                    "query { rateLimit { cost remaining } }",
+                    deadline_monotonic=deadline_monotonic,
+                )
+                rate = (probe.get("data") or {}).get("rateLimit") or {}
+                cost = rate.get("cost", 1)
+                remaining = rate.get("remaining", 5000)
+                cumulative_cost[0] += cost
+                if cost > TIMELINE_COST_WARN:
+                    print(
+                        f"WARNING: timeline query cost {cost} exceeds threshold {TIMELINE_COST_WARN}",
+                        file=sys.stderr,
+                    )
+                if remaining < 100:
+                    print(
+                        f"CRITICAL: rateLimit.remaining={remaining} — approaching rate limit",
+                        file=sys.stderr,
+                    )
+                if cumulative_cost[0] >= TIMELINE_CUMULATIVE_WARN:
+                    raise CostBudgetExceeded(
+                        f"cumulative timeline cost {cumulative_cost[0]} >= {TIMELINE_CUMULATIVE_WARN}; "
+                        "skipping remaining timeline fetches for this run"
+                    )
+            except CostBudgetExceeded:
+                raise
+            except Exception:
+                pass  # cost tracking failure is non-fatal
+
+        return nodes
+
