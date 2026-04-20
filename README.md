@@ -126,7 +126,7 @@ Full documentation: [`pulse/README.md`](pulse/README.md)
 **Quick start:**
 ```
 pip install -e ~/code/toolbox/
-source ~/.world/pulse/env   # or export GH_TOKEN=...
+export $(grep -v '^#' ~/.world/pulse/env | xargs)   # load and export token
 pulse --now                  # run snapshot + render digest
 pulse --self-check           # validate token, config, storage
 ```

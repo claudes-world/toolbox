@@ -23,14 +23,16 @@ echo "GH_TOKEN=ghp_yourtoken" > ~/.world/pulse/env
 chmod 600 ~/.world/pulse/env
 ```
 
-The systemd service automatically loads this file via `EnvironmentFile=`. For manual CLI use, source it first:
+The systemd service automatically loads this file via `EnvironmentFile=`. For manual CLI use, export the token into your shell:
 
 ```bash
-source ~/.world/pulse/env
+export $(grep -v '^#' ~/.world/pulse/env | xargs)
 pulse --now
 ```
 
-Or export inline: `GH_TOKEN=$(grep GH_TOKEN ~/.world/pulse/env | cut -d= -f2) pulse --now`
+Or inline: `GH_TOKEN=$(grep GH_TOKEN ~/.world/pulse/env | cut -d= -f2) pulse --now`
+
+Note: `source ~/.world/pulse/env` assigns variables but does not export them to child processes unless you follow with `export GH_TOKEN`.
 
 Token needs `read:org` + `repo` scopes (classic PAT) or equivalent fine-grained permissions.
 
