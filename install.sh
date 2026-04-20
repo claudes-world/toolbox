@@ -4,9 +4,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Pre-flight: linger must be enabled or user timer won't survive reboot
-if ! test -e /var/lib/systemd/linger/claude; then
-    echo "ERROR: linger not enabled for user 'claude'." >&2
-    echo "Run: sudo loginctl enable-linger claude" >&2
+if ! test -e /var/lib/systemd/linger/$USER; then
+    echo "ERROR: linger not enabled for user '$USER'." >&2
+    echo "Run: sudo loginctl enable-linger $USER" >&2
     exit 1
 fi
 
@@ -36,7 +36,11 @@ cp "$SCRIPT_DIR/systemd/user/pulse.timer" "$HOME/.config/systemd/user/pulse.time
 
 systemctl --user daemon-reload
 
-# Self-check before enabling timer
+# Self-check before enabling timer — source env to load GH_TOKEN
+# shellcheck disable=SC1091
+set +u
+source "$HOME/.world/pulse/env"
+set -u
 if ! pulse --self-check; then
     echo "ERROR: pulse --self-check failed. Fix issues above before enabling the timer." >&2
     exit 1

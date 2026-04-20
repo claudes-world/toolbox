@@ -6,13 +6,13 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-Environment="PATH=/home/claude/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
 EnvironmentFile=%h/.world/pulse/env
 WorkingDirectory=%h
-# flock -n: non-blocking concurrency guard. Pulse binary resolves the SAME
-# lock path internally (see locks.py) so the on-demand skill uses the same
-# lock. If /run/user/%U/ unavailable (early boot / no login session), the
-# binary falls back to ~/.world/pulse/pulse.lock on its own.
+# flock -n: non-blocking external concurrency guard for the service path.
+# The bare `pulse` invocation (no --now) enters _run_now_no_lock(), which
+# skips PulseLock entirely — this flock is the sole concurrency guard here.
+# The on-demand `pulse --now` path uses PulseLock internally (locks.py).
 ExecStart=/usr/bin/flock -n /run/user/%U/pulse.lock %h/code/toolbox/bin/pulse
 StandardOutput=journal
 StandardError=journal

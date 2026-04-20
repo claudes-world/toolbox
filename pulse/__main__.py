@@ -349,7 +349,6 @@ def _run_dry_run(repo_override: str | None = None) -> None:
         target_repo = None  # will use first repo from API
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    out_path = Path(tempfile.gettempdir()) / f"pulse-dry-run-{ts}.json"
 
     try:
         with GraphQLClient(token=token, base_url=cfg.defaults.github_api_base) as gql:
@@ -405,6 +404,7 @@ def _run_dry_run(repo_override: str | None = None) -> None:
                 org=target_org,
                 repo_name=target_repo,
                 max_releases=defaults.max_releases_per_repo,
+                deadline=deadline,
             )
 
     except Exception as e:
@@ -427,7 +427,14 @@ def _run_dry_run(repo_override: str | None = None) -> None:
         "releases": [dataclasses.asdict(r) for r in releases],
     }
 
-    out_path.write_text(json.dumps(result, indent=2, default=str))
+    fd, tmp_str = tempfile.mkstemp(dir=tempfile.gettempdir(), prefix=f"pulse-dry-run-{ts}-", suffix=".json")
+    out_path = Path(tmp_str)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(result, indent=2, default=str))
+    except Exception:
+        out_path.unlink(missing_ok=True)
+        raise
 
     stalled_prs = sum(1 for p in prs if p.stalled)
     stalled_issues = sum(1 for i in issues if i.stalled)
