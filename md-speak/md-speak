@@ -360,6 +360,7 @@ def process_markdown(md_text: str, use_ai: bool = True) -> list[Segment]:
             if use_repeat_headers:
                 # Mode B: repeat header inline before each value, voiced per column
                 for row in all_rows:
+                    row_start_len = len(segments)
                     for j, val in enumerate(row):
                         if not val:
                             continue
@@ -370,11 +371,12 @@ def process_markdown(md_text: str, use_ai: bool = True) -> list[Segment]:
                             voice=voice,
                             pause_after=PAUSE["between_table_cells"],
                         ))
-                    # Extra pause after each row
-                    if segments and segments[-1].pause_after < PAUSE["between_table_rows"]:
+                    # Upgrade pause after last cell in row (only if any cells were emitted)
+                    if len(segments) > row_start_len and segments[-1].pause_after < PAUSE["between_table_rows"]:
                         segments[-1].pause_after = PAUSE["between_table_rows"]
             else:
                 # Mode A: headers once (all with table_key voice), then rows cell-by-cell
+                header_start_len = len(segments)
                 for j, h in enumerate(header_texts):
                     if h:
                         segments.append(Segment(
@@ -382,11 +384,12 @@ def process_markdown(md_text: str, use_ai: bool = True) -> list[Segment]:
                             voice=VOICES["table_key"],
                             pause_after=PAUSE["between_table_cells"],
                         ))
-                if header_texts:
+                if len(segments) > header_start_len:
                     # Upgrade pause after last header to row-level
-                    if segments and segments[-1].pause_after < PAUSE["between_table_rows"]:
+                    if segments[-1].pause_after < PAUSE["between_table_rows"]:
                         segments[-1].pause_after = PAUSE["between_table_rows"]
                 for row in all_rows:
+                    row_start_len = len(segments)
                     for j, val in enumerate(row):
                         voice = VOICES["table_key"] if j == 0 else VOICES["table_val"]
                         if val:
@@ -395,8 +398,8 @@ def process_markdown(md_text: str, use_ai: bool = True) -> list[Segment]:
                                 voice=voice,
                                 pause_after=PAUSE["between_table_cells"],
                             ))
-                    # Upgrade pause after last cell in row
-                    if segments and segments[-1].pause_after < PAUSE["between_table_rows"]:
+                    # Upgrade pause after last cell in row (only if any cells were emitted)
+                    if len(segments) > row_start_len and segments[-1].pause_after < PAUSE["between_table_rows"]:
                         segments[-1].pause_after = PAUSE["between_table_rows"]
 
             segments.append(Segment(text="", voice=VOICES["body"], pause_before=PAUSE["after_table"]))
