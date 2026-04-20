@@ -160,6 +160,8 @@ def create_schema(conn: sqlite3.Connection) -> None:
                 is_renovate INTEGER NOT NULL DEFAULT 0,
                 hours_idle REAL,
                 stalled INTEGER NOT NULL DEFAULT 0,
+                node_id TEXT,
+                review_events TEXT,
                 UNIQUE(repo_id, number)
             )
         """)

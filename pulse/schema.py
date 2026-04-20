@@ -4,6 +4,16 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class ReviewEvent:
+    type: str  # __typename: PULL_REQUEST_REVIEW, REVIEW_REQUESTED_EVENT, MERGED_EVENT, CLOSED_EVENT, LABELED_EVENT, REFERENCED_EVENT
+    author: str | None
+    state: str | None = None      # for PULL_REQUEST_REVIEW: APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED
+    label: str | None = None      # for LABELED_EVENT
+    submitted_at: str | None = None
+    created_at: str | None = None
+
+
+@dataclass
 class FieldStatus:
     status: str  # success | partial | disabled | failed
     error_note: str | None = None
@@ -38,6 +48,7 @@ class PRData:
     is_renovate: bool
     hours_idle: float | None
     stalled: bool
+    node_id: str | None = None
     review_events: list | None = None
 
 
