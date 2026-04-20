@@ -24,13 +24,12 @@ def open_db(path: Path) -> sqlite3.Connection:
     # Stage 1: open the file. Failure here is an environment/permissions problem, not corruption.
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Pre-create with 0o600 to avoid umask race window
+        if not path.exists():
+            fd = os.open(str(path), os.O_CREAT | os.O_WRONLY, 0o600)
+            os.close(fd)
         conn = sqlite3.connect(str(path), timeout=5.0)
         conn.row_factory = sqlite3.Row
-        # Ensure DB file is 0o600 regardless of process umask
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass  # non-fatal: VPS is single-user, best-effort
     except Exception as e:
         raise DBSetupError(f"cannot open database at {path}: {e}") from e
 
@@ -61,6 +60,9 @@ def open_db(path: Path) -> sqlite3.Connection:
     except DBCorrupt:
         conn.close()
         raise
+    except sqlite3.DatabaseError as e:
+        conn.close()
+        raise DBCorrupt(f"integrity_check raised DatabaseError: {e}") from e
     except Exception as e:
         conn.close()
         raise DBSetupError(f"database setup failed: {e}") from e
