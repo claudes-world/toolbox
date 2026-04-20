@@ -1,10 +1,12 @@
 # pulse
 
-GitHub org health monitor. Periodic GraphQL snapshots across configured orgs, stored in SQLite, rendered to a markdown digest. Tracks open PRs, issues, Dependabot alerts, and recent releases.
+GitHub org health monitor. Periodic GraphQL snapshots across configured orgs, stored in SQLite, rendered to a markdown digest. Tracks open PRs (including Dependabot bot PRs), issues, and recent releases.
 
 ## Overview
 
-`pulse` runs as a systemd user timer (every 30 minutes by default) and on demand via `pulse --now`. Each snapshot queries the GitHub GraphQL API, writes results to `~/.world/pulse/pulse.db`, and renders a human-readable markdown digest at `~/.world/pulse/snapshots/digest-latest.md`. Stalled PRs (idle beyond threshold), open security alerts, and recent releases are all surfaced in one place without manual polling.
+`pulse` runs as a systemd user timer (every 30 minutes by default) and on demand via `pulse --now`. Each snapshot queries the GitHub GraphQL API, writes results to `~/.world/pulse/pulse.db`, and renders a human-readable markdown digest at `~/.world/pulse/snapshots/digest-latest.md`. Stalled PRs (idle beyond threshold), Dependabot PRs, and recent releases are all surfaced in one place without manual polling.
+
+**Note (v0 scope):** The `alerts` table in the schema is a stub for future Dependabot security-alert integration (GitHub GraphQL `vulnerabilityAlerts`). In v0 the Dependabot section of the digest shows open Dependabot bot PRs (derived from PR author), not raw security alerts.
 
 ## Installation
 
@@ -83,7 +85,7 @@ Location: `~/.world/pulse/pulse.db` (0o600). WAL mode, `busy_timeout=5000ms`.
 | `prs` | `repo_id`, `number`, `title`, `author`, `created_at`, `updated_at`, `is_draft`, `is_dependabot`, `is_renovate`, `hours_idle`, `stalled` | Open PRs at snapshot time |
 | `issues` | `repo_id`, `number`, `title`, `author`, `created_at`, `updated_at`, `labels`, `hours_idle`, `stalled` | Open issues at snapshot time |
 | `releases` | `repo_id`, `tag_name`, `name`, `created_at`, `is_prerelease` | Releases within history window |
-| `alerts` | `repo_id`, `severity`, `ghsa_id`, `package_name`, `ecosystem`, `age_days`, `dependabot_pr_number` | Dependabot security alerts |
+| `alerts` | `repo_id`, `severity`, `ghsa_id`, `package_name`, `ecosystem`, `age_days`, `dependabot_pr_number` | Dependabot security alerts (schema stub — not populated in v0) |
 | `pagination_state` | `org`, `repo`, `field`, `last_cursor`, `timestamp` | Cursor state for incremental pagination |
 
 Full schema: `pulse/storage.py` → `create_schema()`.

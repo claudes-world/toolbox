@@ -58,7 +58,7 @@ Hook scripts receive event JSON on stdin (where applicable). Output must be JSON
 }
 ```
 
-For hooks that block the event pipeline (`UserPromptSubmit`), a non-zero exit code cancels the action. See [Claude Code hooks docs](https://docs.anthropic.com/en/docs/claude-code/hooks) for the full schema per event type.
+For hooks that block the event pipeline (`UserPromptSubmit`): exit code 2 cancels the action and surfaces the hook's stderr to the model; exit code 0 continues normally; other non-zero exit codes are treated as non-blocking errors. See [Claude Code hooks docs](https://docs.anthropic.com/en/docs/claude-code/hooks) for the full schema per event type.
 
 ## Adding a hook
 

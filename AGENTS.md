@@ -69,6 +69,6 @@ Hooks are event-driven scripts in `hooks/` wired via `.claude/settings.json`.
 | ADR | Topic | Relevance |
 |-----|-------|-----------|
 | [ADR 0003](~/claudes-world/knowledge/adr/0003-port-allocation-v2-port-for.md) | Port allocation | Use `port-for` before binding any port; project-sharded 38xxx/58xxx bands |
-| [ADR 0006](~/claudes-world/knowledge/adr/0006-world-bootstrap.md) | `.world/` bootstrap and precedence | Per-project `.world/` overlay pattern; where runtime state lives |
+| [ADR 0006](~/claudes-world/knowledge/adr/0006-world-directory-bootstrap-and-precedence.md) | `.world/` bootstrap and precedence | Per-project `.world/` overlay pattern; where runtime state lives |
 | [ADR 0014](~/claudes-world/knowledge/adr/0014-world-runtime-config.md) | `.world/` runtime config | `~/.world/pulse/` follows this convention for token, config, DB, snapshots |
 | [ADR 0015](~/claudes-world/knowledge/adr/0015-org-pulse.md) | Org-pulse design | Decision record for the `pulse` package: GraphQL, SQLite, systemd timer, future extensibility |
