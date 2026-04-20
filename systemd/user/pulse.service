@@ -21,6 +21,7 @@ SyslogIdentifier=pulse
 # windows. The timer cadence drives the next attempt instead.
 PrivateTmp=true
 ProtectSystem=strict
+NoNewPrivileges=true
 ReadWritePaths=%h/.world/pulse /run/user/%U
 
 [Install]

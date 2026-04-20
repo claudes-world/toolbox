@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Pre-flight: linger must be enabled or user timer won't survive reboot
-if ! test -e /var/lib/systemd/linger/$USER; then
+if ! test -e "/var/lib/systemd/linger/${USER}"; then
     echo "ERROR: linger not enabled for user '$USER'." >&2
     echo "Run: sudo loginctl enable-linger $USER" >&2
     exit 1
@@ -13,6 +13,7 @@ fi
 # Create pulse data directory with strict permissions
 mkdir -p "$HOME/.world/pulse/snapshots"
 chmod 0700 "$HOME/.world/pulse"
+chmod 0700 "$HOME/.world/pulse/snapshots"
 
 # Always copy env.example (idempotent — source never changes)
 cp "$SCRIPT_DIR/systemd/user/env.example" "$HOME/.world/pulse/env.example"
@@ -40,8 +41,11 @@ systemctl --user daemon-reload
 # shellcheck disable=SC1091
 set +u
 source "$HOME/.world/pulse/env"
+export GH_TOKEN
+# Also export GITHUB_TOKEN if it was set in env file
+[ -n "${GITHUB_TOKEN:-}" ] && export GITHUB_TOKEN
 set -u
-if ! pulse --self-check; then
+if ! "$HOME/code/toolbox/bin/pulse" --self-check; then
     echo "ERROR: pulse --self-check failed. Fix issues above before enabling the timer." >&2
     exit 1
 fi

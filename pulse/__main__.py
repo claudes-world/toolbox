@@ -93,8 +93,9 @@ def _run_self_check() -> None:
 
     # 1. Config validation
     config_path = _DEFAULT_CONFIG_PATH
+    cfg = None
     try:
-        load_config(config_path)
+        cfg = load_config(config_path)
         click.echo(f"[OK] config: {config_path}")
     except ConfigError as e:
         errors.append(f"config: {e}")
@@ -181,8 +182,17 @@ def _run_self_check() -> None:
         try:
             import httpx
 
+            _api_base = (
+                cfg.defaults.github_api_base
+                if cfg is not None
+                else "https://api.github.com"
+            )
+            _graphql_url = f"{_api_base.rstrip('/')}/graphql"
+            if cfg is None:
+                click.echo("WARNING: config load failed; falling back to public GitHub API for token check", err=True)
+
             resp = httpx.post(
-                "https://api.github.com/graphql",
+                _graphql_url,
                 json={"query": SCOPE_CHECK_QUERY},
                 headers={
                     "Authorization": f"bearer {token}",
@@ -376,7 +386,7 @@ def _run_dry_run(repo_override: str | None = None) -> None:
                     click.echo(f"ERROR: no repositories found in org '{target_org}'", err=True, )
                     sys.exit(1)
                 target_repo = nodes[0]["name"]
-                print(f"dry-run: using first repo: {target_org}/{target_repo}", file=sys.stderr)
+                click.echo(f"dry-run: using first repo: {target_org}/{target_repo}", err=True)
 
             org_cfg = cfg.orgs[target_org]
             defaults = cfg.defaults
@@ -438,14 +448,14 @@ def _run_dry_run(repo_override: str | None = None) -> None:
 
     stalled_prs = sum(1 for p in prs if p.stalled)
     stalled_issues = sum(1 for i in issues if i.stalled)
-    print(
+    click.echo(
         f"dry-run: {target_org}/{target_repo} — "
         f"PRs: {len(prs)} ({stalled_prs} stalled), "
         f"issues: {len(issues)} ({stalled_issues} stalled), "
         f"releases: {len(releases)}",
-        file=sys.stderr,
+        err=True,
     )
-    print(f"dry-run: pr_status={pr_status.status}, issue_status={issue_status.status}, release_status={release_status.status}", file=sys.stderr)
+    click.echo(f"dry-run: pr_status={pr_status.status}, issue_status={issue_status.status}, release_status={release_status.status}", err=True)
 
     # stdout: output file path so scripts can capture it
     click.echo(str(out_path))

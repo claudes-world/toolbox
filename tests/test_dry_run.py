@@ -206,19 +206,25 @@ def test_dry_run_output_file_valid_json(pulse_env: Path):
 
 
 def test_dry_run_does_not_acquire_pulse_lock(pulse_env: Path):
-    """--dry-run must NOT acquire PulseLock."""
+    """--dry-run contract: no production paths written, output goes to /tmp.
+
+    _run_dry_run never imports pulse.locks, so checking for lock acquisition
+    is vacuous. The real contract is: pulse.db and digest-latest.md must NOT
+    be created, and a pulse-dry-run-*.json file MUST appear in /tmp.
+    """
+    import glob
+
     ok = FieldStatus(status="success")
     prs = [_make_pr()]
     issues = [_make_issue()]
     releases = [_make_release()]
 
-    runner = CliRunner()
+    runner = CliRunner(mix_stderr=False)
     with (
         patch("pulse.graphql.GraphQLClient") as mock_gql_cls,
         patch("pulse.snapshot._capture_prs", return_value=(prs, ok)),
         patch("pulse.snapshot._capture_issues", return_value=(issues, ok)),
         patch("pulse.snapshot._capture_releases", return_value=(releases, ok)),
-        patch("pulse.locks.PulseLock", side_effect=AssertionError("PulseLock must not be called in dry-run")),
     ):
         mock_ctx = MagicMock()
         mock_ctx.__enter__ = MagicMock(return_value=mock_ctx)
@@ -227,11 +233,21 @@ def test_dry_run_does_not_acquire_pulse_lock(pulse_env: Path):
 
         result = runner.invoke(main, ["--dry-run", "--repo", "example-org/my-repo"])
 
-    # PulseLock is not imported in _run_dry_run, so the patch won't be triggered.
-    # The test verifies no AssertionError was raised (i.e., PulseLock wasn't called).
-    assert "PulseLock must not be called" not in result.output
-    # Exit 0 means dry-run succeeded without touching PulseLock
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.output
+
+    # Production paths must NOT have been touched
+    prod_db = pulse_env / "pulse.db"
+    assert not prod_db.exists(), "dry-run must not create pulse.db"
+    digest = pulse_env / "snapshots" / "digest-latest.md"
+    assert not digest.exists(), "dry-run must not create digest-latest.md"
+
+    # Output path must be a /tmp/pulse-dry-run-*.json file
+    out_path_str = result.output.strip()
+    assert out_path_str.startswith(tempfile.gettempdir()), f"Expected /tmp path, got: {out_path_str}"
+    assert "pulse-dry-run-" in out_path_str
+    assert out_path_str.endswith(".json")
+    # Clean up
+    Path(out_path_str).unlink(missing_ok=True)
 
 
 def test_dry_run_repo_override_used(pulse_env: Path):
