@@ -66,7 +66,9 @@ class RunDeadlineExceeded(Exception):
 
 
 class CostBudgetExceeded(Exception):
-    pass
+    def __init__(self, message: str, cost: int = 0) -> None:
+        super().__init__(message)
+        self.cost = cost
 
 
 class PRNodeNotFound(Exception):
@@ -183,7 +185,8 @@ class GraphQLClient:
                 # Callers should aggregate rateLimit.cost across calls if a run budget is needed.
                 if cost > COST_ABORT_THRESHOLD:
                     raise CostBudgetExceeded(
-                        f"query cost {cost} exceeds abort threshold {COST_ABORT_THRESHOLD}"
+                        f"query cost {cost} exceeds abort threshold {COST_ABORT_THRESHOLD}",
+                        cost=cost,
                     )
                 if cost > COST_WARN_THRESHOLD:
                     print(
@@ -447,6 +450,10 @@ class GraphQLClient:
                 cursor_var="cursor",
                 on_page_response=_on_page,
             )
+        except CostBudgetExceeded as e:
+            # execute() raised before on_page_response ran — accumulate the aborting page's cost
+            accumulated_cost[0] += getattr(e, "cost", 0)
+            raise
         finally:
             # Pure accumulation only — NEVER raise from finally (would mask paginate exceptions)
             if cumulative_cost is not None:
