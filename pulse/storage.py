@@ -24,10 +24,16 @@ def open_db(path: Path) -> sqlite3.Connection:
     # Stage 1: open the file. Failure here is an environment/permissions problem, not corruption.
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Pre-create with 0o600 to avoid umask race window
-        if not path.exists():
-            fd = os.open(str(path), os.O_CREAT | os.O_WRONLY, 0o600)
+        # Pre-create with 0o600 to avoid umask race. O_EXCL ensures atomic creation.
+        try:
+            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             os.close(fd)
+        except FileExistsError:
+            # DB already exists — best-effort fix permissions on existing file
+            try:
+                path.chmod(0o600)
+            except OSError:
+                pass
         conn = sqlite3.connect(str(path), timeout=5.0)
         conn.row_factory = sqlite3.Row
     except Exception as e:
@@ -60,9 +66,6 @@ def open_db(path: Path) -> sqlite3.Connection:
     except DBCorrupt:
         conn.close()
         raise
-    except sqlite3.DatabaseError as e:
-        conn.close()
-        raise DBCorrupt(f"integrity_check raised DatabaseError: {e}") from e
     except Exception as e:
         conn.close()
         raise DBSetupError(f"database setup failed: {e}") from e
@@ -70,6 +73,9 @@ def open_db(path: Path) -> sqlite3.Connection:
 
 def create_schema(conn: sqlite3.Connection) -> None:
     """Create all pulse tables if they do not exist."""
+    # Python's legacy sqlite3 'with conn:' provides auto-BEGIN/COMMIT for DML but
+    # DDL (CREATE TABLE) may auto-commit per statement. IF NOT EXISTS makes each
+    # statement idempotent — partial execution leaves the schema in a valid state.
     with conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS snapshots (
