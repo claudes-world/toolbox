@@ -8,7 +8,24 @@ GitHub org health monitor. Periodic GraphQL snapshots across configured orgs, st
 
 **Note (v0 scope):** The `alerts` table in the schema is a stub for future Dependabot security-alert integration (GitHub GraphQL `vulnerabilityAlerts`). In v0 the Dependabot section of the digest shows open Dependabot bot PRs (derived from PR author), not raw security alerts.
 
-## Installation
+## Quick start
+
+Run the installer from the toolbox root — it handles everything:
+
+```bash
+cd ~/code/toolbox
+./install.sh
+```
+
+The installer:
+1. Creates `~/.world/pulse/` with correct permissions
+2. Copies systemd unit files + reloads daemon
+3. Runs `pulse --self-check` to validate token + config
+4. Enables and starts `pulse.timer`
+
+After install, edit `~/.world/pulse/config.yml` to add your org(s), then run `pulse --now` to take the first snapshot.
+
+## Manual setup (advanced)
 
 ```bash
 ~/venvs/transcribe/bin/pip install -e ~/code/toolbox/
