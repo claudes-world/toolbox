@@ -79,3 +79,10 @@ def test_atomic_write_json_permissions(tmp_path: Path) -> None:
     mode = oct(os.stat(out).st_mode)
     # Last 3 digits should be 600
     assert mode.endswith("600")
+
+
+def test_open_db_raises_on_corrupt_file(tmp_path: Path) -> None:
+    db_path = tmp_path / "corrupt.db"
+    db_path.write_bytes(b"this is not a sqlite database")
+    with pytest.raises(DBCorrupt):
+        open_db(db_path)

@@ -14,8 +14,8 @@ class ConfigError(Exception):
 class StallOverride(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    pr_hours: int
-    issue_hours: int
+    pr_hours: int = Field(gt=0)
+    issue_hours: int = Field(gt=0)
 
 
 class OrgConfig(BaseModel):
@@ -31,7 +31,7 @@ class Defaults(BaseModel):
     stall_pr_hours: int = Field(default=12)
     stall_issue_hours: int = Field(default=72)
     history_days: int = Field(default=7)
-    cadence_minutes: int = Field(default=30)
+    cadence_minutes: int = Field(default=30, gt=0)
     github_api_base: str = Field(default="https://api.github.com")
     max_prs_per_repo: int = Field(default=30)
     max_issues_per_repo: int = Field(default=50)
@@ -72,7 +72,11 @@ def load_config(path: Path) -> PulseConfig:
     if not path.exists():
         raise ConfigError(f"Config file not found: {path}")
     try:
-        raw: Any = yaml.safe_load(path.read_text())
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        raise ConfigError(f"cannot read config file {path}: {e}") from e
+    try:
+        raw: Any = yaml.safe_load(text)
     except yaml.YAMLError as e:
         raise ConfigError(f"YAML parse error in {path}: {e}") from e
     try:

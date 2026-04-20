@@ -3,9 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 
-from pulse.config import ConfigError, Defaults, OrgConfig, PulseConfig, StallOverride, load_config
+from pulse.config import ConfigError, load_config
 
 MINIMAL_VALID = """\
 schema_version: "1.0"
@@ -87,46 +86,67 @@ def test_invalid_type_stall_pr_hours(tmp_path: Path) -> None:
         load_config(_write(tmp_path, bad))
 
 
-def test_stall_pr_hours_zero_raises() -> None:
-    with pytest.raises(ValidationError):
-        Defaults(
-            stall_pr_hours=0,
-            stall_issue_hours=72,
-            history_days=7,
-            cadence_minutes=30,
-            github_api_base="https://api.github.com",
-            max_prs_per_repo=30,
-            max_issues_per_repo=50,
-            max_releases_per_repo=10,
-        )
+def test_stall_pr_hours_zero_raises(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yml"
+    cfg.write_text("""\
+schema_version: "1.0"
+orgs:
+  claudes-world:
+    ignore: []
+defaults:
+  stall_pr_hours: 0
+  stall_issue_hours: 72
+  history_days: 7
+  cadence_minutes: 30
+  github_api_base: "https://api.github.com"
+  max_prs_per_repo: 30
+  max_issues_per_repo: 50
+  max_releases_per_repo: 10
+""")
+    with pytest.raises(ConfigError):
+        load_config(cfg)
 
 
-def test_stall_pr_hours_negative_raises() -> None:
-    with pytest.raises(ValidationError):
-        Defaults(
-            stall_pr_hours=-1,
-            stall_issue_hours=72,
-            history_days=7,
-            cadence_minutes=30,
-            github_api_base="https://api.github.com",
-            max_prs_per_repo=30,
-            max_issues_per_repo=50,
-            max_releases_per_repo=10,
-        )
+def test_stall_pr_hours_negative_raises(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yml"
+    cfg.write_text("""\
+schema_version: "1.0"
+orgs:
+  claudes-world:
+    ignore: []
+defaults:
+  stall_pr_hours: -1
+  stall_issue_hours: 72
+  history_days: 7
+  cadence_minutes: 30
+  github_api_base: "https://api.github.com"
+  max_prs_per_repo: 30
+  max_issues_per_repo: 50
+  max_releases_per_repo: 10
+""")
+    with pytest.raises(ConfigError):
+        load_config(cfg)
 
 
-def test_history_days_out_of_range_raises() -> None:
-    with pytest.raises(ValidationError):
-        Defaults(
-            stall_pr_hours=12,
-            stall_issue_hours=72,
-            history_days=400,
-            cadence_minutes=30,
-            github_api_base="https://api.github.com",
-            max_prs_per_repo=30,
-            max_issues_per_repo=50,
-            max_releases_per_repo=10,
-        )
+def test_history_days_out_of_range_raises(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yml"
+    cfg.write_text("""\
+schema_version: "1.0"
+orgs:
+  claudes-world:
+    ignore: []
+defaults:
+  stall_pr_hours: 12
+  stall_issue_hours: 72
+  history_days: 400
+  cadence_minutes: 30
+  github_api_base: "https://api.github.com"
+  max_prs_per_repo: 30
+  max_issues_per_repo: 50
+  max_releases_per_repo: 10
+""")
+    with pytest.raises(ConfigError):
+        load_config(cfg)
 
 
 def test_load_config_nonexistent_path(tmp_path: Path) -> None:

@@ -13,21 +13,30 @@ class DBCorrupt(Exception):
 
 def open_db(path: Path) -> sqlite3.Connection:
     """Open (or create) the SQLite database at path with WAL mode and integrity check."""
-    conn = sqlite3.connect(str(path), timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-
-    rows = conn.execute("PRAGMA integrity_check").fetchall()
-    # Row objects: compare via tuple unpacking
-    row_values = [tuple(r) for r in rows]
-    if row_values != [("ok",)]:
-        raise DBCorrupt(f"integrity_check failed: {row_values}")
-
-    create_schema(conn)
-    return conn
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        conn = sqlite3.connect(str(path), timeout=5.0)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.DatabaseError as e:
+        raise DBCorrupt(f"cannot open database: {e}") from e
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        rows = conn.execute("PRAGMA integrity_check").fetchall()
+        # Row objects: compare via tuple unpacking
+        row_values = [tuple(r) for r in rows]
+        if row_values != [("ok",)]:
+            raise DBCorrupt(f"integrity_check failed: {row_values}")
+        create_schema(conn)
+        return conn
+    except DBCorrupt:
+        conn.close()
+        raise
+    except Exception as e:
+        conn.close()
+        raise DBCorrupt(f"database setup failed: {e}") from e
 
 
 def create_schema(conn: sqlite3.Connection) -> None:
@@ -73,7 +82,8 @@ def create_schema(conn: sqlite3.Connection) -> None:
             is_dependabot INTEGER NOT NULL DEFAULT 0,
             is_renovate INTEGER NOT NULL DEFAULT 0,
             hours_idle REAL,
-            stalled INTEGER NOT NULL DEFAULT 0
+            stalled INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(repo_id, number)
         );
 
         CREATE TABLE IF NOT EXISTS issues (
@@ -86,7 +96,8 @@ def create_schema(conn: sqlite3.Connection) -> None:
             updated_at TEXT,
             labels TEXT,
             hours_idle REAL,
-            stalled INTEGER NOT NULL DEFAULT 0
+            stalled INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(repo_id, number)
         );
 
         CREATE TABLE IF NOT EXISTS releases (
@@ -95,7 +106,8 @@ def create_schema(conn: sqlite3.Connection) -> None:
             tag_name TEXT NOT NULL,
             name TEXT,
             created_at TEXT,
-            is_prerelease INTEGER NOT NULL DEFAULT 0
+            is_prerelease INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(repo_id, tag_name)
         );
 
         CREATE TABLE IF NOT EXISTS alerts (
@@ -125,9 +137,12 @@ def atomic_write_json(path: Path, data: dict) -> None:
     """Write data as JSON to path atomically (crash-safe). Sets permissions to 0o600."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    fd_open = True  # track whether fd is still open (not yet owned by fdopen)
     try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f)
+        os.fchmod(fd, 0o600)  # set permissions before any data is written
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd_open = False  # fdopen took ownership
+            json.dump(data, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
@@ -137,10 +152,14 @@ def atomic_write_json(path: Path, data: dict) -> None:
             os.fsync(dir_fd)
         finally:
             os.close(dir_fd)
-        os.chmod(path, 0o600)
     except Exception:
+        if fd_open:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         try:
             os.unlink(tmp_path)
-        except OSError:
+        except FileNotFoundError:
             pass
         raise

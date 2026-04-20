@@ -10,9 +10,6 @@ import yaml
 from pulse import __version__
 from pulse.ipv4 import apply_ipv4_patch
 
-# Apply IPv4 patch early, before any network code
-apply_ipv4_patch()
-
 _DEFAULT_CONFIG_PATH = Path.home() / ".world" / "pulse" / "config.yml"
 _DEFAULT_DB_PATH = Path.home() / ".world" / "pulse" / "pulse.db"
 
@@ -24,6 +21,10 @@ _DEFAULT_DB_PATH = Path.home() / ".world" / "pulse" / "pulse.db"
 @click.pass_context
 def main(ctx: click.Context, config_check: bool, self_check: bool) -> None:
     """pulse — org health monitor."""
+    apply_ipv4_patch()
+    if config_check and self_check:
+        click.echo("ERROR: --config-check and --self-check are mutually exclusive", err=True)
+        sys.exit(1)
     if config_check:
         _run_config_check()
     elif self_check:
