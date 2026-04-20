@@ -124,11 +124,13 @@ GitHub org activity monitor. Periodic GraphQL snapshots — open PRs, issues, De
 Full documentation: [`pulse/README.md`](pulse/README.md)
 
 **Quick start:**
-```
+```bash
 pip install -e ~/code/toolbox/
-export $(grep -v '^#' ~/.world/pulse/env | xargs)   # load and export token
-pulse --now                  # run snapshot + render digest
-pulse --self-check           # validate token, config, storage
+mkdir -p ~/.world/pulse && chmod 700 ~/.world/pulse
+echo "GH_TOKEN=ghp_yourtoken" > ~/.world/pulse/env && chmod 600 ~/.world/pulse/env
+export $(grep -v '^#' ~/.world/pulse/env | xargs)
+pulse --self-check    # validate token, config, storage
+pulse --now           # run snapshot + render digest
 ```
 
 **Files:**

@@ -19,6 +19,7 @@ This installs the `pulse` CLI entry point (defined in `pyproject.toml`). The sys
 GH_TOKEN must be set in `~/.world/pulse/env` (0o600):
 
 ```bash
+mkdir -p ~/.world/pulse && chmod 700 ~/.world/pulse
 echo "GH_TOKEN=ghp_yourtoken" > ~/.world/pulse/env
 chmod 600 ~/.world/pulse/env
 ```
@@ -29,8 +30,6 @@ The systemd service automatically loads this file via `EnvironmentFile=`. For ma
 export $(grep -v '^#' ~/.world/pulse/env | xargs)
 pulse --now
 ```
-
-Or inline: `GH_TOKEN=$(grep GH_TOKEN ~/.world/pulse/env | cut -d= -f2) pulse --now`
 
 Note: `source ~/.world/pulse/env` assigns variables but does not export them to child processes unless you follow with `export GH_TOKEN`.
 
