@@ -86,7 +86,6 @@ def _run_config_check() -> None:
 
 def _run_self_check() -> None:
     from pulse.config import ConfigError, load_config
-    from pulse.graphql import GraphQLClient
     from pulse.storage import DBCorrupt, open_db
 
     errors: list[str] = []
