@@ -11,6 +11,10 @@ class DBCorrupt(Exception):
     """Raised when SQLite integrity_check fails."""
 
 
+class DBSetupError(Exception):
+    """Raised when the database file is valid but schema creation or PRAGMA setup fails."""
+
+
 def open_db(path: Path) -> sqlite3.Connection:
     """Open (or create) the SQLite database at path with WAL mode and integrity check."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -25,18 +29,21 @@ def open_db(path: Path) -> sqlite3.Connection:
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA foreign_keys=ON")
         rows = conn.execute("PRAGMA integrity_check").fetchall()
-        # Row objects: compare via tuple unpacking
         row_values = [tuple(r) for r in rows]
         if row_values != [("ok",)]:
+            conn.close()
             raise DBCorrupt(f"integrity_check failed: {row_values}")
         create_schema(conn)
         return conn
     except DBCorrupt:
         conn.close()
         raise
+    except sqlite3.DatabaseError as e:
+        conn.close()
+        raise DBCorrupt(f"cannot read database: {e}") from e
     except Exception as e:
         conn.close()
-        raise DBCorrupt(f"database setup failed: {e}") from e
+        raise DBSetupError(f"database setup failed: {e}") from e
 
 
 def create_schema(conn: sqlite3.Connection) -> None:

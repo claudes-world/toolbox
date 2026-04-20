@@ -28,21 +28,14 @@ class OrgConfig(BaseModel):
 class Defaults(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    stall_pr_hours: int = Field(default=12)
-    stall_issue_hours: int = Field(default=72)
+    stall_pr_hours: int = Field(default=12, gt=0)
+    stall_issue_hours: int = Field(default=72, gt=0)
     history_days: int = Field(default=7)
     cadence_minutes: int = Field(default=30, gt=0)
     github_api_base: str = Field(default="https://api.github.com")
     max_prs_per_repo: int = Field(default=30)
     max_issues_per_repo: int = Field(default=50)
     max_releases_per_repo: int = Field(default=10)
-
-    @field_validator("stall_pr_hours", "stall_issue_hours")
-    @classmethod
-    def stall_hours_positive(cls, v: int) -> int:
-        if v <= 0:
-            raise ValueError("stall hours must be > 0")
-        return v
 
     @field_validator("history_days")
     @classmethod

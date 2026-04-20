@@ -152,3 +152,39 @@ defaults:
 def test_load_config_nonexistent_path(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="not found"):
         load_config(tmp_path / "does_not_exist.yml")
+
+
+def test_cadence_minutes_zero_raises(tmp_path: Path) -> None:
+    bad = MINIMAL_VALID.replace("cadence_minutes: 30", "cadence_minutes: 0")
+    with pytest.raises(ConfigError):
+        load_config(_write(tmp_path, bad))
+
+
+def test_cadence_minutes_negative_raises(tmp_path: Path) -> None:
+    bad = MINIMAL_VALID.replace("cadence_minutes: 30", "cadence_minutes: -5")
+    with pytest.raises(ConfigError):
+        load_config(_write(tmp_path, bad))
+
+
+def test_stall_override_pr_hours_zero_raises(tmp_path: Path) -> None:
+    content = """\
+schema_version: "1.0"
+orgs:
+  claudes-world:
+    ignore: []
+    stall_overrides:
+      some-repo:
+        pr_hours: 0
+        issue_hours: 24
+defaults:
+  stall_pr_hours: 12
+  stall_issue_hours: 72
+  history_days: 7
+  cadence_minutes: 30
+  github_api_base: "https://api.github.com"
+  max_prs_per_repo: 30
+  max_issues_per_repo: 50
+  max_releases_per_repo: 10
+"""
+    with pytest.raises(ConfigError):
+        load_config(_write(tmp_path, content))
