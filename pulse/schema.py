@@ -2,6 +2,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from pydantic import BaseModel
+
+
+class UpstreamStatus(BaseModel):
+    status: str  # "success" | "parent_unavailable" | "failed" | "not_fork"
+    commits_behind: int | None = None
+    commits_ahead: int | None = None
+    recent_upstream_releases: list[dict] | None = None
+    error_note: str | None = None
+
+
+class VulnerabilityAlert(BaseModel):
+    severity: str           # CRITICAL | HIGH | MODERATE | LOW (verbatim from GitHub)
+    ghsa_id: str
+    package_name: str
+    ecosystem: str
+    age_days: int
+    dependabot_pr_number: int | None = None
+
 
 @dataclass
 class ReviewEvent:
@@ -34,6 +53,7 @@ class RepoData:
     field_statuses: dict[str, FieldStatus] = field(default_factory=dict)
     upstream: dict | None = None
     vulnerability_alerts: list | None = None
+    parent_default_branch: str | None = None
 
 
 @dataclass
