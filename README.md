@@ -126,6 +126,7 @@ Full documentation: [`pulse/README.md`](pulse/README.md)
 **Quick start:**
 ```bash
 ~/venvs/transcribe/bin/pip install -e ~/code/toolbox/
+ln -sf ~/code/toolbox/bin/pulse ~/bin/pulse   # add to PATH
 mkdir -p ~/.world/pulse && chmod 700 ~/.world/pulse
 echo "GH_TOKEN=ghp_yourtoken" > ~/.world/pulse/env && chmod 600 ~/.world/pulse/env
 cp ~/code/toolbox/systemd/user/config.yml ~/.world/pulse/config.yml

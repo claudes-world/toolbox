@@ -12,9 +12,10 @@ GitHub org health monitor. Periodic GraphQL snapshots across configured orgs, st
 
 ```bash
 ~/venvs/transcribe/bin/pip install -e ~/code/toolbox/
+ln -sf ~/code/toolbox/bin/pulse ~/bin/pulse   # add to PATH
 ```
 
-This installs the `pulse` CLI entry point into the shared `~/venvs/transcribe/` venv (defined in `pyproject.toml`). The `bin/pulse` shebang is hardcoded to that venv's interpreter. The systemd unit files live in `~/code/toolbox/systemd/`.
+This installs pulse's dependencies into the shared `~/venvs/transcribe/` venv (defined in `pyproject.toml`). The `bin/pulse` entry point has its shebang hardcoded to that venv's interpreter. Symlinking into `~/bin/` makes `pulse` available on `PATH`. The systemd unit files live in `~/code/toolbox/systemd/`.
 
 GH_TOKEN must be set in `~/.world/pulse/env` (0o600):
 
