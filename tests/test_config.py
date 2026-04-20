@@ -204,6 +204,31 @@ def test_stall_issue_hours_negative_raises(tmp_path: Path) -> None:
         load_config(cfg)
 
 
+def test_stall_override_issue_hours_zero_raises(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yml"
+    cfg.write_text(
+        "schema_version: '1.0'\n"
+        "orgs:\n"
+        "  claudes-world:\n"
+        "    ignore: []\n"
+        "    stall_overrides:\n"
+        "      some-repo:\n"
+        "        pr_hours: 12\n"
+        "        issue_hours: 0\n"
+        "defaults:\n"
+        "  stall_pr_hours: 12\n"
+        "  stall_issue_hours: 72\n"
+        "  history_days: 7\n"
+        "  cadence_minutes: 30\n"
+        "  github_api_base: 'https://api.github.com'\n"
+        "  max_prs_per_repo: 30\n"
+        "  max_issues_per_repo: 50\n"
+        "  max_releases_per_repo: 10\n"
+    )
+    with pytest.raises(ConfigError):
+        load_config(cfg)
+
+
 def test_stall_override_pr_hours_zero_raises(tmp_path: Path) -> None:
     content = """\
 schema_version: "1.0"

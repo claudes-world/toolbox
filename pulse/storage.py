@@ -8,7 +8,11 @@ from pathlib import Path
 
 
 class DBCorrupt(Exception):
-    """Raised when SQLite integrity_check fails."""
+    """Raised when the database file is unreadable or internally inconsistent.
+
+    Covers: file is not valid SQLite (detected on first execute), or
+    PRAGMA integrity_check returns a failure result.
+    """
 
 
 class DBSetupError(Exception):
@@ -17,19 +21,20 @@ class DBSetupError(Exception):
 
 def open_db(path: Path) -> sqlite3.Connection:
     """Open (or create) the SQLite database at path with WAL mode and integrity check."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-
     # Stage 1: open the file. Failure here is an environment/permissions problem, not corruption.
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(path), timeout=5.0)
         conn.row_factory = sqlite3.Row
     except Exception as e:
         raise DBSetupError(f"cannot open database at {path}: {e}") from e
 
     # Stage 2: detect corrupt file — first execute triggers SQLite's lazy file validation.
-    # sqlite3.DatabaseError here means the file exists but is not valid SQLite.
     try:
         conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError as e:
+        conn.close()
+        raise DBSetupError(f"PRAGMA journal_mode failed (env/permissions issue): {e}") from e
     except sqlite3.DatabaseError as e:
         conn.close()
         raise DBCorrupt(f"database file is corrupt or not valid SQLite: {e}") from e
