@@ -145,9 +145,8 @@ def _run_now() -> None:
                 digest_text = render_digest(db_conn, cfg)
             finally:
                 db_conn.close()
-
-        digest_path = output_dir / "digest-latest.md"
-        atomic_write_text(digest_path, digest_text)
+            digest_path = output_dir / "digest-latest.md"
+            atomic_write_text(digest_path, digest_text)
         click.echo(str(digest_path))
     except LockHeld:
         click.echo("pulse already running", err=True)

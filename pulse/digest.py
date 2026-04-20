@@ -59,7 +59,8 @@ def atomic_write_text(path: Path, text: str) -> None:
 
 def _latest_snapshot(db_conn: sqlite3.Connection) -> sqlite3.Row | None:
     return db_conn.execute(
-        "SELECT * FROM snapshots ORDER BY captured_at_utc DESC LIMIT 1"
+        "SELECT * FROM snapshots WHERE capture_status != 'in_progress'"
+        " ORDER BY captured_at_utc DESC LIMIT 1"
     ).fetchone()
 
 
@@ -89,18 +90,21 @@ def render_digest(db_conn: sqlite3.Connection, cfg: PulseConfig) -> str:
         alert_lines.append(f"- ❌ **snapshot**: {repos_failed} repo(s) failed to capture")
 
     for repo_row in repo_rows:
-        repo_label = f"{repo_row['org']}/{repo_row['name']}"
+        org_escaped = md_escape(repo_row["org"])
+        name_escaped_label = md_escape(repo_row["name"])
+        repo_label = f"{org_escaped}/{name_escaped_label}"
         field_statuses: dict = json.loads(repo_row["field_statuses"] or "{}")
 
         for field_name, fs_data in field_statuses.items():
             status = fs_data.get("status", "success")
             error_note = fs_data.get("error_note") or ""
+            error_note_escaped = md_escape(str(error_note))
             if status == "failed":
-                alert_lines.append(f"- ❌ **{repo_label}**: {field_name} failed — {error_note}")
+                alert_lines.append(f"- ❌ **{repo_label}**: {field_name} failed — {error_note_escaped}")
             elif status == "disabled":
                 alert_lines.append(f"- ⚠️ **{repo_label}**: {field_name} field disabled")
             elif status == "partial":
-                alert_lines.append(f"- ℹ️ **{repo_label}**: {field_name} {error_note}")
+                alert_lines.append(f"- ℹ️ **{repo_label}**: {field_name} {error_note_escaped}")
 
     lines.append("## ⚠️ Alerts")
     lines.append("")
@@ -133,7 +137,7 @@ def render_digest(db_conn: sqlite3.Connection, cfg: PulseConfig) -> str:
         idle_str = f"{idle_h:.1f}h idle" if idle_h is not None else "idle unknown"
         stall_tag = " [STALLED]" if pr["stalled"] else ""
         title_escaped = md_escape(pr["title"] or "")
-        author = pr["author"] or "unknown"
+        author = md_escape(pr["author"] or "unknown")
         lines.append(
             f"- [{repo_label}#{pr['number']}] {title_escaped}{stall_tag} — {author} ({idle_str})"
         )
@@ -167,7 +171,7 @@ def render_digest(db_conn: sqlite3.Connection, cfg: PulseConfig) -> str:
             label_list = json.loads(labels_raw)
         except Exception:
             label_list = []
-        labels_str = ", ".join(label_list) if label_list else "none"
+        labels_str = ", ".join(md_escape(l) for l in label_list) if label_list else "none"
         lines.append(
             f"- [{repo_label}#{issue['number']}] {title_escaped} — labels: {labels_str} ({idle_str})"
         )
@@ -190,7 +194,7 @@ def render_digest(db_conn: sqlite3.Connection, cfg: PulseConfig) -> str:
     for repo_label, rel in all_releases:
         name_escaped = md_escape(rel["name"] or "")
         created = rel["created_at"] or "unknown"
-        lines.append(f"- {repo_label} {rel['tag_name']}: {name_escaped} — {created}")
+        lines.append(f"- {repo_label} {md_escape(rel['tag_name'])}: {name_escaped} — {created}")
     if not all_releases:
         lines.append("_No recent releases._")
     lines.append("")
@@ -199,7 +203,7 @@ def render_digest(db_conn: sqlite3.Connection, cfg: PulseConfig) -> str:
     repos_with_alerts: list[tuple[str, list[sqlite3.Row]]] = []
     total_dependabot_prs = 0
     for repo_row in repo_rows:
-        repo_label = f"{repo_row['org']}/{repo_row['name']}"
+        repo_label = f"{md_escape(repo_row['org'])}/{md_escape(repo_row['name'])}"
         alert_rows = db_conn.execute(
             "SELECT * FROM alerts WHERE repo_id=?", (repo_row["id"],)
         ).fetchall()

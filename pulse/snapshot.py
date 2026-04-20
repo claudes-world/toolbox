@@ -376,16 +376,17 @@ def _finalize_snapshot(
     repos_succeeded: int,
     repos_failed: int,
     repos_partial: int,
+    capture_status: str = "success",
 ) -> None:
     with db_conn:
         db_conn.execute(
             """
             UPDATE snapshots
             SET duration_ms=?, repos_succeeded=?, repos_failed=?, repos_partial=?,
-                capture_status='success'
+                capture_status=?
             WHERE id=?
             """,
-            (duration_ms, repos_succeeded, repos_failed, repos_partial, snapshot_id),
+            (duration_ms, repos_succeeded, repos_failed, repos_partial, capture_status, snapshot_id),
         )
 
 
@@ -607,6 +608,7 @@ def run_snapshot(
         orgs_queried=orgs_queried,
     )
 
+    org_errors: list[str] = []
     for org_name, org_config in cfg.orgs.items():
         # Enumerate repos
         try:
@@ -622,7 +624,9 @@ def run_snapshot(
                 field="repos",
             )
         except Exception as e:
-            print(f"ERROR: failed to enumerate repos for {org_name}: {e}", file=sys.stderr)
+            msg = f"failed to enumerate repos for {org_name}: {e}"
+            print(f"ERROR: {msg}", file=sys.stderr)
+            org_errors.append(msg)
             continue
 
         for node in repo_nodes:
@@ -700,10 +704,8 @@ def run_snapshot(
             failed_fields = [fs for fs in field_statuses if fs.status == "failed"]
             partial_fields = [fs for fs in field_statuses if fs.status == "partial"]
 
-            if failed_fields:
-                repo.capture_status = "partial"
-                repos_partial += 1
-            elif partial_fields:
+            counted_as = "partial" if (failed_fields or partial_fields) else "success"
+            if counted_as == "partial":
                 repo.capture_status = "partial"
                 repos_partial += 1
             else:
@@ -716,10 +718,14 @@ def run_snapshot(
             except Exception as e:
                 print(f"ERROR: failed to persist {org_name}/{repo_name}: {e}", file=sys.stderr)
                 repos_failed += 1
-                repos_partial -= 1  # correct the over-count
+                if counted_as == "partial":
+                    repos_partial -= 1
+                else:
+                    repos_succeeded -= 1
 
     duration_ms = int((time.monotonic() - start_time) * 1000)
 
+    snapshot_capture_status = "partial" if org_errors else "success"
     _finalize_snapshot(
         db_conn,
         snapshot_id=snapshot_id,
@@ -727,6 +733,7 @@ def run_snapshot(
         repos_succeeded=repos_succeeded,
         repos_failed=repos_failed,
         repos_partial=repos_partial,
+        capture_status=snapshot_capture_status,
     )
 
     # Write JSON artifacts
