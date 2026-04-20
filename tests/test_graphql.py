@@ -321,3 +321,63 @@ def test_paginate_bad_cursor_deletes_checkpoint() -> None:
         "SELECT * FROM pagination_state WHERE org='org' AND repo='repo' AND field='prs'"
     ).fetchone()
     assert row is None
+
+
+def test_paginate_mid_walk_traversal_failure_deletes_checkpoint() -> None:
+    """Path traversal failure after page 1 (pages_advanced=1) still deletes checkpoint."""
+    conn = sqlite3.connect(":memory:")
+    _pagination_state_schema(conn)
+
+    # Pre-insert a checkpoint
+    conn.execute(
+        "INSERT INTO pagination_state (org, repo, field, last_cursor, timestamp)"
+        " VALUES ('org', 'repo', 'prs', 'old-cursor', datetime('now'))"
+    )
+    conn.commit()
+
+    page1_body = {
+        "data": {
+            "rateLimit": {"cost": 1, "remaining": 4999, "resetAt": "2026-04-20T00:00:00Z", "used": 1},
+            "repository": {
+                "prs": {
+                    "nodes": [{"number": 1}],
+                    "pageInfo": {"hasNextPage": True, "endCursor": "cursor-page1"},
+                }
+            },
+        }
+    }
+    page2_error_body = {
+        "data": None,
+        "errors": [{"message": "internal error", "type": "INTERNAL"}],
+    }
+
+    page1_resp = _make_response(200, page1_body)
+    page2_resp = _make_response(200, page2_error_body)
+
+    client = _make_client()
+    call_count = 0
+
+    def fake_send(request, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return page1_resp if call_count == 1 else page2_resp
+
+    with patch.object(client._client, "send", side_effect=fake_send):
+        nodes = client.paginate(
+            query="query($cursor: String) { ... }",
+            variables={"cursor": None},
+            page_info_path=["data", "repository", "prs", "pageInfo"],
+            nodes_path=["data", "repository", "prs", "nodes"],
+            db_conn=conn,
+            org="org",
+            repo="repo",
+            field="prs",
+        )
+
+    # Page 1 nodes returned before failure
+    assert nodes == [{"number": 1}]
+    # Checkpoint must be deleted — not preserved despite pages_advanced=1
+    row = conn.execute(
+        "SELECT * FROM pagination_state WHERE org='org' AND repo='repo' AND field='prs'"
+    ).fetchone()
+    assert row is None

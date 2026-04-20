@@ -325,8 +325,8 @@ class GraphQLClient:
                         )
                 except Exception as db_err:
                     print(f"WARNING: could not clear pagination checkpoint: {db_err}", file=sys.stderr)
-            elif path_traversal_failed and pages_advanced == 0:
-                # Failed on first page — bad initial cursor; delete to prevent infinite resume loop
+            elif path_traversal_failed:
+                # Path traversal failed — delete checkpoint to prevent infinite resume loop
                 try:
                     with db_conn:
                         db_conn.execute(
