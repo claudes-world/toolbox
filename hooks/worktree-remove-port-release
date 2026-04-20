@@ -1,0 +1,194 @@
+#!/bin/bash
+# worktree-remove-port-release
+#
+# PostToolUse hook for Bash tool calls.
+# When the agent runs `git worktree remove ...`, this parses the command,
+# extracts the target path, and calls `port-for --release-worktree <path>`
+# to free any allocated ports AFTER the worktree directory has been deleted.
+#
+# Using PostToolUse (not PreToolUse) prevents registry desync: if the remove
+# fails (dirty/locked worktree), the ports are never released and the registry
+# stays correct. If the remove succeeds, ports are freed here.
+#
+# Always exits 0 with an empty object on the normal path and NEVER blocks
+# the remove — port-for failures are surfaced as context, not deny verdicts.
+# Silently no-ops for non-git-worktree Bash calls.
+
+set +e
+
+emit_empty() {
+  printf '{}\n'
+  exit 0
+}
+
+emit_context() {
+  msg="$1"
+  jq -n --arg msg "$msg" \
+    '{hookSpecificOutput:{hookEventName:"PostToolUse",additionalContext:$msg}}' \
+    2>/dev/null || printf '{}\n'
+  exit 0
+}
+
+command -v jq >/dev/null 2>&1 || emit_empty
+
+INPUT="$(cat 2>/dev/null)"
+[ -n "$INPUT" ] || emit_empty
+
+TOOL_NAME="$(printf '%s' "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)"
+[ "$TOOL_NAME" = "Bash" ] || emit_empty
+
+CMD="$(printf '%s' "$INPUT" | jq -r '.tool_input.command // ""' 2>/dev/null)"
+[ -n "$CMD" ] || emit_empty
+
+# Fast reject: not a git worktree remove invocation at all.
+# Match on "worktree remove" (not "git worktree remove") so that
+# `git -C <dir> worktree remove` is not silently dropped before
+# the Python parser can handle the -C flag.
+case "$CMD" in
+  *"worktree remove"*) ;;
+  *) emit_empty ;;
+esac
+
+# Shell-operator bail-out: `||` and `;` allow later commands to mask a failed
+# `git worktree remove` with exit 0, making the exit-code gate below unreliable.
+# We cannot safely tell if the remove succeeded, so skip port release entirely.
+# `&&` is fine — a failed remove short-circuits the chain and yields non-zero.
+case "$CMD" in
+  *"||"*|*";"*|*"|"*)
+    emit_empty ;;
+esac
+
+# PostToolUse: only release ports if the remove actually succeeded.
+TOOL_EXIT="$(printf '%s' "$INPUT" | jq -r '.tool_response.exit_code // .tool_response.exitCode // 0' 2>/dev/null)"
+case "$TOOL_EXIT" in
+  ''|0) ;;
+  *) emit_empty ;;
+esac
+
+WT_PATHS="$(python3 -- - "$CMD" <<'PY' 2>/dev/null
+import os
+import shlex
+import sys
+
+cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+if not cmd:
+    sys.exit(0)
+
+segments = []
+# For the remove hook we only split on && (safe AND-chain). If any segment in
+# an &&-chain fails the overall exit code is non-zero and the exit-code gate
+# above will skip all releases. Separators like ; | || do not guarantee all
+# removes succeeded even when the tool exit code is 0, so we do NOT split on
+# them — treating such commands as single-segment is the conservative choice.
+for sep in ("&&",):
+    if not segments:
+        segments = [cmd]
+    out = []
+    for s in segments:
+        out.extend(s.split(sep))
+    segments = out
+
+REMOVE_FLAGS_NO_ARG = {"--force", "-f", "--quiet", "-q"}
+
+for seg in segments:
+    try:
+        tokens = shlex.split(seg.strip(), posix=True)
+    except ValueError:
+        continue
+    if len(tokens) < 4:
+        continue
+    # Locate "git" as the lead command, allowing env-var prefix tokens
+    # (FOO=bar git worktree remove) but rejecting "echo git worktree remove".
+    git_idx = None
+    for _i, _tok in enumerate(tokens):
+        if _tok == "git":
+            git_idx = _i
+            break
+        # Allow only key=value env-var assignments before git.
+        if "=" not in _tok or _tok.startswith("-"):
+            break
+    if git_idx is None:
+        continue
+    sub = tokens[git_idx + 1:]
+    # Skip global git flags like -C <dir> before "worktree".
+    # Track -C <dir> so relative worktree paths can be resolved against it.
+    i = 0
+    git_cwd = None
+    while i < len(sub) and sub[i].startswith("-"):
+        if sub[i] == "-C" and i + 1 < len(sub):
+            git_cwd = sub[i + 1]
+            i += 2
+        elif sub[i].startswith("-C") and len(sub[i]) > 2:
+            # -C<dir> no-space form (e.g. git -Cfoo worktree remove)
+            git_cwd = sub[i][2:]
+            i += 1
+        elif sub[i] == "-c" and i + 1 < len(sub):
+            i += 2
+        else:
+            i += 1
+    if i + 1 >= len(sub):
+        continue
+    if sub[i] != "worktree" or sub[i + 1] != "remove":
+        continue
+    args = sub[i + 2:]
+    j = 0
+    while j < len(args):
+        tok = args[j]
+        if not tok.startswith("-"):
+            break
+        if tok in REMOVE_FLAGS_NO_ARG:
+            j += 1
+        elif "=" in tok and tok.startswith("--"):
+            j += 1
+        else:
+            j += 1
+    if j >= len(args):
+        continue
+    path = args[j]
+    if path:
+        # If git was invoked with -C <dir>, resolve relative paths against
+        # that directory rather than cwd.
+        if git_cwd and not os.path.isabs(path):
+            path = os.path.join(git_cwd, path)
+        print(os.path.abspath(os.path.expanduser(path)))
+        # Do NOT exit — continue scanning remaining segments for chained commands.
+PY
+)"
+
+[ -n "$WT_PATHS" ] || emit_empty
+
+PORT_FOR="$(command -v port-for 2>/dev/null)"
+[ -n "$PORT_FOR" ] || PORT_FOR="$HOME/bin/port-for"
+[ -x "$PORT_FOR" ] || emit_empty
+
+CONTEXT_PARTS=""
+while IFS= read -r wt; do
+  [ -n "$wt" ] || continue
+
+  PF_OUT="$("$PORT_FOR" --json --release-worktree "$wt" 2>&1)"
+  PF_EXIT=$?
+
+  if [ "$PF_EXIT" -ne 0 ]; then
+    # Warn but continue — we never block on port-for errors.
+    CONTEXT_PARTS="${CONTEXT_PARTS}port-for --release-worktree failed for '$wt' (exit $PF_EXIT). Output: $PF_OUT. Clean up the registry manually with: port-for --release-worktree '$wt'\n"
+    continue
+  fi
+
+  RELEASED="$(printf '%s' "$PF_OUT" | jq -r '
+    (.released // {}) as $r
+    | if ($r | length) == 0 then
+        ""
+      else
+        [$r | to_entries[] | "\(.key) (\(.value.purpose))"] | join(", ")
+      end
+  ' 2>/dev/null)"
+
+  if [ -n "$RELEASED" ]; then
+    CONTEXT_PARTS="${CONTEXT_PARTS}Released ports for worktree ${wt}: ${RELEASED}.\n"
+  fi
+done <<< "$WT_PATHS"
+
+[ -n "$CONTEXT_PARTS" ] || emit_empty
+
+CONTEXT_MSG="$(printf '%b' "$CONTEXT_PARTS" | sed 's/\\n$//')"
+emit_context "$CONTEXT_MSG"
