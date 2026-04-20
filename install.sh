@@ -38,6 +38,9 @@ cp "$SCRIPT_DIR/systemd/user/pulse.timer" "$HOME/.config/systemd/user/pulse.time
 systemctl --user daemon-reload
 
 # Self-check before enabling timer — parse env file as key=value (no shell execution)
+# Parses KEY=VALUE lines only. Supports optional double-quoted values.
+# Does NOT support: single-quoted values, multi-line values, shell variable expansion.
+# Format matches systemd EnvironmentFile= parsing (double-quote stripping, no shell execution).
 while IFS='=' read -r key val; do
     # Skip blank lines and comments
     [[ -z "${key// /}" ]] && continue
@@ -48,7 +51,9 @@ while IFS='=' read -r key val; do
     val="${val%[[:space:]]*}"   # strip trailing whitespace
     export "$key"="$val"
 done < "$HOME/.world/pulse/env"
-if ! "$HOME/code/toolbox/bin/pulse" --self-check; then
+_PULSE_GH_TOKEN="${GH_TOKEN:-}"
+if ! env -i "GH_TOKEN=${_PULSE_GH_TOKEN}" "PATH=${PATH}" "HOME=${HOME}" "USER=${USER}" \
+    "$HOME/code/toolbox/bin/pulse" --self-check; then
     echo "ERROR: pulse --self-check failed. Fix issues above before enabling the timer." >&2
     exit 1
 fi

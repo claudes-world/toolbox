@@ -25,17 +25,6 @@ query {
 }
 """
 
-SCOPE_PROBE_QUERY = """
-query($org: String!) {
-  organization(login: $org) {
-    name
-    repositories(first: 1) {
-      totalCount
-    }
-  }
-}
-"""
-
 
 @click.group(invoke_without_command=True)
 @click.option("--config-check", is_flag=True, default=False, help="Validate config and print effective config as YAML.")
@@ -233,10 +222,11 @@ def _run_self_check() -> None:
                     elif not cfg.orgs:
                         click.echo("[WARN] token: fine-grained token — cannot verify scopes without configured orgs in config.yml", err=True)
                     else:
+                        from pulse.snapshot import REPOS_QUERY
                         first_org = next(iter(cfg.orgs))
                         probe_resp = httpx.post(
                             _graphql_url,
-                            json={"query": SCOPE_PROBE_QUERY, "variables": {"org": first_org}},
+                            json={"query": REPOS_QUERY, "variables": {"org": first_org, "cursor": None}},
                             headers={
                                 "Authorization": f"bearer {token}",
                                 "Accept": "application/vnd.github+json",
@@ -263,7 +253,19 @@ def _run_self_check() -> None:
                                     err=True,
                                 )
                             else:
-                                click.echo("[OK] token: fine-grained token — scope probe passed (org+repo read verified)")
+                                # Probe succeeds if data.organization.repositories.nodes is present (can be empty)
+                                probe_data = probe_body.get("data") or {}
+                                repo_nodes = (
+                                    (probe_data.get("organization") or {})
+                                    .get("repositories", {})
+                                    .get("nodes")
+                                )
+                                if repo_nodes is not None:
+                                    click.echo("[OK] token: fine-grained token — scope probe passed (org+repo read verified)")
+                                else:
+                                    err_msg = "scope probe returned no data.organization.repositories.nodes"
+                                    errors.append(f"token: fine-grained token scope probe failed: {err_msg}")
+                                    click.echo(f"[FAIL] token: fine-grained token scope probe failed: {err_msg}", err=True)
                         else:
                             err_msg = f"scope probe returned HTTP {probe_resp.status_code}"
                             errors.append(f"token: fine-grained token scope probe failed: {err_msg}")
@@ -493,14 +495,18 @@ def _run_dry_run(repo_override: str | None = None) -> None:
         "releases": [dataclasses.asdict(r) for r in releases],
     }
 
-    fd, tmp_str = tempfile.mkstemp(dir="/tmp", prefix=f"pulse-dry-run-{ts}-", suffix=".json")
-    out_path = Path(tmp_str)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(json.dumps(result, indent=2, default=str))
-    except Exception:
-        out_path.unlink(missing_ok=True)
-        raise
+        fd, tmp_str = tempfile.mkstemp(dir="/tmp", prefix=f"pulse-dry-run-{ts}-", suffix=".json")
+        out_path = Path(tmp_str)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(result, indent=2, default=str))
+        except Exception:
+            out_path.unlink(missing_ok=True)
+            raise
+    except OSError as e:
+        click.echo(f"ERROR: could not write dry-run output to /tmp: {e}", err=True)
+        sys.exit(1)
 
     stalled_prs = sum(1 for p in prs if p.stalled)
     stalled_issues = sum(1 for i in issues if i.stalled)

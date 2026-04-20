@@ -144,14 +144,14 @@ def test_self_check_env_wrong_perms(pulse_env: Path):
 
 def test_self_check_fine_grained_token_probe_pass(pulse_env: Path):
     """Fine-grained token: no x-oauth-scopes header, scope probe succeeds → [OK]."""
-    # First call: SCOPE_CHECK_QUERY (no scopes header); second call: SCOPE_PROBE_QUERY (data returned)
+    # First call: SCOPE_CHECK_QUERY (no scopes header); second call: REPOS_QUERY (empty nodes, no errors)
     initial_resp = _mock_httpx_response(200, "")
     initial_resp.headers = {}  # no x-oauth-scopes at all
 
     probe_resp = MagicMock()
     probe_resp.status_code = 200
     probe_resp.json.return_value = {
-        "data": {"organization": {"name": "example-org", "repositories": {"totalCount": 5}}}
+        "data": {"organization": {"repositories": {"nodes": []}}}
     }
 
     runner = CliRunner()
@@ -182,6 +182,32 @@ def test_self_check_fine_grained_token_probe_fail(pulse_env: Path):
     assert result.exit_code == 1
     combined = result.output + result.stderr
     assert "fine-grained" in combined
+    assert "insufficient" in combined.lower() or "lacks required scopes" in combined.lower()
+
+
+def test_self_check_fine_grained_token_zero_scope_fails(pulse_env: Path):
+    """Fine-grained token: probe returns INSUFFICIENT_SCOPES error body → [FAIL] with scope message."""
+    initial_resp = _mock_httpx_response(200, "")
+    initial_resp.headers = {}  # no x-oauth-scopes
+
+    probe_resp = MagicMock()
+    probe_resp.status_code = 200
+    probe_resp.json.return_value = {
+        "data": None,
+        "errors": [
+            {
+                "type": "INSUFFICIENT_SCOPES",
+                "message": "Your token has not been granted the required scopes to execute this query.",
+            }
+        ],
+    }
+
+    runner = CliRunner(mix_stderr=False)
+    with patch("httpx.post", side_effect=[initial_resp, probe_resp]):
+        result = runner.invoke(main, ["--self-check"])
+
+    assert result.exit_code == 1
+    combined = result.output + result.stderr
     assert "insufficient" in combined.lower() or "lacks required scopes" in combined.lower()
 
 
