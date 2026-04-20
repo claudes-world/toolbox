@@ -12,6 +12,7 @@ from pulse.graphql import (
     GraphQLClient,
     RateLimitExhausted,
     RetriesExhausted,
+    RunDeadlineExceeded,
 )
 
 
@@ -192,3 +193,39 @@ def test_cost_budget_abort() -> None:
     with patch.object(client._client, "send", return_value=ok_resp):
         with pytest.raises(CostBudgetExceeded):
             client.execute("{ repository { ... } }")
+
+
+def test_execute_deadline_exceeded() -> None:
+    """RunDeadlineExceeded raised when deadline is in the past at loop entry."""
+    client = _make_client()
+    past_deadline = time.monotonic() - 1.0  # already expired
+
+    with pytest.raises(RunDeadlineExceeded):
+        client.execute("{ viewer { login } }", deadline_monotonic=past_deadline)
+
+
+def test_execute_non_secondary_429_raises() -> None:
+    """Non-secondary-rate-limit 429 raises RuntimeError, not retried."""
+    resp = _make_response(429, {"message": "abuse"}, {})
+    resp.text = "abuse detection"
+
+    client = _make_client()
+
+    with patch.object(client._client, "send", return_value=resp):
+        with pytest.raises(RuntimeError, match="auth or unexpected 4xx"):
+            client.execute("{ viewer { login } }")
+
+
+def test_execute_500_retry() -> None:
+    """HTTP 500 retries with backoff; succeeds on next attempt."""
+    server_error_resp = _make_response(500, {}, {})
+    server_error_resp.text = "Internal Server Error"
+    ok_resp = _make_response(200, {"data": {"viewer": {"login": "user"}}})
+
+    client = _make_client()
+
+    with patch.object(client._client, "send", side_effect=[server_error_resp, ok_resp]), \
+         patch("pulse.graphql.time.sleep"):
+        result = client.execute("{ viewer { login } }")
+
+    assert result["data"]["viewer"]["login"] == "user"

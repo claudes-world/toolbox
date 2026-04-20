@@ -74,10 +74,20 @@ class GraphQLClient:
             if deadline_monotonic is not None and time.monotonic() > deadline_monotonic:
                 raise RunDeadlineExceeded()
 
+            # Compute per-request timeout respecting deadline
+            request_timeout = httpx.Timeout(timeout=30.0, connect=10.0)
+            if deadline_monotonic is not None:
+                dl_remaining = deadline_monotonic - time.monotonic()
+                if dl_remaining <= 0:
+                    raise RunDeadlineExceeded()
+                read_timeout = max(1.0, min(30.0, dl_remaining))
+                request_timeout = httpx.Timeout(timeout=read_timeout, connect=min(10.0, read_timeout))
+
             try:
                 resp = self._client.post(
                     "/graphql",
                     json={"query": query, "variables": variables or {}},
+                    timeout=request_timeout,
                 )
             except (httpx.NetworkError, httpx.TimeoutException):
                 wait = min(30, 2**attempt)
@@ -86,7 +96,8 @@ class GraphQLClient:
                     if dl_remaining <= 0:
                         raise RunDeadlineExceeded()
                     wait = min(wait, max(0, dl_remaining - 1))
-                time.sleep(wait)
+                if attempt < max_retries - 1:
+                    time.sleep(wait)
                 continue
 
             if resp.status_code == 200:
@@ -100,7 +111,8 @@ class GraphQLClient:
                         if dl_remaining <= 0:
                             raise RunDeadlineExceeded()
                         wait = min(wait, max(0, dl_remaining - 1))
-                    time.sleep(wait)
+                    if attempt < max_retries - 1:
+                        time.sleep(wait)
                     continue
 
                 if not isinstance(body, dict):
@@ -111,7 +123,8 @@ class GraphQLClient:
                         if dl_remaining <= 0:
                             raise RunDeadlineExceeded()
                         wait = min(wait, max(0, dl_remaining - 1))
-                    time.sleep(wait)
+                    if attempt < max_retries - 1:
+                        time.sleep(wait)
                     continue
 
                 if body.get("data") is None and body.get("errors"):
@@ -163,8 +176,11 @@ class GraphQLClient:
                         if dl_remaining <= 0:
                             raise RunDeadlineExceeded()
                         wait = min(wait, max(0, dl_remaining - 1))
-                    time.sleep(wait)
+                    if attempt < max_retries - 1:
+                        time.sleep(wait)
                     continue
+                else:
+                    raise RuntimeError(f"auth or unexpected 4xx: {resp.status_code} {resp.text[:500]}")
 
             if resp.status_code >= 500:
                 wait = min(30, 2**attempt)
@@ -173,7 +189,8 @@ class GraphQLClient:
                     if dl_remaining <= 0:
                         raise RunDeadlineExceeded()
                     wait = min(wait, max(0, dl_remaining - 1))
-                time.sleep(wait)
+                if attempt < max_retries - 1:
+                    time.sleep(wait)
                 continue
 
             if resp.status_code >= 400:
@@ -193,74 +210,103 @@ class GraphQLClient:
         repo: str = "",
         field: str = "",
         cursor_var: str = "cursor",
+        fingerprint: str = "",
     ) -> list[dict]:
         """Walk a paginated GraphQL connection, returning all collected nodes.
 
-        On resume (when a checkpoint cursor exists in pagination_state), returns
-        only nodes from the saved cursor forward. Callers requiring crash-durable
-        collection must persist nodes eagerly per page rather than relying on the
-        full return value.
+        Checkpoint semantics: when interrupted by an exception (deadline, rate limit),
+        the cursor of the last successfully fetched page is saved to pagination_state so
+        the next run resumes from there instead of restarting from page 1. Checkpoint is
+        deleted on clean completion (hasNextPage=False).
+
+        On resume, only nodes from the saved cursor forward are returned. Earlier pages
+        from the interrupted run are permanently lost — callers must handle partial results.
+
+        fingerprint: optional string included in the checkpoint key alongside field.
+        Change it when the query shape or filters change to avoid resuming with a stale
+        cursor into a different result set. If repo is renamed, use a new fingerprint.
         """
         variables = dict(variables or {})
         use_checkpoint = db_conn is not None and org and repo and field
+        # Include fingerprint in checkpoint key to prevent stale-cursor resume on query change
+        effective_field = f"{field}:{fingerprint}" if fingerprint else field
 
         if use_checkpoint:
             row = db_conn.execute(
                 "SELECT last_cursor FROM pagination_state WHERE org=? AND repo=? AND field=?",
-                (org, repo, field),
+                (org, repo, effective_field),
             ).fetchone()
             if row:
                 variables[cursor_var] = row[0]
 
         nodes: list[dict] = []
         _completed = False
+        last_cursor: str | None = None  # last successfully fetched endCursor
+        last_body: dict | None = None   # last response body from execute()
 
-        while True:
-            body = self.execute(query, variables, deadline_monotonic=deadline_monotonic)
+        try:
+            while True:
+                last_body = self.execute(query, variables, deadline_monotonic=deadline_monotonic)
 
-            # Navigate to page_info and nodes — log and stop on path miss
-            try:
-                page_info: dict = body
-                for key in page_info_path:
-                    page_info = page_info[key]
-                current_nodes: list[dict] = body
-                for key in nodes_path:
-                    current_nodes = current_nodes[key]
-                if not isinstance(current_nodes, list):
-                    raise TypeError(f"nodes_path resolved to {type(current_nodes).__name__}, expected list")
-                if not isinstance(page_info, dict):
-                    raise TypeError(f"page_info_path resolved to {type(page_info).__name__}, expected dict")
-            except (KeyError, TypeError) as e:
-                print(f"WARNING: paginate path traversal failed: {e}", file=sys.stderr)
-                break  # _completed stays False
+                try:
+                    page_info: dict = last_body
+                    for key in page_info_path:
+                        page_info = page_info[key]
+                    current_nodes: list[dict] = last_body
+                    for key in nodes_path:
+                        current_nodes = current_nodes[key]
+                    if not isinstance(current_nodes, list):
+                        raise TypeError(f"nodes_path resolved to {type(current_nodes).__name__}, expected list")
+                    if not isinstance(page_info, dict):
+                        raise TypeError(f"page_info_path resolved to {type(page_info).__name__}, expected dict")
+                except (KeyError, TypeError) as e:
+                    print(f"WARNING: paginate path traversal failed: {e}", file=sys.stderr)
+                    break  # _completed stays False
 
-            nodes.extend(current_nodes)
+                nodes.extend(current_nodes)
 
-            end_cursor = page_info.get("endCursor")
+                end_cursor = page_info.get("endCursor")
+                if end_cursor:
+                    last_cursor = end_cursor  # track for checkpoint-on-interrupt
 
-            if use_checkpoint and end_cursor:
+                if not page_info.get("hasNextPage"):
+                    _completed = True
+                    break
+                if end_cursor is None:
+                    print("WARNING: hasNextPage=True but endCursor=None — pagination truncated", file=sys.stderr)
+                    break  # _completed stays False: checkpoint preserved
+
+                variables[cursor_var] = end_cursor
+
+        except (RunDeadlineExceeded, RetriesExhausted, CostBudgetExceeded, RuntimeError):
+            # Interrupted — save cursor so next run resumes instead of restarting from page 1
+            if use_checkpoint and last_cursor:
                 with db_conn:
                     db_conn.execute(
                         "INSERT OR REPLACE INTO pagination_state"
                         " (org, repo, field, last_cursor, timestamp)"
                         " VALUES (?, ?, ?, ?, datetime('now'))",
-                        (org, repo, field, end_cursor),
+                        (org, repo, effective_field, last_cursor),
                     )
+            raise  # propagate to caller
 
-            if not page_info.get("hasNextPage"):
-                _completed = True
-                break
-            if end_cursor is None:
-                print("WARNING: hasNextPage=True but endCursor=None — pagination truncated", file=sys.stderr)
-                break  # _completed stays False: checkpoint preserved for next run
-
-            variables[cursor_var] = end_cursor
-
-        if use_checkpoint and _completed:
-            with db_conn:
-                db_conn.execute(
-                    "DELETE FROM pagination_state WHERE org=? AND repo=? AND field=?",
-                    (org, repo, field),
-                )
+        if use_checkpoint:
+            if _completed:
+                # Clean completion — remove checkpoint
+                with db_conn:
+                    db_conn.execute(
+                        "DELETE FROM pagination_state WHERE org=? AND repo=? AND field=?",
+                        (org, repo, effective_field),
+                    )
+            else:
+                # Broke out without completing — check if last response had errors (bad cursor)
+                # Delete checkpoint to prevent infinite loop on next resume
+                last_errors = (last_body or {}).get("errors") if last_body else None
+                if last_errors:
+                    with db_conn:
+                        db_conn.execute(
+                            "DELETE FROM pagination_state WHERE org=? AND repo=? AND field=?",
+                            (org, repo, effective_field),
+                        )
 
         return nodes
