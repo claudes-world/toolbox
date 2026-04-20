@@ -14,8 +14,12 @@ COST_ABORT_THRESHOLD = 50
 DEFAULT_DEADLINE_SEC = int(os.environ.get("PULSE_RUN_DEADLINE_SEC", "1200"))
 
 
-class RateLimitExhausted(Exception):
+class RetriesExhausted(Exception):
     pass
+
+
+# Backward-compat alias
+RateLimitExhausted = RetriesExhausted
 
 
 class RunDeadlineExceeded(Exception):
@@ -164,7 +168,7 @@ class GraphQLClient:
             if resp.status_code >= 400:
                 raise RuntimeError(f"gql {resp.status_code}: {resp.text[:500]}")
 
-        raise RateLimitExhausted()
+        raise RetriesExhausted(f"max retries ({max_retries}) exceeded")
 
     def paginate(
         self,
@@ -228,9 +232,12 @@ class GraphQLClient:
                         (org, repo, field, end_cursor),
                     )
 
-            if not page_info.get("hasNextPage") or end_cursor is None:
+            if not page_info.get("hasNextPage"):
                 _completed = True
                 break
+            if end_cursor is None:
+                print("WARNING: hasNextPage=True but endCursor=None — pagination truncated", file=sys.stderr)
+                break  # _completed stays False: checkpoint preserved for next run
 
             variables[cursor_var] = end_cursor
 

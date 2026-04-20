@@ -11,6 +11,7 @@ from pulse.graphql import (
     CostBudgetExceeded,
     GraphQLClient,
     RateLimitExhausted,
+    RetriesExhausted,
 )
 
 
