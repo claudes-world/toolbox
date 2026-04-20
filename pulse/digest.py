@@ -117,7 +117,7 @@ def render_digest(db_conn: sqlite3.Connection, cfg: PulseConfig) -> str:
     # ---- Open PRs ----
     all_prs: list[tuple[str, str, sqlite3.Row]] = []  # (repo_label, org/name, row)
     for repo_row in repo_rows:
-        repo_label = f"{repo_row['org']}/{repo_row['name']}"
+        repo_label = f"{md_escape(repo_row['org'])}/{md_escape(repo_row['name'])}"
         pr_rows = db_conn.execute(
             "SELECT * FROM prs WHERE repo_id=?", (repo_row["id"],)
         ).fetchall()
@@ -148,7 +148,7 @@ def render_digest(db_conn: sqlite3.Connection, cfg: PulseConfig) -> str:
     # ---- Open Issues ----
     all_issues: list[tuple[str, str, sqlite3.Row]] = []
     for repo_row in repo_rows:
-        repo_label = f"{repo_row['org']}/{repo_row['name']}"
+        repo_label = f"{md_escape(repo_row['org'])}/{md_escape(repo_row['name'])}"
         issue_rows = db_conn.execute(
             "SELECT * FROM issues WHERE repo_id=?", (repo_row["id"],)
         ).fetchall()
@@ -182,7 +182,7 @@ def render_digest(db_conn: sqlite3.Connection, cfg: PulseConfig) -> str:
     # ---- Recent Releases ----
     all_releases: list[tuple[str, sqlite3.Row]] = []
     for repo_row in repo_rows:
-        repo_label = f"{repo_row['org']}/{repo_row['name']}"
+        repo_label = f"{md_escape(repo_row['org'])}/{md_escape(repo_row['name'])}"
         release_rows = db_conn.execute(
             "SELECT * FROM releases WHERE repo_id=?", (repo_row["id"],)
         ).fetchall()
