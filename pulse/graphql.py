@@ -78,9 +78,9 @@ class GraphQLClient:
             request_timeout = httpx.Timeout(timeout=30.0, connect=10.0)
             if deadline_monotonic is not None:
                 dl_remaining = deadline_monotonic - time.monotonic()
-                if dl_remaining <= 0:
+                if dl_remaining < 1.0:
                     raise RunDeadlineExceeded()
-                read_timeout = max(1.0, min(30.0, dl_remaining))
+                read_timeout = min(30.0, dl_remaining)
                 request_timeout = httpx.Timeout(timeout=read_timeout, connect=min(10.0, read_timeout))
 
             try:
@@ -89,7 +89,7 @@ class GraphQLClient:
                     json={"query": query, "variables": variables or {}},
                     timeout=request_timeout,
                 )
-            except (httpx.NetworkError, httpx.TimeoutException):
+            except httpx.TransportError:
                 wait = min(30, 2**attempt)
                 if deadline_monotonic is not None:
                     dl_remaining = deadline_monotonic - time.monotonic()
@@ -135,6 +135,8 @@ class GraphQLClient:
 
                 rate_limit = (body.get("data") or {}).get("rateLimit") or {}
                 cost = rate_limit.get("cost", 0)
+                # Per-query cost check only — does not track cumulative run cost.
+                # Callers should aggregate rateLimit.cost across calls if a run budget is needed.
                 if cost > COST_ABORT_THRESHOLD:
                     raise CostBudgetExceeded(
                         f"query cost {cost} exceeds abort threshold {COST_ABORT_THRESHOLD}"
@@ -165,7 +167,15 @@ class GraphQLClient:
                 return body
 
             if resp.status_code in (403, 429):
-                if "secondary rate limit" in resp.text.lower():
+                is_secondary = "secondary rate limit" in resp.text.lower()
+                try:
+                    has_retry_after = "retry-after" in resp.headers
+                    is_primary_exhausted = int(resp.headers.get("x-ratelimit-remaining", 1)) == 0
+                except (ValueError, KeyError):
+                    has_retry_after = False
+                    is_primary_exhausted = False
+
+                if is_secondary or has_retry_after or is_primary_exhausted:
                     try:
                         retry_after = int(resp.headers.get("retry-after", 60))
                     except ValueError:
@@ -242,17 +252,18 @@ class GraphQLClient:
         nodes: list[dict] = []
         _completed = False
         last_cursor: str | None = None  # last successfully fetched endCursor
-        last_body: dict | None = None   # last response body from execute()
+        pages_advanced = 0
+        path_traversal_failed = False
 
         try:
             while True:
-                last_body = self.execute(query, variables, deadline_monotonic=deadline_monotonic)
+                body = self.execute(query, variables, deadline_monotonic=deadline_monotonic)
 
                 try:
-                    page_info: dict = last_body
+                    page_info: dict = body
                     for key in page_info_path:
                         page_info = page_info[key]
-                    current_nodes: list[dict] = last_body
+                    current_nodes: list[dict] = body
                     for key in nodes_path:
                         current_nodes = current_nodes[key]
                     if not isinstance(current_nodes, list):
@@ -261,9 +272,11 @@ class GraphQLClient:
                         raise TypeError(f"page_info_path resolved to {type(page_info).__name__}, expected dict")
                 except (KeyError, TypeError) as e:
                     print(f"WARNING: paginate path traversal failed: {e}", file=sys.stderr)
+                    path_traversal_failed = True
                     break  # _completed stays False
 
                 nodes.extend(current_nodes)
+                pages_advanced += 1
 
                 end_cursor = page_info.get("endCursor")
                 if end_cursor:
@@ -278,7 +291,7 @@ class GraphQLClient:
 
                 variables[cursor_var] = end_cursor
 
-        except (RunDeadlineExceeded, RetriesExhausted, CostBudgetExceeded):
+        except (RunDeadlineExceeded, RetriesExhausted, CostBudgetExceeded, RuntimeError):
             # Interrupted — save cursor so next run resumes instead of restarting from page 1
             if use_checkpoint and last_cursor:
                 try:
@@ -295,21 +308,25 @@ class GraphQLClient:
 
         if use_checkpoint:
             if _completed:
-                # Clean completion — remove checkpoint
-                with db_conn:
-                    db_conn.execute(
-                        "DELETE FROM pagination_state WHERE org=? AND repo=? AND field=?",
-                        (org, repo, effective_field),
-                    )
-            else:
-                # Broke out without completing — check if last response had errors (bad cursor)
-                # Delete checkpoint to prevent infinite loop on next resume
-                last_errors = (last_body or {}).get("errors") if last_body else None
-                if last_errors:
+                # Clean completion — delete checkpoint
+                try:
                     with db_conn:
                         db_conn.execute(
                             "DELETE FROM pagination_state WHERE org=? AND repo=? AND field=?",
                             (org, repo, effective_field),
                         )
+                except Exception as db_err:
+                    print(f"WARNING: could not clear pagination checkpoint: {db_err}", file=sys.stderr)
+            elif path_traversal_failed and pages_advanced == 0:
+                # Failed on first page — bad initial cursor; delete to prevent infinite resume loop
+                try:
+                    with db_conn:
+                        db_conn.execute(
+                            "DELETE FROM pagination_state WHERE org=? AND repo=? AND field=?",
+                            (org, repo, effective_field),
+                        )
+                except Exception as db_err:
+                    print(f"WARNING: could not clear pagination checkpoint: {db_err}", file=sys.stderr)
+            # All other cases: preserve checkpoint for next-run resume
 
         return nodes
