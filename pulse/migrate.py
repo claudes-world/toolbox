@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
 import shutil
 import sqlite3
 from datetime import datetime, timezone
@@ -105,10 +107,13 @@ def run_migration(db_path: Path) -> str:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         backup_path = db_path.parent / f"pulse.db.pre-v1-{ts}"
 
+        # Create backup file with 0o600 from the start (atomic, no world-readable window)
+        backup_fd = os.open(str(backup_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(backup_fd)
         # Fix 5: SQLite-safe backup using built-in backup API (handles WAL mode correctly)
-        with sqlite3.connect(str(backup_path)) as backup_conn:
+        # Fix 3: contextlib.closing() ensures backup_conn is closed even if backup() raises
+        with contextlib.closing(sqlite3.connect(str(backup_path))) as backup_conn:
             conn.backup(backup_conn)
-        backup_path.chmod(0o600)
 
         # Fix 3: IF NOT EXISTS guards for ALTER TABLE
         # SQLite ALTER TABLE autocommits — with conn: does NOT roll back DDL.
