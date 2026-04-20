@@ -125,11 +125,13 @@ CONTEXT_WINDOW="$DEFAULT_CONTEXT_WINDOW"
 # the script only scaled to 1M after used > 200k, which meant a 1M-capable
 # session at 185k input tokens (18% actual usage) was reported as "92%"
 # (185k/200k) and triggered false pre-compact panic advisories. Pattern
-# covers opus/sonnet 4.6+ (all currently 1M) plus explicit "[1m]" tag and
-# "-1m" suffixes. Haiku is NOT 1M and must not match. Update the 4-[6-9]
-# range whenever a new major opus/sonnet version ships.
+# covers all opus/sonnet 4.x releases from 4.6 onward (all currently 1M)
+# plus explicit "[1m]" tag and "-1m" suffixes. Haiku is NOT 1M and must
+# not match (no "opus-"/"sonnet-" prefix). The 4-[6-9] match is paired
+# with 4-[1-9][0-9] so 4.10+ stays on 1M without silent regression —
+# bash char-class globs don't span 10+ without the second alternative.
 case "$MODEL" in
-  *opus-4-[6-9]*|*sonnet-4-[6-9]*|*\[1m\]*|*-1m|*-1m-*)
+  *opus-4-[6-9]*|*opus-4-[1-9][0-9]*|*sonnet-4-[6-9]*|*sonnet-4-[1-9][0-9]*|*\[1m\]*|*-1m|*-1m-*)
     CONTEXT_WINDOW="$EXTENDED_CONTEXT_WINDOW"
     ;;
 esac
