@@ -1,0 +1,146 @@
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import tempfile
+from pathlib import Path
+
+
+class DBCorrupt(Exception):
+    """Raised when SQLite integrity_check fails."""
+
+
+def open_db(path: Path) -> sqlite3.Connection:
+    """Open (or create) the SQLite database at path with WAL mode and integrity check."""
+    conn = sqlite3.connect(str(path), timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+
+    rows = conn.execute("PRAGMA integrity_check").fetchall()
+    # Row objects: compare via tuple unpacking
+    row_values = [tuple(r) for r in rows]
+    if row_values != [("ok",)]:
+        raise DBCorrupt(f"integrity_check failed: {row_values}")
+
+    create_schema(conn)
+    return conn
+
+
+def create_schema(conn: sqlite3.Connection) -> None:
+    """Create all pulse tables if they do not exist."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS snapshots (
+            id TEXT PRIMARY KEY,
+            captured_at_utc TEXT NOT NULL,
+            captured_at_et TEXT NOT NULL,
+            duration_ms INTEGER,
+            orgs_queried TEXT NOT NULL,
+            repos_succeeded INTEGER NOT NULL DEFAULT 0,
+            repos_failed INTEGER NOT NULL DEFAULT 0,
+            repos_partial INTEGER NOT NULL DEFAULT 0,
+            schema_version TEXT NOT NULL DEFAULT '1.0',
+            capture_status TEXT NOT NULL DEFAULT 'success'
+        );
+
+        CREATE TABLE IF NOT EXISTS repos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_id TEXT NOT NULL REFERENCES snapshots(id),
+            org TEXT NOT NULL,
+            name TEXT NOT NULL,
+            default_branch TEXT,
+            is_fork INTEGER NOT NULL DEFAULT 0,
+            is_archived INTEGER NOT NULL DEFAULT 0,
+            parent_owner TEXT,
+            parent_name TEXT,
+            parent_is_deleted INTEGER NOT NULL DEFAULT 0,
+            capture_status TEXT NOT NULL DEFAULT 'success',
+            field_statuses TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS prs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repo_id INTEGER NOT NULL REFERENCES repos(id),
+            number INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            author TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            is_draft INTEGER NOT NULL DEFAULT 0,
+            is_dependabot INTEGER NOT NULL DEFAULT 0,
+            is_renovate INTEGER NOT NULL DEFAULT 0,
+            hours_idle REAL,
+            stalled INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS issues (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repo_id INTEGER NOT NULL REFERENCES repos(id),
+            number INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            author TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            labels TEXT,
+            hours_idle REAL,
+            stalled INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS releases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repo_id INTEGER NOT NULL REFERENCES repos(id),
+            tag_name TEXT NOT NULL,
+            name TEXT,
+            created_at TEXT,
+            is_prerelease INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repo_id INTEGER NOT NULL REFERENCES repos(id),
+            severity TEXT,
+            ghsa_id TEXT,
+            package_name TEXT,
+            ecosystem TEXT,
+            age_days INTEGER,
+            dependabot_pr_number INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS pagination_state (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repo TEXT NOT NULL,
+            field TEXT NOT NULL,
+            last_cursor TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            UNIQUE(repo, field)
+        );
+    """)
+    conn.commit()
+
+
+def atomic_write_json(path: Path, data: dict) -> None:
+    """Write data as JSON to path atomically (crash-safe). Sets permissions to 0o600."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        # fsync parent directory to persist the rename
+        dir_fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+        os.chmod(path, 0o600)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
