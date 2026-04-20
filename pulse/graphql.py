@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import time
 from collections.abc import Callable
+from datetime import datetime, timezone
 
 import httpx
 
@@ -21,6 +22,27 @@ DEFAULT_DEADLINE_SEC = int(os.environ.get("PULSE_RUN_DEADLINE_SEC", "1200"))
 TIMELINE_COST_WARN = 100
 # Cumulative budget guard: warn + skip remaining timeline fetches above this point
 TIMELINE_CUMULATIVE_WARN = 4500
+
+VULN_ALERTS_QUERY = """
+query($owner: String!, $name: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    vulnerabilityAlerts(first: 100, after: $cursor, states: OPEN) {
+      totalCount
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        securityVulnerability {
+          severity
+          package { name ecosystem }
+          advisory { ghsaId publishedAt }
+        }
+        dependabotUpdate { pullRequest { number updatedAt } }
+        createdAt
+      }
+    }
+  }
+  rateLimit { cost remaining }
+}
+"""
 
 PR_TIMELINE_QUERY = """
 query($prId: ID!, $cursor: String) {
@@ -73,6 +95,11 @@ class CostBudgetExceeded(Exception):
 
 class PRNodeNotFound(Exception):
     """Raised when a PR node_id is not found on GitHub (data.node=null)."""
+    pass
+
+
+class ScopeMissing(Exception):
+    """Raised when the GitHub token lacks required scopes (e.g. security_events)."""
     pass
 
 
@@ -318,8 +345,8 @@ class GraphQLClient:
                 if on_page_response is not None:
                     try:
                         on_page_response(body)
-                    except PRNodeNotFound:
-                        raise  # null-node sentinel: stop pagination immediately
+                    except (PRNodeNotFound, ScopeMissing):
+                        raise  # sentinel exceptions: stop pagination immediately
                     except Exception:
                         pass  # other callback failures must not interrupt pagination
 
@@ -355,7 +382,7 @@ class GraphQLClient:
 
                 variables[cursor_var] = end_cursor
 
-        except (RunDeadlineExceeded, RetriesExhausted, CostBudgetExceeded, RuntimeError, PRNodeNotFound):
+        except (RunDeadlineExceeded, RetriesExhausted, CostBudgetExceeded, RuntimeError, PRNodeNotFound, ScopeMissing):
             # Interrupted — save cursor so next run resumes instead of restarting from page 1
             if use_checkpoint and last_cursor:
                 try:
@@ -473,4 +500,99 @@ class GraphQLClient:
             )
 
         return nodes
+
+    @staticmethod
+    def _node_to_vuln_alert(node: dict) -> "VulnerabilityAlert":
+        from pulse.schema import VulnerabilityAlert
+        vuln = node["securityVulnerability"]
+        published = vuln["advisory"]["publishedAt"]  # ISO-8601
+        age_days = (
+            datetime.now(timezone.utc)
+            - datetime.fromisoformat(published.replace("Z", "+00:00"))
+        ).days
+        dep_pr = None
+        if node.get("dependabotUpdate") and node["dependabotUpdate"].get("pullRequest"):
+            dep_pr = node["dependabotUpdate"]["pullRequest"]["number"]
+        return VulnerabilityAlert(
+            severity=vuln["severity"],
+            ghsa_id=vuln["advisory"]["ghsaId"],
+            package_name=vuln["package"]["name"],
+            ecosystem=vuln["package"]["ecosystem"],
+            age_days=age_days,
+            dependabot_pr_number=dep_pr,
+        )
+
+    def fetch_vuln_alerts(
+        self,
+        owner: str,
+        name: str,
+        cumulative_cost: list[int] | None = None,
+    ) -> list["VulnerabilityAlert"]:
+        """Fetch all open vulnerability alerts for a repo, paginating if needed.
+
+        Returns list of VulnerabilityAlert objects, deduped by (ghsa_id, package_name).
+        Raises ScopeMissing if token lacks security_events scope.
+        Raises CostBudgetExceeded if cumulative cost gate fires before first fetch.
+        """
+        from pulse.schema import VulnerabilityAlert
+
+        # Pre-fetch gate: skip if already over budget (same pattern as fetch_pr_timeline)
+        if cumulative_cost is not None and cumulative_cost[0] >= TIMELINE_CUMULATIVE_WARN:
+            raise CostBudgetExceeded(
+                f"cumulative cost {cumulative_cost[0]} already >= {TIMELINE_CUMULATIVE_WARN}; "
+                "skipping vuln alerts fetch for this run"
+            )
+
+        accumulated_cost = [0]
+
+        def _on_page(resp: dict) -> None:
+            data = resp.get("data") or {}
+            rate = data.get("rateLimit") or {}
+            page_cost = rate.get("cost", 0)
+            accumulated_cost[0] += page_cost
+            remaining = rate.get("remaining")
+            if remaining is not None and remaining < 100:
+                logger.warning(
+                    "GitHub rate limit remaining=%d — approaching limit", remaining
+                )
+            # Raise ScopeMissing directly — paginate() re-raises it (same as PRNodeNotFound).
+            errors = resp.get("errors") or []
+            for err in errors:
+                if err.get("type") == "INSUFFICIENT_SCOPES":
+                    raise ScopeMissing(
+                        f"Token lacks required scope for vulnerabilityAlerts: {err.get('message', '')}"
+                    )
+
+        try:
+            nodes = self.paginate(
+                query=VULN_ALERTS_QUERY,
+                variables={"owner": owner, "name": name, "cursor": None},
+                page_info_path=["data", "repository", "vulnerabilityAlerts", "pageInfo"],
+                nodes_path=["data", "repository", "vulnerabilityAlerts", "nodes"],
+                cursor_var="cursor",
+                on_page_response=_on_page,
+            )
+        except CostBudgetExceeded as e:
+            accumulated_cost[0] += getattr(e, "cost", 0)
+            raise
+        finally:
+            if cumulative_cost is not None:
+                cumulative_cost[0] += accumulated_cost[0]
+
+        # Convert nodes to VulnerabilityAlert, dedup by (ghsa_id, package_name)
+        seen: set[tuple[str, str]] = set()
+        alerts: list[VulnerabilityAlert] = []
+        for node in nodes:
+            try:
+                alert = self._node_to_vuln_alert(node)
+            except (KeyError, TypeError) as e:
+                logger.warning("Failed to parse vuln alert node: %s", e)
+                continue
+            key = (alert.ghsa_id, alert.package_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            alerts.append(alert)
+
+        return alerts
 
