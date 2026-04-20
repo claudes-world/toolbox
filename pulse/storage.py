@@ -48,12 +48,17 @@ def open_db(path: Path) -> sqlite3.Connection:
                 raise DBSetupError(f"cannot set permissions on {path}: {e}") from e
         conn = sqlite3.connect(str(path), timeout=5.0)
         conn.row_factory = sqlite3.Row
+    except DBSetupError:
+        raise
     except Exception as e:
         raise DBSetupError(f"cannot open database at {path}: {e}") from e
 
     # Stage 2: detect corrupt file — first execute triggers SQLite's lazy file validation.
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
+        row = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+        if row is None or row[0].lower() != "wal":
+            conn.close()
+            raise DBSetupError(f"failed to enable WAL mode (got: {row[0] if row else 'None'})")
     except sqlite3.OperationalError as e:
         conn.close()
         msg = str(e).lower()
