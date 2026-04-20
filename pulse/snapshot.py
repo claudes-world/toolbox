@@ -112,9 +112,7 @@ def _capture_prs(
     max_prs: int,
     stall_hours: float,
     now: datetime,
-    db_conn: sqlite3.Connection,
     deadline: float | None,
-    fingerprint: str,
 ) -> tuple[list[PRData], FieldStatus]:
     try:
         # Single execute — max_prs <= 100 so fits in one page
@@ -167,9 +165,7 @@ def _capture_issues(
     max_issues: int,
     stall_hours: float,
     now: datetime,
-    db_conn: sqlite3.Connection,
     deadline: float | None,
-    fingerprint: str,
 ) -> tuple[list[IssueData], FieldStatus]:
     try:
         # Single execute — max_issues <= 100 so fits in one page
@@ -401,7 +397,7 @@ def _prune_old_snapshots(
     # Use SQLite datetime arithmetic for the cutoff
     with db_conn:
         db_conn.execute(
-            "DELETE FROM snapshots WHERE captured_at_utc < datetime(?, '-' || ? || ' days')",
+            "DELETE FROM snapshots WHERE datetime(captured_at_utc) < datetime(?, '-' || ? || ' days')",
             (cutoff_str, str(history_days)),
         )
 
@@ -574,13 +570,11 @@ def run_snapshot(
                 field_statuses={},
             )
 
-            fingerprint = snapshot_id  # use snapshot ID to avoid stale cursor reuse
-
             # Capture PRs
             prs, pr_status = _capture_prs(
                 gql, org_name, repo_name,
                 cfg.defaults.max_prs_per_repo, stall_pr_hours,
-                now_utc, db_conn, deadline, fingerprint,
+                now_utc, deadline,
             )
             repo.field_statuses["prs"] = pr_status
 
@@ -589,7 +583,7 @@ def run_snapshot(
                 issues, issue_status = _capture_issues(
                     gql, org_name, repo_name,
                     cfg.defaults.max_issues_per_repo, stall_issue_hours,
-                    now_utc, db_conn, deadline, fingerprint,
+                    now_utc, deadline,
                 )
                 repo.field_statuses["issues"] = issue_status
             else:
@@ -653,7 +647,7 @@ def run_snapshot(
         # prev.json = second-latest snapshot
         prev_row = db_conn.execute(
             "SELECT id FROM snapshots WHERE id != ? AND capture_status != 'in_progress'"
-            " ORDER BY captured_at_utc DESC LIMIT 1",
+            " ORDER BY id DESC LIMIT 1",
             (snapshot_id,),
         ).fetchone()
         if prev_row is not None:

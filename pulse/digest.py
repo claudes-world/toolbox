@@ -60,7 +60,7 @@ def atomic_write_text(path: Path, text: str) -> None:
 def _latest_snapshot(db_conn: sqlite3.Connection) -> sqlite3.Row | None:
     return db_conn.execute(
         "SELECT * FROM snapshots WHERE capture_status != 'in_progress'"
-        " ORDER BY captured_at_utc DESC LIMIT 1"
+        " ORDER BY id DESC LIMIT 1"
     ).fetchone()
 
 

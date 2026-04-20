@@ -177,7 +177,7 @@ def test_field_status_success():
     gql = MagicMock()
     gql.execute.return_value = _make_pr_body(total_count=1)
 
-    prs, status = _capture_prs(gql, "org", "repo", 30, 12.0, _now(), db, None, "snap")
+    prs, status = _capture_prs(gql, "org", "repo", 30, 12.0, _now(), None)
     assert status.status == "success"
     assert len(prs) == 1
 
@@ -201,7 +201,7 @@ def test_field_status_partial_prs():
     body["data"]["repository"]["pullRequests"]["nodes"] = nodes
     gql.execute.return_value = body
 
-    prs, status = _capture_prs(gql, "org", "repo", 30, 12.0, _now(), db, None, "snap")
+    prs, status = _capture_prs(gql, "org", "repo", 30, 12.0, _now(), None)
     assert status.status == "partial"
     assert "truncated" in (status.error_note or "")
     assert "47" in (status.error_note or "")
@@ -250,7 +250,7 @@ def test_field_status_failed():
     gql = MagicMock()
     gql.execute.side_effect = RuntimeError("network failure")
 
-    prs, status = _capture_prs(gql, "org", "repo", 30, 12.0, _now(), db, None, "snap")
+    prs, status = _capture_prs(gql, "org", "repo", 30, 12.0, _now(), None)
     assert status.status == "failed"
     assert "network failure" in (status.error_note or "")
     assert prs == []
@@ -335,14 +335,14 @@ def test_dependabot_author_pattern():
     for bot_login in DEPENDABOT_AUTHORS:
         gql = MagicMock()
         gql.execute.return_value = _make_pr_body(total_count=1, author=bot_login)
-        prs, _ = _capture_prs(gql, "org", "repo", 30, 12.0, _now(), db, None, "snap")
+        prs, _ = _capture_prs(gql, "org", "repo", 30, 12.0, _now(), None)
         assert prs[0].is_dependabot is True, f"Expected is_dependabot=True for {bot_login}"
         assert prs[0].is_renovate is False
 
     for bot_login in RENOVATE_AUTHORS:
         gql = MagicMock()
         gql.execute.return_value = _make_pr_body(total_count=1, author=bot_login)
-        prs, _ = _capture_prs(gql, "org", "repo", 30, 12.0, _now(), db, None, "snap")
+        prs, _ = _capture_prs(gql, "org", "repo", 30, 12.0, _now(), None)
         assert prs[0].is_renovate is True, f"Expected is_renovate=True for {bot_login}"
         assert prs[0].is_dependabot is False
 
@@ -359,7 +359,7 @@ def test_stall_detection():
     gql.execute.return_value = _make_pr_body(total_count=1, updated_at=updated_at)
 
     now = datetime.now(timezone.utc)
-    prs, _ = _capture_prs(gql, "org", "repo", 30, 12.0, now, db, None, "snap")
+    prs, _ = _capture_prs(gql, "org", "repo", 30, 12.0, now, None)
     assert len(prs) == 1
     assert prs[0].stalled is True
     assert prs[0].hours_idle is not None

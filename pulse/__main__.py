@@ -41,6 +41,7 @@ def main(ctx: click.Context, config_check: bool, self_check: bool, run_now: bool
         _run_digest()
     elif ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
+        sys.exit(1)
 
 
 def _run_config_check() -> None:
@@ -116,7 +117,7 @@ def _run_now() -> None:
 
     config_path = _DEFAULT_CONFIG_PATH
     db_path = _DEFAULT_DB_PATH
-    output_dir = db_path.parent
+    output_dir = db_path.parent / "snapshots"
 
     try:
         cfg = load_config(config_path)
