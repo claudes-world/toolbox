@@ -30,7 +30,7 @@ class PulseLock:
 
     - ``pulse --now`` (manual / ad-hoc): acquires PulseLock directly. No external
       flock(1) wrapper involved.
-    - bare ``pulse`` (systemd service path via ExecStart): wrapped by external
+    - ``pulse --service`` (systemd service path via ExecStart): wrapped by external
       ``flock -n`` in the unit's ExecStart line. The service calls
       ``_run_now_no_lock()`` internally, deliberately skipping PulseLock so
       there is no double-lock within the same process.

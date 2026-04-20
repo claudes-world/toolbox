@@ -231,7 +231,7 @@ def _run_self_check() -> None:
                     if cfg is None:
                         click.echo("[WARN] token: fine-grained token detected but config load failed — cannot probe scopes", err=True)
                     elif not cfg.orgs:
-                        click.echo("[WARN] token: fine-grained token — cannot verify scopes without configured orgs in config.yml")
+                        click.echo("[WARN] token: fine-grained token — cannot verify scopes without configured orgs in config.yml", err=True)
                     else:
                         first_org = next(iter(cfg.orgs))
                         probe_resp = httpx.post(

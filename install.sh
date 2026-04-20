@@ -45,6 +45,7 @@ while IFS='=' read -r key val; do
     key="${key%%[[:space:]]*}"  # strip trailing spaces from key
     val="${val#\"}"             # strip optional leading quote
     val="${val%\"}"             # strip optional trailing quote
+    val="${val%[[:space:]]*}"   # strip trailing whitespace
     export "$key"="$val"
 done < "$HOME/.world/pulse/env"
 if ! "$HOME/code/toolbox/bin/pulse" --self-check; then
