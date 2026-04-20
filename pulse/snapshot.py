@@ -80,6 +80,7 @@ query($org: String!, $repo: String!, $first: Int!) {
   rateLimit { cost remaining resetAt used }
   repository(owner: $org, name: $repo) {
     releases(first: $first, orderBy: {field: CREATED_AT, direction: DESC}) {
+      totalCount
       nodes {
         tagName name createdAt isPrerelease
       }
@@ -115,23 +116,28 @@ def _capture_prs(
     deadline: float | None,
 ) -> tuple[list[PRData], FieldStatus]:
     try:
-        # Single execute — max_prs <= 100 so fits in one page
+        # Single execute — clamp to 100 (GraphQL page limit)
+        actual_first = min(max_prs, 100)
         body = gql.execute(
             PRS_QUERY,
-            {"org": org, "repo": repo_name, "first": min(max_prs, 100), "cursor": None},
+            {"org": org, "repo": repo_name, "first": actual_first, "cursor": None},
             deadline_monotonic=deadline,
         )
         if body.get("data") is None:
             errors = body.get("errors") or []
             note = errors[0].get("message", "repository returned null data") if errors else "repository returned null data"
             return [], FieldStatus(status="failed", error_note=note[:200])
-        repo_data = (body.get("data") or {}).get("repository") or {}
+        repo_data = (body.get("data") or {}).get("repository")
+        if repo_data is None:
+            errors = body.get("errors") or []
+            note = errors[0].get("message", "repository not found") if errors else "repository not found"
+            return [], FieldStatus(status="failed", error_note=note[:200])
         pr_conn = repo_data.get("pullRequests") or {}
         total_count = pr_conn.get("totalCount", 0)
         nodes = pr_conn.get("nodes") or []
 
         field_status = FieldStatus(status="success")
-        if total_count > max_prs:
+        if total_count > actual_first:
             field_status = FieldStatus(
                 status="partial",
                 error_note=f"truncated, {total_count} total, fetched {len(nodes)}",
@@ -172,23 +178,28 @@ def _capture_issues(
     deadline: float | None,
 ) -> tuple[list[IssueData], FieldStatus]:
     try:
-        # Single execute — max_issues <= 100 so fits in one page
+        # Single execute — clamp to 100 (GraphQL page limit)
+        actual_first = min(max_issues, 100)
         body = gql.execute(
             ISSUES_QUERY,
-            {"org": org, "repo": repo_name, "first": min(max_issues, 100), "cursor": None},
+            {"org": org, "repo": repo_name, "first": actual_first, "cursor": None},
             deadline_monotonic=deadline,
         )
         if body.get("data") is None:
             errors = body.get("errors") or []
             note = errors[0].get("message", "repository returned null data") if errors else "repository returned null data"
             return [], FieldStatus(status="failed", error_note=note[:200])
-        repo_data = (body.get("data") or {}).get("repository") or {}
+        repo_data = (body.get("data") or {}).get("repository")
+        if repo_data is None:
+            errors = body.get("errors") or []
+            note = errors[0].get("message", "repository not found") if errors else "repository not found"
+            return [], FieldStatus(status="failed", error_note=note[:200])
         issue_conn = repo_data.get("issues") or {}
         total_count = issue_conn.get("totalCount", 0)
         nodes = issue_conn.get("nodes") or []
 
         field_status = FieldStatus(status="success")
-        if total_count > max_issues:
+        if total_count > actual_first:
             field_status = FieldStatus(
                 status="partial",
                 error_note=f"truncated, {total_count} total, fetched {len(nodes)}",
@@ -227,17 +238,32 @@ def _capture_releases(
     deadline: float | None,
 ) -> tuple[list[ReleaseData], FieldStatus]:
     try:
+        actual_first = min(max_releases, 100)
         body = gql.execute(
             RELEASES_QUERY,
-            variables={"org": org, "repo": repo_name, "first": max_releases},
+            variables={"org": org, "repo": repo_name, "first": actual_first},
             deadline_monotonic=deadline,
         )
-        nodes = (
-            (body.get("data") or {})
-            .get("repository", {})
-            .get("releases", {})
-            .get("nodes") or []
-        )
+        if body.get("data") is None:
+            errors = body.get("errors") or []
+            note = errors[0].get("message", "repository returned null data") if errors else "repository returned null data"
+            return [], FieldStatus(status="failed", error_note=note[:200])
+        repo_data = (body.get("data") or {}).get("repository")
+        if repo_data is None:
+            errors = body.get("errors") or []
+            note = errors[0].get("message", "repository not found") if errors else "repository not found"
+            return [], FieldStatus(status="failed", error_note=note[:200])
+        release_conn = repo_data.get("releases") or {}
+        total_count = release_conn.get("totalCount", 0)
+        nodes = release_conn.get("nodes") or []
+
+        field_status = FieldStatus(status="success")
+        if total_count > actual_first:
+            field_status = FieldStatus(
+                status="partial",
+                error_note=f"truncated, {total_count} total, fetched {len(nodes)}",
+            )
+
         releases = [
             ReleaseData(
                 tag_name=n.get("tagName", ""),
@@ -247,7 +273,7 @@ def _capture_releases(
             )
             for n in nodes
         ]
-        return releases, FieldStatus(status="success")
+        return releases, field_status
     except Exception as e:
         return [], FieldStatus(status="failed", error_note=str(e)[:200])
 
