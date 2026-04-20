@@ -26,6 +26,11 @@ def open_db(path: Path) -> sqlite3.Connection:
         path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(path), timeout=5.0)
         conn.row_factory = sqlite3.Row
+        # Ensure DB file is 0o600 regardless of process umask
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass  # non-fatal: VPS is single-user, best-effort
     except Exception as e:
         raise DBSetupError(f"cannot open database at {path}: {e}") from e
 
@@ -151,13 +156,14 @@ def create_schema(conn: sqlite3.Connection) -> None:
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS pagination_state (
-                -- repo is TEXT (not FK) so pagination state survives snapshot deletion/pruning
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                org TEXT NOT NULL,
                 repo TEXT NOT NULL,
                 field TEXT NOT NULL,
                 last_cursor TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
-                UNIQUE(repo, field)
+                UNIQUE(org, repo, field)
+                -- repo is TEXT (not FK) so pagination state survives snapshot deletion/pruning
             )
         """)
 
