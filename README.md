@@ -12,6 +12,7 @@ All tools use a shared Python venv at `~/venvs/transcribe/` and are symlinked in
 | [speak](#speak) | Text-to-speech with OpenAI, Google, or ElevenLabs |
 | [md-speak](#md-speak) | Read markdown documents aloud with multiple voices |
 | [voice-hook](#voice-hook) | Claude Code hook: auto-transcribe Telegram voice notes |
+| [pulse](#pulse) | GitHub org activity snapshots — open PRs, issues, releases, Dependabot |
 
 ---
 
@@ -113,6 +114,46 @@ md-speak --no-describe document.md      # skip AI descriptions
 - `md-speak/md-speak` — main script
 
 **Cost:** Free for most usage (Google's 1M WaveNet chars/month free tier)
+
+---
+
+### pulse
+
+CLI tool for snapshotting GitHub org activity. Queries open PRs, issues, releases, and Dependabot PR counts across all repos in configured orgs. Stores rolling 7-day history in SQLite; exports JSON + markdown digest.
+
+**Setup:**
+- `GH_TOKEN` in `~/.world/pulse/env` (chmod 600). Token needs `repo`, `read:org` scopes.
+- `~/.world/pulse/config.yml` — see `pulse/` package for schema. Create with:
+  ```yaml
+  schema_version: "1.0"
+  orgs:
+    claudes-world:
+      ignore: []
+  defaults:
+    stall_pr_hours: 12
+    stall_issue_hours: 72
+    history_days: 7
+    cadence_minutes: 30
+    github_api_base: "https://api.github.com"
+    max_prs_per_repo: 30
+    max_issues_per_repo: 50
+    max_releases_per_repo: 10
+  ```
+- Install: `pip install -e ~/code/toolbox/` (installs `pulse` CLI entry point)
+
+**Usage:**
+```
+pulse --config-check          # validate config + print effective config
+pulse --self-check            # config + storage + writability health check
+pulse --version
+```
+
+**Files:**
+- `pulse/` — Python package (config, storage, ipv4 patch)
+- `bin/pulse` — executable entry point
+- `tests/test_config.py`, `tests/test_storage.py` — unit tests
+
+**Cost:** No paid API calls in scaffold phase. GraphQL queries use GitHub PAT (free tier).
 
 ---
 
