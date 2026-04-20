@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 
@@ -9,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from pulse.config import PulseConfig
-from pulse.graphql import CostBudgetExceeded, GraphQLClient, TIMELINE_CUMULATIVE_WARN
+from pulse.graphql import CostBudgetExceeded, GraphQLClient, PRNodeNotFound, TIMELINE_CUMULATIVE_WARN
 from pulse.schema import FieldStatus, IssueData, PRData, ReleaseData, RepoData, ReviewEvent
 from pulse.storage import atomic_write_json
 
@@ -317,6 +318,7 @@ def _capture_pr_timelines(
     """
     budget_exceeded = False
     any_failure = False
+    skipped_no_node_id = 0
 
     for pr in prs:
         if budget_exceeded:
@@ -325,6 +327,7 @@ def _capture_pr_timelines(
 
         if not pr.node_id:
             # No node_id available — skip silently
+            skipped_no_node_id += 1
             continue
 
         try:
@@ -353,6 +356,10 @@ def _capture_pr_timelines(
                     (review_json, repo_id, pr.number),
                 )
 
+        except PRNodeNotFound:
+            # Node not found on GitHub — leave review_events NULL silently (not a failure)
+            pass
+
         except CostBudgetExceeded as e:
             import sys as _sys
             print(f"WARNING: {e} — skipping remaining PR timelines", file=_sys.stderr)
@@ -373,6 +380,12 @@ def _capture_pr_timelines(
                     status="partial",
                     error_note=f"timeline capture failed for PR #{pr.number}: {str(e)[:100]}",
                 )
+
+    if skipped_no_node_id == len(prs) and prs:
+        logging.getLogger(__name__).warning(
+            "All %d PRs for repo_id=%s lack node_id; timeline capture skipped entirely",
+            len(prs), repo_id,
+        )
 
     if budget_exceeded:
         repo.field_statuses["review_events"] = FieldStatus(

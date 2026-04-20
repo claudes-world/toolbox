@@ -16,14 +16,17 @@ from pulse.storage import create_schema
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _make_v0_db(path: Path) -> None:
-    """Create a v0 pulse DB at path.
+    """Create a v0 pulse DB at path (user_version=10).
 
-    create_schema() now sets user_version=10 internally, so no manual PRAGMA needed.
+    create_schema() stamps user_version=11 for fresh installs; we downgrade to 10
+    here to simulate a real v0 database that predates the v1 migration.
     """
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     create_schema(conn)
+    # Downgrade to v0 stamp so run_migration sees it as needing migration
+    conn.execute("PRAGMA user_version = 10")
     conn.close()
     path.chmod(0o600)
 

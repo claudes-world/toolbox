@@ -4,6 +4,7 @@ import os
 import sqlite3
 import sys
 import time
+from collections.abc import Callable
 
 import httpx
 
@@ -62,6 +63,11 @@ class RunDeadlineExceeded(Exception):
 
 
 class CostBudgetExceeded(Exception):
+    pass
+
+
+class PRNodeNotFound(Exception):
+    """Raised when a PR node_id is not found on GitHub (data.node=null)."""
     pass
 
 
@@ -264,6 +270,7 @@ class GraphQLClient:
         field: str = "",
         cursor_var: str = "cursor",
         fingerprint: str = "",
+        on_page_response: Callable[[dict], None] | None = None,
     ) -> list[dict]:
         """Walk a paginated GraphQL connection, returning all collected nodes.
 
@@ -301,6 +308,12 @@ class GraphQLClient:
         try:
             while True:
                 body = self.execute(query, variables, deadline_monotonic=deadline_monotonic)
+
+                if on_page_response is not None:
+                    try:
+                        on_page_response(body)
+                    except Exception:
+                        pass  # callback failure must not interrupt pagination
 
                 try:
                     page_info: dict = body
@@ -390,6 +403,21 @@ class GraphQLClient:
         cumulative_cost: caller-supplied single-element list used as a mutable
         integer accumulator. Pass [0] to enable cross-PR cost tracking.
         """
+        accumulated_cost = [0]
+        last_remaining = [5000]
+        node_not_found = [False]
+
+        def _on_page(resp: dict) -> None:
+            data = resp.get("data") or {}
+            if data.get("node") is None and "node" in data:
+                node_not_found[0] = True
+            rate = data.get("rateLimit") or {}
+            page_cost = rate.get("cost", 0)
+            accumulated_cost[0] += page_cost
+            remaining = rate.get("remaining")
+            if remaining is not None:
+                last_remaining[0] = remaining
+
         nodes = self.paginate(
             query=PR_TIMELINE_QUERY,
             variables={"prId": pr_node_id, "cursor": None},
@@ -397,47 +425,31 @@ class GraphQLClient:
             nodes_path=["data", "node", "timelineItems", "nodes"],
             deadline_monotonic=deadline_monotonic,
             cursor_var="cursor",
+            on_page_response=_on_page,
         )
 
-        # Track cumulative cost from the last response (rateLimit is in each page body).
-        # We re-execute a small extra call to get cost when paginate() completes. Instead,
-        # we track it inline by wrapping execute(). Since paginate() already called execute(),
-        # we piggyback cost via a separate last-query cost read. For simplicity, we call
-        # a single extra non-paginated query only if cumulative tracking is requested.
-        # Actually: paginate() calls execute() which already logs cost per call. We track
-        # cumulative by reading rateLimit from each response. Since paginate() abstracts
-        # execute(), we do one more execute() call here only for cost — wasteful. Better:
-        # pass a cost callback. For now, use a single post-paginate cost probe only when
-        # cumulative_cost is provided.
+        if node_not_found[0]:
+            raise PRNodeNotFound(f"PR node_id not found on GitHub: {pr_node_id}")
+
         if cumulative_cost is not None:
-            try:
-                probe = self.execute(
-                    "query { rateLimit { cost remaining } }",
-                    deadline_monotonic=deadline_monotonic,
+            cost = accumulated_cost[0]
+            remaining = last_remaining[0]
+            cumulative_cost[0] += cost
+            if cost > TIMELINE_COST_WARN:
+                print(
+                    f"WARNING: timeline query cost {cost} exceeds threshold {TIMELINE_COST_WARN}",
+                    file=sys.stderr,
                 )
-                rate = (probe.get("data") or {}).get("rateLimit") or {}
-                cost = rate.get("cost", 1)
-                remaining = rate.get("remaining", 5000)
-                cumulative_cost[0] += cost
-                if cost > TIMELINE_COST_WARN:
-                    print(
-                        f"WARNING: timeline query cost {cost} exceeds threshold {TIMELINE_COST_WARN}",
-                        file=sys.stderr,
-                    )
-                if remaining < 100:
-                    print(
-                        f"CRITICAL: rateLimit.remaining={remaining} — approaching rate limit",
-                        file=sys.stderr,
-                    )
-                if cumulative_cost[0] >= TIMELINE_CUMULATIVE_WARN:
-                    raise CostBudgetExceeded(
-                        f"cumulative timeline cost {cumulative_cost[0]} >= {TIMELINE_CUMULATIVE_WARN}; "
-                        "skipping remaining timeline fetches for this run"
-                    )
-            except CostBudgetExceeded:
-                raise
-            except Exception:
-                pass  # cost tracking failure is non-fatal
+            if remaining < 100:
+                print(
+                    f"CRITICAL: rateLimit.remaining={remaining} — approaching rate limit",
+                    file=sys.stderr,
+                )
+            if cumulative_cost[0] >= TIMELINE_CUMULATIVE_WARN:
+                raise CostBudgetExceeded(
+                    f"cumulative timeline cost {cumulative_cost[0]} >= {TIMELINE_CUMULATIVE_WARN}; "
+                    "skipping remaining timeline fetches for this run"
+                )
 
         return nodes
 
