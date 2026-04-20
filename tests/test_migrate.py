@@ -16,12 +16,26 @@ from pulse.storage import create_schema
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _make_v0_db(path: Path) -> None:
-    """Create a v0 pulse DB at path with user_version=10."""
+    """Create a v0 pulse DB at path.
+
+    create_schema() now sets user_version=10 internally, so no manual PRAGMA needed.
+    """
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     create_schema(conn)
-    conn.execute(f"PRAGMA user_version = {_V0_USER_VERSION}")
+    conn.close()
+    path.chmod(0o600)
+
+
+def _make_unversioned_v0_db(path: Path) -> None:
+    """Create a v0 pulse DB with user_version=0 (pre-storage.py-fix production DBs)."""
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    create_schema(conn)
+    # Explicitly reset user_version to 0 to simulate pre-fix DB
+    conn.execute("PRAGMA user_version = 0")
     conn.close()
     path.chmod(0o600)
 
@@ -83,7 +97,7 @@ def test_migration_disk_full(tmp_path: Path) -> None:
     # Report effectively zero free space
     fake_usage = shutil._ntuple_diskusage(real_usage.total, real_usage.used, 0)  # type: ignore[attr-defined]
 
-    with patch("shutil.disk_usage", return_value=fake_usage):
+    with patch("pulse.migrate.shutil.disk_usage", return_value=fake_usage):
         with pytest.raises(RuntimeError, match="Insufficient disk space"):
             run_migration(db)
 
@@ -198,3 +212,55 @@ def test_migration_v0_data_still_queryable(tmp_path: Path) -> None:
         assert conn.execute("SELECT COUNT(*) FROM releases").fetchone()[0] == 1
     finally:
         conn.close()
+
+
+def test_migration_user_version_0_works(tmp_path: Path) -> None:
+    """Unversioned v0 DB (user_version=0) → migration still succeeds."""
+    db = tmp_path / "pulse.db"
+    _make_unversioned_v0_db(db)
+
+    # Confirm it's truly user_version=0
+    conn = sqlite3.connect(str(db))
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
+    conn.close()
+
+    result = run_migration(db)
+    assert result == "migrated"
+
+    conn = sqlite3.connect(str(db))
+    try:
+        assert _V1_USER_VERSION == conn.execute("PRAGMA user_version").fetchone()[0]
+        assert "upstream" in _column_names(conn, "repos")
+        assert "review_events" in _column_names(conn, "prs")
+    finally:
+        conn.close()
+
+
+def test_migration_missing_db_raises(tmp_path: Path) -> None:
+    """Migration on a non-existent pulse.db raises RuntimeError with clear message."""
+    db = tmp_path / "pulse.db"
+    assert not db.exists()
+
+    with pytest.raises(RuntimeError, match="pulse.db not found"):
+        run_migration(db)
+
+
+def test_migration_disk_space_includes_wal(tmp_path: Path) -> None:
+    """Disk-space check accounts for WAL + SHM file sizes."""
+    db = tmp_path / "pulse.db"
+    _make_v0_db(db)
+
+    # Create fake WAL and SHM files to inflate total_size
+    wal = db.with_suffix(db.suffix + "-wal")
+    shm = db.with_suffix(db.suffix + "-shm")
+    wal.write_bytes(b"W" * 1024)
+    shm.write_bytes(b"S" * 512)
+
+    import shutil
+    real_usage = shutil.disk_usage(tmp_path)
+    # Report zero free space — even db_size alone would trigger, but confirms WAL/SHM included
+    fake_usage = shutil._ntuple_diskusage(real_usage.total, real_usage.used, 0)  # type: ignore[attr-defined]
+
+    with patch("pulse.migrate.shutil.disk_usage", return_value=fake_usage):
+        with pytest.raises(RuntimeError, match="Insufficient disk space"):
+            run_migration(db)
