@@ -86,6 +86,12 @@ def render_digest(db_conn: sqlite3.Connection, cfg: PulseConfig) -> str:
     # ---- Alerts section ----
     alert_lines: list[str] = []
 
+    if snap["capture_status"] in ("partial", "failed"):
+        alert_lines.append(
+            "- ⚠️ **Snapshot incomplete**: one or more orgs failed to enumerate"
+            " — check `journalctl --user -u pulse.service`"
+        )
+
     if repos_failed > 0:
         alert_lines.append(f"- ❌ **snapshot**: {repos_failed} repo(s) failed to capture")
 

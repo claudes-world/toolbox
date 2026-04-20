@@ -535,6 +535,7 @@ def _build_current_json(
         "captured_at_utc": snap_row["captured_at_utc"],
         "captured_at_et": snap_row["captured_at_et"],
         "duration_ms": snap_row["duration_ms"],
+        "capture_status": snap_row["capture_status"],
         "repos_succeeded": snap_row["repos_succeeded"],
         "repos_failed": snap_row["repos_failed"],
         "repos_partial": snap_row["repos_partial"],
@@ -743,7 +744,8 @@ def run_snapshot(
 
         # prev.json = second-latest snapshot
         prev_row = db_conn.execute(
-            "SELECT id FROM snapshots WHERE id != ? ORDER BY captured_at_utc DESC LIMIT 1",
+            "SELECT id FROM snapshots WHERE id != ? AND capture_status != 'in_progress'"
+            " ORDER BY captured_at_utc DESC LIMIT 1",
             (snapshot_id,),
         ).fetchone()
         if prev_row is not None:
