@@ -36,6 +36,8 @@ class PulseLock:
         self._fd: int | None = None
 
     def __enter__(self) -> "PulseLock":
+        if self._fd is not None:
+            raise RuntimeError("PulseLock is not re-entrant")
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._fd = os.open(str(self._path), os.O_CREAT | os.O_WRONLY, 0o600)
         try:
@@ -44,6 +46,10 @@ class PulseLock:
             os.close(self._fd)
             self._fd = None
             raise LockHeld(f"pulse already running (lock held at {self._path})") from e
+        except Exception:
+            os.close(self._fd)
+            self._fd = None
+            raise
         return self
 
     def __exit__(
