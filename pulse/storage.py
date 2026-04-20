@@ -133,7 +133,8 @@ def create_schema(conn: sqlite3.Connection) -> None:
                 repos_failed INTEGER NOT NULL DEFAULT 0,
                 repos_partial INTEGER NOT NULL DEFAULT 0,
                 schema_version TEXT NOT NULL DEFAULT '1.0',
-                capture_status TEXT NOT NULL DEFAULT 'success'
+                capture_status TEXT NOT NULL DEFAULT 'success',
+                reviewer_activity_7d TEXT   -- JSON blob: {bucket: {total, approved, change_requested, commented, dismissed}}
             )
         """)
         conn.execute("""

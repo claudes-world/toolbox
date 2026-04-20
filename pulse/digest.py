@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import sqlite3
@@ -8,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from pulse.config import PulseConfig
+from pulse.rollup import count_snapshots_in_last_7d, oldest_snapshot_in_7d
 
 
 def md_escape(s: object, max_len: int = 120) -> str:
@@ -59,6 +61,58 @@ def atomic_write_text(path: Path, text: str) -> None:
         except FileNotFoundError:
             pass
         raise
+
+
+def _render_reviewer_activity(
+    db_conn: sqlite3.Connection,
+    snap: sqlite3.Row,
+    cfg: PulseConfig,
+) -> list[str]:
+    lines: list[str] = []
+    lines.append("## Reviewer Activity (7d)")
+    lines.append("")
+
+    # Warm-up banner calculation
+    cadence_minutes = cfg.defaults.cadence_minutes
+    full_window_snapshots = int(7 * 24 * 60 / cadence_minutes)
+    actual_count = count_snapshots_in_last_7d(db_conn)
+
+    if actual_count < full_window_snapshots:
+        oldest_utc = oldest_snapshot_in_7d(db_conn)
+        if oldest_utc:
+            oldest_dt = datetime.fromisoformat(oldest_utc.replace("Z", "+00:00"))
+            fill_date = (oldest_dt + dt.timedelta(days=7)).strftime("%Y-%m-%d")
+            lines.append(
+                f"_Reviewer activity: {actual_count} snapshot(s) collected — 7-day window fills at {fill_date}_"
+            )
+        else:
+            lines.append("_Reviewer activity: no data yet_")
+        lines.append("")
+
+    # Read cached rollup from snapshot row
+    rollup_json = snap["reviewer_activity_7d"]
+    if not rollup_json:
+        lines.append("_No reviewer activity data computed for this snapshot._")
+        lines.append("")
+        return lines
+
+    rollup = json.loads(rollup_json)
+    if not rollup:
+        lines.append("_No review events in last 7 days._")
+        lines.append("")
+        return lines
+
+    for bucket, counts in sorted(rollup.items()):
+        bucket_escaped = md_escape(bucket)
+        total = counts.get("total", 0)
+        approved = counts.get("approved", 0)
+        cr = counts.get("change_requested", 0)
+        lines.append(
+            f"- **{bucket_escaped}**: {total} events "
+            f"({approved} approved, {cr} changes requested)"
+        )
+    lines.append("")
+    return lines
 
 
 def _latest_snapshot(db_conn: sqlite3.Connection) -> sqlite3.Row | None:
@@ -242,6 +296,9 @@ def render_digest(db_conn: sqlite3.Connection, cfg: PulseConfig) -> str:
     if not repos_with_dependabot_prs:
         lines.append("_No open Dependabot PRs._")
     lines.append("")
+
+    # ---- Reviewer Activity (7d) ----
+    lines.extend(_render_reviewer_activity(db_conn, snap, cfg))
 
     # ---- Footer ----
     # Rate limit remaining: pull from latest snapshot via a stored value if available,
