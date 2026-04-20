@@ -74,6 +74,8 @@ def open_db(path: Path) -> sqlite3.Connection:
     except sqlite3.DatabaseError as e:
         conn.close()
         raise DBCorrupt(f"database file is corrupt or not valid SQLite: {e}") from e
+    except DBSetupError:
+        raise
     except Exception as e:
         conn.close()
         raise DBSetupError(f"PRAGMA journal_mode failed: {e}") from e
