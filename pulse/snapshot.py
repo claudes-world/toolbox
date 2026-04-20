@@ -381,18 +381,33 @@ def _capture_pr_timelines(
                     error_note=f"timeline capture failed for PR #{pr.number}: {str(e)[:100]}",
                 )
 
-    if skipped_no_node_id == len(prs) and prs:
-        logging.getLogger(__name__).warning(
-            "All %d PRs for repo_id=%s lack node_id; timeline capture skipped entirely",
-            len(prs), repo_id,
-        )
+    if skipped_no_node_id > 0 and prs:
+        if skipped_no_node_id == len(prs):
+            logging.getLogger(__name__).warning(
+                "All %d PRs for repo_id=%s lack node_id; timeline capture skipped entirely",
+                len(prs), repo_id,
+            )
+        else:
+            logging.getLogger(__name__).warning(
+                "%d/%d PRs for repo_id=%s lack node_id; their timelines skipped",
+                skipped_no_node_id, len(prs), repo_id,
+            )
+        # Treat as partial — we skipped work we should have done
+        any_failure = True
 
     if budget_exceeded:
         repo.field_statuses["review_events"] = FieldStatus(
             status="partial",
             error_note=f"skipped: cumulative cost approached {TIMELINE_CUMULATIVE_WARN}/hr limit",
         )
-    elif not any_failure:
+    elif any_failure:
+        # Set partial if not already set by the per-PR exception handler above
+        if "review_events" not in repo.field_statuses:
+            repo.field_statuses["review_events"] = FieldStatus(
+                status="partial",
+                error_note=f"all {len(prs)} PRs lack node_id; timeline capture skipped",
+            )
+    else:
         repo.field_statuses["review_events"] = FieldStatus(status="success")
 
 
