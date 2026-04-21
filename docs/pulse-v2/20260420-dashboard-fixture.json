@@ -1,0 +1,288 @@
+{
+  "snapshot_id": "snap-20260420-213012",
+  "captured_at_et": "2026-04-20 21:30 ET",
+  "capture_status": "partial",
+  "duration_ms": 8342,
+  "repos_succeeded": 2,
+  "repos_failed": 1,
+  "repos_partial": 1,
+  "warm_up_active": true,
+  "warm_up_fill_date": "2026-04-27",
+
+  "reviewer_activity_7d": {
+    "copilot": {
+      "total": 14,
+      "approved": 8,
+      "change_requested": 3,
+      "commented": 3,
+      "dismissed": 0
+    },
+    "gemini-ca": {
+      "total": 11,
+      "approved": 6,
+      "change_requested": 2,
+      "commented": 3,
+      "dismissed": 0
+    },
+    "claude-subagent": {
+      "total": 9,
+      "approved": 5,
+      "change_requested": 3,
+      "commented": 1,
+      "dismissed": 0
+    },
+    "human:liam": {
+      "total": 22,
+      "approved": 15,
+      "change_requested": 4,
+      "commented": 3,
+      "dismissed": 0
+    },
+    "human:alice": {
+      "total": 7,
+      "approved": 4,
+      "change_requested": 1,
+      "commented": 2,
+      "dismissed": 0
+    }
+  },
+
+  "repos": [
+    {
+      "org": "claudes-world",
+      "name": "claude-pocket-console",
+      "is_fork": true,
+      "is_archived": false,
+      "capture_status": "success",
+      "field_statuses": {
+        "prs": { "status": "success", "error_note": null },
+        "issues": { "status": "success", "error_note": null },
+        "releases": { "status": "success", "error_note": null },
+        "vulnerability_alerts": { "status": "success", "error_note": null },
+        "upstream": { "status": "success", "error_note": null }
+      },
+      "upstream": {
+        "status": "success",
+        "commits_behind": 3,
+        "commits_ahead": 0
+      },
+      "vulnerability_alerts": [
+        {
+          "severity": "CRITICAL",
+          "ghsa_id": "GHSA-3xgq-45jj-v275",
+          "package_name": "lodash",
+          "ecosystem": "npm",
+          "age_days": 42,
+          "dependabot_pr_number": 87
+        },
+        {
+          "severity": "HIGH",
+          "ghsa_id": "GHSA-4w2v-q235-vp99",
+          "package_name": "vite",
+          "ecosystem": "npm",
+          "age_days": 18,
+          "dependabot_pr_number": 91
+        },
+        {
+          "severity": "HIGH",
+          "ghsa_id": "GHSA-9c47-m6qq-7p4h",
+          "package_name": "esbuild",
+          "ecosystem": "npm",
+          "age_days": 7,
+          "dependabot_pr_number": null
+        },
+        {
+          "severity": "MODERATE",
+          "ghsa_id": "GHSA-2c2q-v4qr-4829",
+          "package_name": "semver",
+          "ecosystem": "npm",
+          "age_days": 95,
+          "dependabot_pr_number": null
+        },
+        {
+          "severity": "LOW",
+          "ghsa_id": "GHSA-7r28-3m3f-r2pr",
+          "package_name": "tough-cookie",
+          "ecosystem": "npm",
+          "age_days": 183,
+          "dependabot_pr_number": null
+        }
+      ],
+      "prs": [
+        {
+          "number": 94,
+          "title": "feat(voice): add voice note recording to CPC",
+          "author": "pm-dobot",
+          "is_draft": false,
+          "is_dependabot": false,
+          "is_renovate": false,
+          "stalled": true,
+          "hours_idle": 98,
+          "updated_at": "2026-04-16T19:14:00Z"
+        },
+        {
+          "number": 96,
+          "title": "feat(pulse-v2): dashboard scaffold",
+          "author": "pm-dobot",
+          "is_draft": true,
+          "is_dependabot": false,
+          "is_renovate": false,
+          "stalled": false,
+          "hours_idle": 11,
+          "updated_at": "2026-04-20T10:30:00Z"
+        }
+      ],
+      "issues": [
+        {
+          "number": 50,
+          "title": "pulse v2 — prepare dashboard agent briefs",
+          "labels": ["enhancement", "pulse-v2"],
+          "stalled": false,
+          "hours_idle": 2
+        },
+        {
+          "number": 51,
+          "title": "pulse v2 — run 4 parallel dashboard design agents",
+          "labels": ["enhancement", "pulse-v2"],
+          "stalled": false,
+          "hours_idle": 2
+        }
+      ],
+      "releases": [
+        {
+          "tag_name": "v0.9.2",
+          "name": "CPC v0.9.2 — voice recorder MVP",
+          "is_prerelease": false,
+          "created_at": "2026-04-14T18:00:00Z"
+        }
+      ]
+    },
+
+    {
+      "org": "claudes-world",
+      "name": "toolbox",
+      "is_fork": false,
+      "is_archived": false,
+      "capture_status": "partial",
+      "field_statuses": {
+        "prs": { "status": "success", "error_note": null },
+        "issues": { "status": "success", "error_note": null },
+        "releases": { "status": "success", "error_note": null },
+        "vulnerability_alerts": {
+          "status": "scope_missing",
+          "error_note": "Token lacks security_events scope; re-auth required"
+        },
+        "upstream": { "status": "success", "error_note": null }
+      },
+      "upstream": null,
+      "vulnerability_alerts": null,
+      "prs": [
+        {
+          "number": 48,
+          "title": "chore(deps): bump requests from 2.31.0 to 2.32.4",
+          "author": "dependabot[bot]",
+          "is_draft": false,
+          "is_dependabot": true,
+          "is_renovate": false,
+          "stalled": false,
+          "hours_idle": 6,
+          "updated_at": "2026-04-20T15:00:00Z"
+        },
+        {
+          "number": 49,
+          "title": "chore(deps): update python-dotenv to ^1.1.0",
+          "author": "renovate[bot]",
+          "is_draft": false,
+          "is_dependabot": false,
+          "is_renovate": true,
+          "stalled": false,
+          "hours_idle": 4,
+          "updated_at": "2026-04-20T17:00:00Z"
+        }
+      ],
+      "issues": [
+        {
+          "number": 33,
+          "title": "md-speak: support streaming output for long documents",
+          "labels": ["enhancement", "priority:high"],
+          "stalled": true,
+          "hours_idle": 168
+        },
+        {
+          "number": 37,
+          "title": "transcribe: add language hint flag",
+          "labels": ["enhancement"],
+          "stalled": false,
+          "hours_idle": 24
+        }
+      ],
+      "releases": [
+        {
+          "tag_name": "v1.4.0",
+          "name": "toolbox v1.4.0",
+          "is_prerelease": false,
+          "created_at": "2026-04-10T12:00:00Z"
+        }
+      ]
+    },
+
+    {
+      "org": "claudes-world",
+      "name": "inbox",
+      "is_fork": false,
+      "is_archived": false,
+      "capture_status": "success",
+      "field_statuses": {
+        "prs": { "status": "success", "error_note": null },
+        "issues": { "status": "success", "error_note": null },
+        "releases": { "status": "success", "error_note": null },
+        "vulnerability_alerts": { "status": "success", "error_note": null },
+        "upstream": { "status": "success", "error_note": null }
+      },
+      "upstream": null,
+      "vulnerability_alerts": [],
+      "prs": [],
+      "issues": [],
+      "releases": [
+        {
+          "tag_name": "v2.1.0",
+          "name": "Inbox v2.1.0 — async update threading",
+          "is_prerelease": false,
+          "created_at": "2026-04-18T09:00:00Z"
+        }
+      ]
+    },
+
+    {
+      "org": "claudes-world",
+      "name": "meridian-fx",
+      "is_fork": false,
+      "is_archived": false,
+      "capture_status": "failed",
+      "field_statuses": {
+        "prs": {
+          "status": "failed",
+          "error_note": "GraphQL 502: upstream GitHub API timeout after 3 retries"
+        },
+        "issues": {
+          "status": "failed",
+          "error_note": "GraphQL 502: upstream GitHub API timeout after 3 retries"
+        },
+        "releases": {
+          "status": "failed",
+          "error_note": "GraphQL 502: upstream GitHub API timeout after 3 retries"
+        },
+        "vulnerability_alerts": {
+          "status": "failed",
+          "error_note": "GraphQL 502: upstream GitHub API timeout after 3 retries"
+        },
+        "upstream": { "status": "success", "error_note": null }
+      },
+      "upstream": null,
+      "vulnerability_alerts": null,
+      "prs": [],
+      "issues": [],
+      "releases": []
+    }
+  ]
+}
