@@ -52,7 +52,8 @@ class GHRestClient:
         Returns upstream status dict for repos.upstream JSON blob.
         NEVER hardcodes branch names — uses captured default_branch values.
         """
-        with _otel.get_tracer("pulse").start_as_current_span("pulse.gh.rest.compare"):
+        with _otel.get_tracer("pulse").start_as_current_span("pulse.gh.rest.compare") as _span:
+            _span.set_attribute("repo.name", f"{fork_owner}/{fork_repo}")
             encoded_fork_branch = quote(fork_default_branch, safe="")
             encoded_parent_branch = quote(parent_default_branch, safe="")
             url = (

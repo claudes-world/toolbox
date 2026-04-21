@@ -22,6 +22,13 @@ from pulse.storage import atomic_write_json
 DEPENDABOT_AUTHORS = {"dependabot[bot]", "dependabot-preview[bot]", "app/dependabot"}
 RENOVATE_AUTHORS = {"renovate[bot]", "renovate-bot[bot]", "app/renovate"}
 
+# Map internal field names to the spec enum for capture_errors_total.field_name.
+# None means "not in spec — skip this field".
+_FIELD_NAME_MAP: dict[str, str | None] = {
+    "vulnerability_alerts": "vuln_alerts",
+    "review_events": None,  # not in spec — skip
+}
+
 # GraphQL queries — every query includes rateLimit
 
 REPOS_QUERY = """
@@ -949,7 +956,7 @@ def run_snapshot(
                             repos_partial -= 1
                         else:
                             repos_succeeded -= 1
-                        _instr.get_repos_failed().add(1, {"org": org_name, "reason": "failed"})
+                        _instr.get_repos_failed().add(1, {"org": org_name, "reason": "other"})
                         continue
 
                     # Capture PR timelines (after persist so we have repo_id)
@@ -997,12 +1004,15 @@ def run_snapshot(
                     # (timelines, upstream, vuln alerts may have added new failed/partial statuses)
                     for field_name, fstatus in repo.field_statuses.items():
                         if fstatus.status in ("failed", "partial"):
-                            _instr.get_capture_errors().add(1, {"field_name": field_name})
+                            mapped = _FIELD_NAME_MAP.get(field_name, field_name)
+                            if mapped is None:
+                                continue  # not in spec — skip
+                            _instr.get_capture_errors().add(1, {"field_name": mapped})
 
                     # Emit counters after final status is determined (all captures complete)
-                    if counted_as == "partial":
-                        _instr.get_repos_failed().add(1, {"org": org_name, "reason": "partial"})
-                    else:
+                    # Partial repos produced data and must NOT increment repos_failed
+                    # (that would break the succeeded + failed = total invariant).
+                    if counted_as != "partial":
                         _instr.get_repos_succeeded().add(1, {"org": org_name})
 
                     # Update field_statuses in the DB row after all captures

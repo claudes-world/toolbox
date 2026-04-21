@@ -151,6 +151,12 @@ class GraphQLClient:
         _tracer = _otel.get_tracer("pulse")
         with _tracer.start_as_current_span("pulse.gql.request") as _gql_span:
             _gql_span.set_attribute("query.name", _qname)
+            _repo_var = (variables or {}).get("repo", "")
+            _org_var = (variables or {}).get("org", "")
+            if _repo_var and _org_var:
+                _gql_span.set_attribute("repo.name", f"{_org_var}/{_repo_var}")
+            elif _repo_var:
+                _gql_span.set_attribute("repo.name", _repo_var)
             return self._execute_inner(query, variables, deadline_monotonic, max_retries, _gql_span)
 
     def _execute_inner(

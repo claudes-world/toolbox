@@ -80,11 +80,19 @@ def main(
 
     _otel.setup(service_name="pulse")
 
-    # Attach trace-ID injection filter to all handlers on the root logger.
-    # Filters on the root logger itself do NOT run for records from child loggers
-    # during propagation — only handler-level filters fire in that path.
+    # Ensure root logger has at least one handler before attaching the filter.
+    # In the default CLI path root.handlers==[] until basicConfig is called,
+    # so attaching to handlers only would silently no-op.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s trace=%(trace_id)s span=%(span_id)s %(message)s",
+    )
+    # Add filter to root logger so it runs for ALL records that propagate,
+    # mutating the record before any handler formats it.
     _trace_filter = _OtelTraceFilter()
     _root_logger = logging.getLogger()
+    _root_logger.addFilter(_trace_filter)
+    # Belt-and-suspenders: also add to existing handlers
     for _h in _root_logger.handlers:
         _h.addFilter(_trace_filter)
 
