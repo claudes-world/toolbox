@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, FC, ReactNode } from "react";
 import fixture from "../../20260420-dashboard-fixture.json";
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -111,7 +111,7 @@ function VulnSummary({ alerts }: { alerts: VulnAlert[] | null }) {
   }
   const counts: Record<string, number> = {};
   for (const a of alerts) counts[a.severity] = (counts[a.severity] ?? 0) + 1;
-  const parts: React.ReactNode[] = [];
+  const parts: ReactNode[] = [];
   const order = ["CRITICAL", "HIGH", "MODERATE", "LOW"] as const;
   for (const sev of order) {
     if (counts[sev]) {
@@ -126,7 +126,7 @@ function VulnSummary({ alerts }: { alerts: VulnAlert[] | null }) {
 }
 
 function PRLine({ pr }: { pr: PR }) {
-  const badges: React.ReactNode[] = [];
+  const badges: ReactNode[] = [];
   if (pr.is_draft) badges.push(<span key="draft" style={{ color: C.dim }}>[DRAFT]</span>);
   if (pr.stalled) badges.push(<span key="stall" style={{ color: C.red }}>[STALLED {pr.hours_idle}h]</span>);
   if (pr.is_dependabot || pr.is_renovate) {

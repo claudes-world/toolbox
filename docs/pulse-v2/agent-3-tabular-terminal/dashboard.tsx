@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, Fragment } from "react";
 import fixture from "../../20260420-dashboard-fixture.json";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -671,9 +671,8 @@ export default function PulseDashboard() {
               const oldestIdle = oldestIdleHours(repo.prs);
 
               return (
-                <>
+                <Fragment key={repo.name}>
                   <tr
-                    key={repo.name}
                     onClick={() => handleRowClick(repo.name)}
                     style={{
                       cursor: "pointer",
@@ -790,8 +789,8 @@ export default function PulseDashboard() {
                   </tr>
 
                   {/* Inline expansion */}
-                  {isExpanded && <RepoDetail key={`${repo.name}-detail`} repo={repo} />}
-                </>
+                  {isExpanded && <RepoDetail repo={repo} />}
+                </Fragment>
               );
             })}
 
