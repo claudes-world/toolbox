@@ -90,6 +90,22 @@
           "ecosystem": "npm",
           "age_days": 7,
           "dependabot_pr_number": null
+        },
+        {
+          "severity": "MODERATE",
+          "ghsa_id": "GHSA-2c2q-v4qr-4829",
+          "package_name": "semver",
+          "ecosystem": "npm",
+          "age_days": 95,
+          "dependabot_pr_number": null
+        },
+        {
+          "severity": "LOW",
+          "ghsa_id": "GHSA-7r28-3m3f-r2pr",
+          "package_name": "tough-cookie",
+          "ecosystem": "npm",
+          "age_days": 183,
+          "dependabot_pr_number": null
         }
       ],
       "prs": [
