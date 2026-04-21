@@ -1,5 +1,5 @@
 import { useState, FC, ReactNode } from "react";
-import fixture from "../../20260420-dashboard-fixture.json";
+import fixture from "../20260420-dashboard-fixture.json";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 

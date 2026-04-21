@@ -257,7 +257,7 @@ Each agent produces exactly these 3 files in their output directory:
 | `rationale.md` | 200-400 words | Why this archetype is best for pulse users — both agents checking dashboards and Liam doing morning review |
 
 **dashboard.tsx must:**
-- Import the fixture: `import fixture from "../../20260420-dashboard-fixture.json";` (adjust relative path as needed)
+- Import the fixture: `import fixture from "../20260420-dashboard-fixture.json";` (adjust relative path as needed)
 - Export a default React component
 - Render meaningfully with the fixture data (not placeholder lorem ipsum)
 - Pass `tsc --noEmit` if TypeScript
