@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -10,6 +11,8 @@ from datetime import datetime, timezone
 
 import httpx
 
+from pulse import instrumentation as _instr
+from pulse import otel as _otel
 from pulse.ipv4 import apply_ipv4_patch
 
 logger = logging.getLogger(__name__)
@@ -143,6 +146,22 @@ class GraphQLClient:
         deadline_monotonic: float | None = None,
         max_retries: int = 5,
     ) -> dict:
+        _qname_match = re.search(r"query\s+(\w+)", query)
+        _qname = _qname_match.group(1) if _qname_match else "anonymous"
+        _tracer = _otel.get_tracer("pulse")
+        with _tracer.start_as_current_span("pulse.gql.request") as _gql_span:
+            _gql_span.set_attribute("query.name", _qname)
+            return self._execute_inner(query, variables, deadline_monotonic, max_retries, _gql_span)
+
+    def _execute_inner(
+        self,
+        query: str,
+        variables: dict | None,
+        deadline_monotonic: float | None,
+        max_retries: int,
+        _span: object,
+    ) -> dict:
+        from opentelemetry.trace import StatusCode as _StatusCode
         for attempt in range(max_retries):
             if deadline_monotonic is not None and time.monotonic() > deadline_monotonic:
                 raise RunDeadlineExceeded()
@@ -238,6 +257,15 @@ class GraphQLClient:
                         wait = min(wait, max(0, dl_remaining - 1))
                     time.sleep(wait)
 
+                # Record rate-limit cost on span + cumulative gauge
+                rate_cost = (body.get("data") or {}).get("rateLimit", {}).get("cost", 0)
+                if rate_cost:
+                    try:
+                        _span.set_attribute("rate_limit.cost", rate_cost)
+                    except Exception:
+                        pass
+                    _instr.set_rate_limit_used(_instr._rate_limit_used[0] + rate_cost)
+
                 return body
 
             if resp.status_code in (403, 429):
@@ -288,6 +316,11 @@ class GraphQLClient:
             if resp.status_code >= 400:
                 raise RuntimeError(f"gql {resp.status_code}: {resp.text[:500]}")
 
+        try:
+            from opentelemetry.trace import StatusCode as _StatusCode
+            _span.set_status(_StatusCode.ERROR, "max retries exceeded")
+        except Exception:
+            pass
         raise RetriesExhausted(f"max retries ({max_retries}) exceeded")
 
     def paginate(

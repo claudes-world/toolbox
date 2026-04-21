@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import dataclasses
 import json
+import logging
 import os
 import signal
 import stat
@@ -13,9 +14,24 @@ from pathlib import Path
 
 import click
 import yaml
+from opentelemetry import trace
 
 from pulse import __version__
 from pulse.ipv4 import apply_ipv4_patch
+
+
+class _OtelTraceFilter(logging.Filter):
+    """Inject OTEL trace_id and span_id into every LogRecord."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        ctx = trace.get_current_span().get_span_context()
+        if ctx.is_valid:
+            record.trace_id = format(ctx.trace_id, "032x")
+            record.span_id = format(ctx.span_id, "016x")
+        else:
+            record.trace_id = ""
+            record.span_id = ""
+        return True
 
 _DEFAULT_CONFIG_PATH = Path.home() / ".world" / "pulse" / "config.yml"
 _DEFAULT_DB_PATH = Path.home() / ".world" / "pulse" / "pulse.db"
@@ -63,6 +79,14 @@ def main(
     from pulse import otel as _otel
 
     _otel.setup(service_name="pulse")
+
+    # Attach trace-ID injection filter to root logger
+    _trace_filter = _OtelTraceFilter()
+    _root_logger = logging.getLogger()
+    for _h in _root_logger.handlers:
+        _h.addFilter(_trace_filter)
+    # Also attach to any handlers added later by adding it to the root logger itself
+    _root_logger.addFilter(_trace_filter)
 
     def _shutdown_handler(signum: int, frame: object) -> None:
         _otel.shutdown(timeout_ms=2000)
