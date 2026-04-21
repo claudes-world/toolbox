@@ -80,13 +80,13 @@ def main(
 
     _otel.setup(service_name="pulse")
 
-    # Attach trace-ID injection filter to root logger
+    # Attach trace-ID injection filter to all handlers on the root logger.
+    # Filters on the root logger itself do NOT run for records from child loggers
+    # during propagation — only handler-level filters fire in that path.
     _trace_filter = _OtelTraceFilter()
     _root_logger = logging.getLogger()
     for _h in _root_logger.handlers:
         _h.addFilter(_trace_filter)
-    # Also attach to any handlers added later by adding it to the root logger itself
-    _root_logger.addFilter(_trace_filter)
 
     def _shutdown_handler(signum: int, frame: object) -> None:
         _otel.shutdown(timeout_ms=2000)

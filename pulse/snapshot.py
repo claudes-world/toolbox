@@ -4,6 +4,7 @@ import json
 import logging
 import sqlite3
 import time
+from collections import Counter as _Counter
 
 import click
 from datetime import datetime, timezone
@@ -353,13 +354,16 @@ def _capture_vuln_alerts(
     conn: sqlite3.Connection,
     repo_id: int,
     cumulative_cost: list[int] | None = None,
-) -> None:
+) -> list:
     """Capture open vulnerability alerts and store as JSON in repos.vulnerability_alerts.
 
     Handles ScopeMissing with a LOUD field_status alert. Other exceptions stored as failed.
     Gracefully degrades: never aborts caller.
+
+    Returns the list of VulnerabilityAlert objects on success, or [] on any error.
     """
     alerts_blob: list | dict
+    captured_alerts: list = []
     try:
         alerts = graphql_client.fetch_vuln_alerts(
             owner=repo.org,
@@ -368,6 +372,7 @@ def _capture_vuln_alerts(
         )
         alerts_blob = [a.model_dump() for a in alerts]
         repo.field_statuses["vulnerability_alerts"] = FieldStatus(status="success")
+        captured_alerts = alerts
     except ScopeMissing as e:
         alerts_blob = {"status": "scope_missing", "error_note": str(e)[:200]}
         repo.field_statuses["vulnerability_alerts"] = FieldStatus(
@@ -399,6 +404,8 @@ def _capture_vuln_alerts(
         logging.getLogger(__name__).warning(
             "Failed to write vulnerability_alerts for repo_id=%s: %s", repo_id, e
         )
+
+    return captured_alerts
 
 
 def _event_to_review_event(node: dict) -> ReviewEvent:
@@ -821,6 +828,8 @@ def run_snapshot(
     orgs_succeeded = 0
     # Cumulative rateLimit.cost tracker across all timeline queries in this run
     cumulative_timeline_cost: list[int] = [0]
+    # Accumulate vuln alert counts across all repos for dependabot gauge
+    _vuln_sev_counts: dict[str, int] = {}
 
     tracer = _otel.get_tracer("pulse")
     with tracer.start_as_current_span("pulse.run") as run_span:
@@ -926,11 +935,9 @@ def run_snapshot(
                     if counted_as == "partial":
                         repo.capture_status = "partial"
                         repos_partial += 1
-                        _instr.get_repos_failed().add(1, {"org": org_name})
                     else:
                         repo.capture_status = "success"
                         repos_succeeded += 1
-                        _instr.get_repos_succeeded().add(1, {"org": org_name})
 
                     # Record field-level capture errors
                     for field_name, fs in repo.field_statuses.items():
@@ -947,6 +954,7 @@ def run_snapshot(
                             repos_partial -= 1
                         else:
                             repos_succeeded -= 1
+                        _instr.get_repos_failed().add(1, {"org": org_name, "reason": "failed"})
                         continue
 
                     # Capture PR timelines (after persist so we have repo_id)
@@ -978,7 +986,10 @@ def run_snapshot(
 
                     # Capture vulnerability alerts (GraphQL, graceful)
                     if repo_id is not None:
-                        _capture_vuln_alerts(gql, repo, db_conn, repo_id, cumulative_timeline_cost)
+                        _repo_vuln_alerts = _capture_vuln_alerts(gql, repo, db_conn, repo_id, cumulative_timeline_cost)
+                        if _repo_vuln_alerts:
+                            for _v in _repo_vuln_alerts:
+                                _vuln_sev_counts[_v.severity] = _vuln_sev_counts.get(_v.severity, 0) + 1
                         va_status = repo.field_statuses.get("vulnerability_alerts")
                         if va_status and va_status.status in ("partial", "failed", "scope_missing"):
                             if counted_as == "success":
@@ -986,6 +997,12 @@ def run_snapshot(
                                 repos_partial += 1
                                 repo.capture_status = "partial"
                                 counted_as = "partial"
+
+                    # Emit counters after final status is determined (all captures complete)
+                    if counted_as == "partial":
+                        _instr.get_repos_failed().add(1, {"org": org_name, "reason": "partial"})
+                    else:
+                        _instr.get_repos_succeeded().add(1, {"org": org_name})
 
                     # Update field_statuses in the DB row after all captures
                     if repo_id is not None:
@@ -1001,6 +1018,10 @@ def run_snapshot(
                                 )
                         except Exception as e:
                             click.echo(f"WARNING: failed to update field_statuses for {org_name}/{repo_name}: {e}", err=True)
+
+        # Update dependabot gauge with cumulative counts across all repos
+        if _vuln_sev_counts:
+            _instr.set_dependabot_alerts(_vuln_sev_counts)
 
         # Record run-level metrics after all orgs processed
         elapsed = time.monotonic() - start_time

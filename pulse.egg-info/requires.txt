@@ -1,0 +1,7 @@
+pydantic<3,>=2.7
+httpx<1,>=0.27
+pyyaml<7,>=6
+click<9,>=8.1
+opentelemetry-api<2,>=1.24
+opentelemetry-sdk<2,>=1.24
+opentelemetry-exporter-otlp-proto-http<2,>=1.24

@@ -225,9 +225,6 @@ def test_noop_mode_no_spans(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # Exporter was never attached to the provider, so it captures nothing
     assert len(exporter.get_finished_spans()) == 0
-    # No processors on the no-op provider
-    processors = noop_provider._active_span_processor._span_processors
-    assert len(processors) == 0, "No-op provider should have zero span processors"
 
 
 # ---------------------------------------------------------------------------

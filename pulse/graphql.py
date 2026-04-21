@@ -161,7 +161,6 @@ class GraphQLClient:
         max_retries: int,
         _span: object,
     ) -> dict:
-        from opentelemetry.trace import StatusCode as _StatusCode
         for attempt in range(max_retries):
             if deadline_monotonic is not None and time.monotonic() > deadline_monotonic:
                 raise RunDeadlineExceeded()
@@ -264,7 +263,7 @@ class GraphQLClient:
                         _span.set_attribute("rate_limit.cost", rate_cost)
                     except Exception:
                         pass
-                    _instr.set_rate_limit_used(_instr._rate_limit_used[0] + rate_cost)
+                    _instr.increment_rate_limit_used(rate_cost)
 
                 return body
 

@@ -1,0 +1,2 @@
+[console_scripts]
+pulse = pulse.__main__:main

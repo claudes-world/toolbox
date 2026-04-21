@@ -6,7 +6,9 @@ sentinel that silently discards writes.
 """
 from __future__ import annotations
 
-from opentelemetry.metrics import Counter, Histogram
+import threading
+
+from opentelemetry.metrics import Counter, Histogram, Observation
 
 from pulse import otel as _otel
 
@@ -27,6 +29,9 @@ _capture_errors: Counter | None = None
 # Mutable backing stores for ObservableGauge callbacks
 _rate_limit_used: list[int] = [0]
 _dependabot_alerts: dict[str, int] = {}
+
+# Lock for init_instruments() thread safety
+_init_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -58,46 +63,48 @@ def init_instruments() -> None:
     """
     global _run_duration, _repos_succeeded, _repos_failed, _capture_errors
 
-    if _run_duration is not None:
-        return  # already initialised
+    with _init_lock:
+        if _run_duration is not None:
+            return  # already initialised
 
-    m = _meter()
+        m = _meter()
 
-    _run_duration = m.create_histogram(
-        "pulse_run_duration_seconds",
-        description="Wall-clock duration of a full snapshot run",
-        unit="s",
-    )
-    _repos_succeeded = m.create_counter(
-        "pulse_repos_succeeded_total",
-        description="Repos captured successfully",
-    )
-    _repos_failed = m.create_counter(
-        "pulse_repos_failed_total",
-        description="Repos that failed capture",
-    )
-    _capture_errors = m.create_counter(
-        "pulse_capture_errors_total",
-        description="Field-level capture errors",
-    )
+        _run_duration = m.create_histogram(
+            "pulse_run_duration_seconds",
+            description="Wall-clock duration of a full snapshot run",
+            unit="s",
+        )
+        _repos_succeeded = m.create_counter(
+            "pulse_repos_succeeded_total",
+            description="Repos captured successfully",
+        )
+        _repos_failed = m.create_counter(
+            "pulse_repos_failed_total",
+            description="Repos that failed capture",
+        )
+        _capture_errors = m.create_counter(
+            "pulse_capture_errors_total",
+            description="Field-level capture errors",
+        )
 
-    def _rate_limit_callback(options):  # noqa: ARG001
-        return [(_rate_limit_used[0], {})]
+        def _rate_limit_callback(options):  # noqa: ARG001
+            return [Observation(_rate_limit_used[0], {})]
 
-    m.create_observable_gauge(
-        "pulse_rate_limit_used_points",
-        callbacks=[_rate_limit_callback],
-        description="GitHub GraphQL rate limit points used in this run",
-    )
+        m.create_observable_gauge(
+            "pulse_rate_limit_used_points",
+            callbacks=[_rate_limit_callback],
+            description="GitHub GraphQL rate limit points used in this run",
+        )
 
-    def _dependabot_callback(options):  # noqa: ARG001
-        return [(count, {"severity": sev}) for sev, count in _dependabot_alerts.items()]
+        def _dependabot_callback(options):  # noqa: ARG001
+            items = list(_dependabot_alerts.items())  # snapshot to avoid race
+            return [Observation(count, {"severity": sev}) for sev, count in items]
 
-    m.create_observable_gauge(
-        "pulse_dependabot_alerts_total",
-        callbacks=[_dependabot_callback],
-        description="Open Dependabot alerts by severity",
-    )
+        m.create_observable_gauge(
+            "pulse_dependabot_alerts_total",
+            callbacks=[_dependabot_callback],
+            description="Open Dependabot alerts by severity",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +134,11 @@ def get_capture_errors() -> Counter | _NoopCounter:
 def set_rate_limit_used(n: int) -> None:
     """Update the cumulative rate-limit-used gauge backing value."""
     _rate_limit_used[0] = n
+
+
+def increment_rate_limit_used(delta: int) -> None:
+    """Add delta to the cumulative rate-limit-used gauge backing value."""
+    _rate_limit_used[0] += delta
 
 
 def get_dependabot_alerts_gauge() -> None:
