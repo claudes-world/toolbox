@@ -1,0 +1,335 @@
+#!/bin/bash
+# morning-brief — gather system health, PR staleness, weather, and dependency
+# alerts in parallel and output structured JSON or human-readable text.
+#
+# Usage:
+#     morning-brief          # human-readable summary
+#     morning-brief --json   # JSON object to stdout
+#
+# Environment variables:
+#     STALE_HOURS          PR staleness threshold in hours (default: 48)
+#     DISK_ALERT_PCT       Disk usage alert threshold percent (default: 80)
+#     MORNING_BRIEF_REPOS  Space-separated list of org/repo to check
+#                          (default: claudes-world/dobot-server claudes-world/inbox
+#                           claudes-world/claude-pocket-console claudes-world/toolbox)
+
+set -euo pipefail
+
+# ── configuration ─────────────────────────────────────────────────────────────
+
+STALE_HOURS="${STALE_HOURS:-48}"
+DISK_ALERT_PCT="${DISK_ALERT_PCT:-80}"
+DEFAULT_REPOS="claudes-world/dobot-server claudes-world/inbox claudes-world/claude-pocket-console claudes-world/toolbox"
+MORNING_BRIEF_REPOS="${MORNING_BRIEF_REPOS:-$DEFAULT_REPOS}"
+MODULE_TIMEOUT=5
+OUTPUT_JSON=false
+
+if [[ "${1:-}" == "--json" ]]; then
+  OUTPUT_JSON=true
+fi
+
+# ── temp dir for module outputs ───────────────────────────────────────────────
+
+TMPDIR_BRIEF=$(mktemp -d)
+trap 'rm -rf "$TMPDIR_BRIEF"' EXIT
+
+# ── module 1: weather ────────────────────────────────────────────────────────
+
+fetch_weather() {
+  local out="$TMPDIR_BRIEF/weather"
+  local err="$TMPDIR_BRIEF/weather_err"
+  local location="NewYork"
+  # Per ADR 0014: runtime config lives in ~/claudes-world/.world/
+  local loc_file="$HOME/claudes-world/.world/user-location.json"
+  if [[ -f "$loc_file" ]]; then
+    local saved_city
+    saved_city=$(jq -r '.current.city // empty' "$loc_file" 2>/dev/null || true)
+    if [[ -n "$saved_city" ]]; then
+      location="$saved_city"
+    fi
+  fi
+  # write location name so the output header can read it back
+  printf '%s' "$location" > "$TMPDIR_BRIEF/weather_location"
+  if timeout "$MODULE_TIMEOUT" curl -sf "wttr.in/${location}?format=%c+%t+%h+%w" > "$out" 2>"$err"; then
+    :
+  else
+    echo "(unavailable)" > "$out"
+    echo "weather: curl failed or timed out" > "$err"
+  fi
+}
+
+# ── module 2: PR staleness ───────────────────────────────────────────────────
+
+fetch_pr_staleness() {
+  local out="$TMPDIR_BRIEF/pr_staleness"
+  local err="$TMPDIR_BRIEF/pr_staleness_err"
+  local pids=()
+  local repo_dir="$TMPDIR_BRIEF/repos"
+  mkdir -p "$repo_dir"
+
+  if ! command -v gh &>/dev/null; then
+    echo "[]" > "$out"
+    echo "pr_staleness: gh CLI not found" > "$err"
+    return
+  fi
+
+  local now_epoch
+  now_epoch=$(date +%s)
+  local stale_seconds=$(( STALE_HOURS * 3600 ))
+
+  # Fetch PRs from each repo in parallel
+  for repo in $MORNING_BRIEF_REPOS; do
+    local safe_name
+    safe_name=$(echo "$repo" | tr '/' '_')
+    (
+      if timeout "$MODULE_TIMEOUT" gh pr list --repo "$repo" \
+        --json number,title,updatedAt --limit 50 > "$repo_dir/$safe_name" 2>/dev/null; then
+        :
+      else
+        echo "[]" > "$repo_dir/$safe_name"
+      fi
+    ) &
+    pids+=($!)
+  done
+
+  # Wait for all repo fetches
+  for pid in "${pids[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
+
+  # Assemble stale PRs
+  local stale_prs="[]"
+  for repo in $MORNING_BRIEF_REPOS; do
+    local safe_name
+    safe_name=$(echo "$repo" | tr '/' '_')
+    local file="$repo_dir/$safe_name"
+    [[ -f "$file" ]] || continue
+
+    # Filter for stale PRs using jq
+    local repo_stale
+    repo_stale=$(jq -r --arg repo "$repo" --argjson now "$now_epoch" --argjson threshold "$stale_seconds" '
+      [.[] | select(
+        (($now - ((.updatedAt | sub("\\.[0-9]+Z$"; "Z") | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime))) > $threshold)
+      ) | {repo: $repo, number, title, updatedAt,
+            stale_hours: ((($now - ((.updatedAt | sub("\\.[0-9]+Z$"; "Z") | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime))) / 3600) | floor)}]
+    ' "$file" 2>/dev/null || echo "[]")
+
+    stale_prs=$(jq -s '.[0] + .[1]' <(echo "$stale_prs") <(echo "$repo_stale") 2>/dev/null || echo "$stale_prs")
+  done
+
+  echo "$stale_prs" > "$out"
+  echo "" > "$err"
+}
+
+# ── module 3: disk + service health ──────────────────────────────────────────
+
+fetch_health() {
+  local out="$TMPDIR_BRIEF/health"
+  local err="$TMPDIR_BRIEF/health_err"
+  local health="{}"
+
+  # Disk usage
+  local disk_pct
+  disk_pct=$(df -h / | awk 'NR==2 {gsub(/%/,""); print $5}' 2>/dev/null || echo "0")
+  local disk_total disk_used disk_avail
+  read -r disk_total disk_used disk_avail <<< "$(df -h / | awk 'NR==2 {print $2, $3, $4}' 2>/dev/null || echo "? ? ?")"
+  local disk_alert=false
+  if (( disk_pct > DISK_ALERT_PCT )); then
+    disk_alert=true
+  fi
+
+  # Service checks
+  local cpc_status cloudflared_status
+  cpc_status=$(systemctl --user is-active cpc.service 2>/dev/null || echo "unknown")
+  cloudflared_status=$(systemctl is-active cloudflared 2>/dev/null || echo "unknown")
+
+  # tmux sessions
+  local tmux_sessions
+  tmux_sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | jq -R -s 'split("\n") | map(select(. != ""))' 2>/dev/null || echo "[]")
+
+  health=$(jq -n \
+    --argjson disk_pct "$disk_pct" \
+    --arg disk_total "$disk_total" \
+    --arg disk_used "$disk_used" \
+    --arg disk_avail "$disk_avail" \
+    --argjson disk_alert "$disk_alert" \
+    --arg cpc "$cpc_status" \
+    --arg cloudflared "$cloudflared_status" \
+    --argjson tmux "$tmux_sessions" \
+    '{
+      disk: {percent: $disk_pct, total: $disk_total, used: $disk_used, available: $disk_avail, alert: $disk_alert},
+      services: {cpc: $cpc, cloudflared: $cloudflared},
+      tmux_sessions: $tmux
+    }')
+
+  echo "$health" > "$out"
+  echo "" > "$err"
+}
+
+# ── module 4: dependency alerts ──────────────────────────────────────────────
+
+fetch_dep_alerts() {
+  local out="$TMPDIR_BRIEF/dep_alerts"
+  local err="$TMPDIR_BRIEF/dep_alerts_err"
+  local repo_dirs=(
+    "$HOME/code/claude-pocket-console"
+    "$HOME/code/toolbox"
+    "$HOME/code/tryinbox-sh"
+    "$HOME/code/dobot-server"
+  )
+  local alerts="{}"
+  local pids=()
+  local dep_dir="$TMPDIR_BRIEF/deps"
+  mkdir -p "$dep_dir"
+
+  for dir in "${repo_dirs[@]}"; do
+    [[ -f "$dir/package.json" ]] || continue
+    local basename
+    basename=$(basename "$dir")
+    (
+      local outdated=""
+      if cd "$dir" 2>/dev/null; then
+        # pnpm outdated exits 1 when outdated deps exist but still outputs valid JSON
+        outdated=$(timeout "$MODULE_TIMEOUT" pnpm outdated --format json 2>/dev/null) || true
+        # If pnpm didn't produce valid JSON, try npm
+        if ! echo "$outdated" | jq empty 2>/dev/null; then
+          outdated=$(timeout "$MODULE_TIMEOUT" npm outdated --json 2>/dev/null) || true
+        fi
+      fi
+      # Ensure we always write valid JSON
+      if ! echo "$outdated" | jq empty 2>/dev/null; then
+        outdated="{}"
+      fi
+      echo "$outdated" > "$dep_dir/$basename"
+    ) &
+    pids+=($!)
+  done
+
+  for pid in "${pids[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
+
+  # Summarize counts per repo
+  for dir in "${repo_dirs[@]}"; do
+    [[ -f "$dir/package.json" ]] || continue
+    local basename
+    basename=$(basename "$dir")
+    local file="$dep_dir/$basename"
+    [[ -f "$file" ]] || continue
+
+    local count
+    count=$(jq 'length // 0' "$file" 2>/dev/null || echo 0)
+    # Guard against empty count (e.g. empty file)
+    [[ -z "$count" || "$count" == "null" ]] && count=0
+    alerts=$(echo "$alerts" | jq --arg repo "$basename" --argjson count "$count" '. + {($repo): $count}')
+  done
+
+  echo "$alerts" > "$out"
+  echo "" > "$err"
+}
+
+# ── run all modules in parallel ──────────────────────────────────────────────
+
+fetch_weather &
+PID_WEATHER=$!
+
+fetch_pr_staleness &
+PID_PR=$!
+
+fetch_health &
+PID_HEALTH=$!
+
+fetch_dep_alerts &
+PID_DEPS=$!
+
+wait "$PID_WEATHER" 2>/dev/null || true
+wait "$PID_PR" 2>/dev/null || true
+wait "$PID_HEALTH" 2>/dev/null || true
+wait "$PID_DEPS" 2>/dev/null || true
+
+# ── collect results ──────────────────────────────────────────────────────────
+
+WEATHER=$(cat "$TMPDIR_BRIEF/weather" 2>/dev/null || echo "(unavailable)")
+PR_STALENESS=$(cat "$TMPDIR_BRIEF/pr_staleness" 2>/dev/null || echo "[]")
+HEALTH=$(cat "$TMPDIR_BRIEF/health" 2>/dev/null || echo "{}")
+DEP_ALERTS=$(cat "$TMPDIR_BRIEF/dep_alerts" 2>/dev/null || echo "{}")
+
+# Collect errors
+ERRORS="[]"
+for mod in weather pr_staleness health dep_alerts; do
+  err_file="$TMPDIR_BRIEF/${mod}_err"
+  if [[ -f "$err_file" ]]; then
+    err_content=$(cat "$err_file" | tr -d '\n')
+    if [[ -n "$err_content" ]]; then
+      ERRORS=$(echo "$ERRORS" | jq --arg e "$err_content" '. + [$e]')
+    fi
+  fi
+done
+
+# ── output ────────────────────────────────────────────────────────────────────
+
+if $OUTPUT_JSON; then
+  jq -n \
+    --arg weather "$WEATHER" \
+    --argjson pr_staleness "$PR_STALENESS" \
+    --argjson health "$HEALTH" \
+    --argjson dep_alerts "$DEP_ALERTS" \
+    --argjson errors "$ERRORS" \
+    '{weather: $weather, pr_staleness: $pr_staleness, health: $health, dep_alerts: $dep_alerts, errors: $errors}'
+else
+  # Human-readable output
+  echo "=== Morning Brief ==="
+  echo ""
+
+  # Weather
+  WEATHER_LOC=$(cat "$TMPDIR_BRIEF/weather_location" 2>/dev/null || echo "New York")
+  [ -z "$WEATHER_LOC" ] && WEATHER_LOC="New York"
+  echo "## Weather (${WEATHER_LOC})"
+  echo "  $WEATHER"
+  echo ""
+
+  # PR Staleness
+  echo "## Stale PRs (>${STALE_HOURS}h since update)"
+  stale_count=$(echo "$PR_STALENESS" | jq 'length' 2>/dev/null || echo 0)
+  if (( stale_count == 0 )); then
+    echo "  No stale PRs"
+  else
+    echo "$PR_STALENESS" | jq -r '.[] | "  #\(.number) \(.repo) — \(.title) (\(.stale_hours)h stale)"' 2>/dev/null
+  fi
+  echo ""
+
+  # Health
+  echo "## System Health"
+  disk_pct=$(echo "$HEALTH" | jq -r '.disk.percent // "?"' 2>/dev/null)
+  disk_alert=$(echo "$HEALTH" | jq -r '.disk.alert // false' 2>/dev/null)
+  disk_used=$(echo "$HEALTH" | jq -r '.disk.used // "?"' 2>/dev/null)
+  disk_total=$(echo "$HEALTH" | jq -r '.disk.total // "?"' 2>/dev/null)
+  echo "  Disk: ${disk_used}/${disk_total} (${disk_pct}%)$([ "$disk_alert" = "true" ] && echo " *** ALERT ***")"
+
+  cpc=$(echo "$HEALTH" | jq -r '.services.cpc // "unknown"' 2>/dev/null)
+  cf=$(echo "$HEALTH" | jq -r '.services.cloudflared // "unknown"' 2>/dev/null)
+  echo "  CPC service: $cpc"
+  echo "  Cloudflared: $cf"
+
+  tmux_list=$(echo "$HEALTH" | jq -r '.tmux_sessions // [] | join(", ")' 2>/dev/null)
+  echo "  tmux sessions: ${tmux_list:-(none)}"
+  echo ""
+
+  # Dependency Alerts
+  echo "## Dependency Alerts"
+  dep_count=$(echo "$DEP_ALERTS" | jq 'to_entries | map(select(.value > 0)) | length' 2>/dev/null || echo 0)
+  if (( dep_count == 0 )); then
+    echo "  All dependencies up to date"
+  else
+    echo "$DEP_ALERTS" | jq -r 'to_entries[] | select(.value > 0) | "  \(.key): \(.value) outdated"' 2>/dev/null
+  fi
+  echo ""
+
+  # Errors
+  err_count=$(echo "$ERRORS" | jq 'length' 2>/dev/null || echo 0)
+  if (( err_count > 0 )); then
+    echo "## Errors"
+    echo "$ERRORS" | jq -r '.[] | "  - \(.)"' 2>/dev/null
+    echo ""
+  fi
+fi

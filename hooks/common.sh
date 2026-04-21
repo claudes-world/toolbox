@@ -7,8 +7,10 @@
 # If chat ID can't be resolved, sets HOOK_ERROR with a message that
 # should be output as additionalContext so the model can fix it.
 
-# Bot token
-BOTTOKEN=$(grep TELEGRAM_BOT_TOKEN /home/claude/.claude/channels/telegram/.env 2>/dev/null | cut -d= -f2)
+# Bot token — use agent's own token when TELEGRAM_STATE_DIR is set
+_TOKEN_ENV="${TELEGRAM_STATE_DIR:+$TELEGRAM_STATE_DIR/.env}"
+_TOKEN_ENV="${_TOKEN_ENV:-/home/claude/.claude/channels/telegram/.env}"
+BOTTOKEN=$(grep TELEGRAM_BOT_TOKEN "$_TOKEN_ENV" 2>/dev/null | cut -d= -f2)
 
 # Chat ID — project-scoped active chat first
 HOOK_CWD="${HOOK_CWD:-$(pwd)}"
