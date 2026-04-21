@@ -939,11 +939,6 @@ def run_snapshot(
                         repo.capture_status = "success"
                         repos_succeeded += 1
 
-                    # Record field-level capture errors
-                    for field_name, fs in repo.field_statuses.items():
-                        if fs.status == "failed":
-                            _instr.get_capture_errors().add(1, {"field_name": field_name})
-
                     # Persist to SQLite
                     try:
                         repo_id = _persist_repo(db_conn, snapshot_id, repo, prs, issues, releases)
@@ -998,6 +993,12 @@ def run_snapshot(
                                 repo.capture_status = "partial"
                                 counted_as = "partial"
 
+                    # Record field-level capture errors after ALL captures complete
+                    # (timelines, upstream, vuln alerts may have added new failed/partial statuses)
+                    for field_name, fstatus in repo.field_statuses.items():
+                        if fstatus.status in ("failed", "partial"):
+                            _instr.get_capture_errors().add(1, {"field_name": field_name})
+
                     # Emit counters after final status is determined (all captures complete)
                     if counted_as == "partial":
                         _instr.get_repos_failed().add(1, {"org": org_name, "reason": "partial"})
@@ -1020,8 +1021,8 @@ def run_snapshot(
                             click.echo(f"WARNING: failed to update field_statuses for {org_name}/{repo_name}: {e}", err=True)
 
         # Update dependabot gauge with cumulative counts across all repos
-        if _vuln_sev_counts:
-            _instr.set_dependabot_alerts(_vuln_sev_counts)
+        # Always call — empty dict clears stale gauge values from prior run
+        _instr.set_dependabot_alerts(_vuln_sev_counts)
 
         # Record run-level metrics after all orgs processed
         elapsed = time.monotonic() - start_time

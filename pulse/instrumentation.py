@@ -69,20 +69,22 @@ def init_instruments() -> None:
 
         m = _meter()
 
-        _run_duration = m.create_histogram(
+        # Create all instruments first — sentinel assigned last so a mid-init
+        # exception doesn't leave globals partially populated.
+        run_dur = m.create_histogram(
             "pulse_run_duration_seconds",
             description="Wall-clock duration of a full snapshot run",
             unit="s",
         )
-        _repos_succeeded = m.create_counter(
+        repos_succ = m.create_counter(
             "pulse_repos_succeeded_total",
             description="Repos captured successfully",
         )
-        _repos_failed = m.create_counter(
+        repos_fail = m.create_counter(
             "pulse_repos_failed_total",
             description="Repos that failed capture",
         )
-        _capture_errors = m.create_counter(
+        cap_err = m.create_counter(
             "pulse_capture_errors_total",
             description="Field-level capture errors",
         )
@@ -97,14 +99,20 @@ def init_instruments() -> None:
         )
 
         def _dependabot_callback(options):  # noqa: ARG001
-            items = list(_dependabot_alerts.items())  # snapshot to avoid race
-            return [Observation(count, {"severity": sev}) for sev, count in items]
+            snapshot = dict(_dependabot_alerts)  # atomic snapshot — avoids race with set_dependabot_alerts()
+            return [Observation(count, {"severity": sev}) for sev, count in snapshot.items()]
 
         m.create_observable_gauge(
             "pulse_dependabot_alerts_total",
             callbacks=[_dependabot_callback],
             description="Open Dependabot alerts by severity",
         )
+
+        # Assign to globals last — sentinel is set only after all instruments succeed
+        _run_duration = run_dur
+        _repos_succeeded = repos_succ
+        _repos_failed = repos_fail
+        _capture_errors = cap_err
 
 
 # ---------------------------------------------------------------------------

@@ -108,7 +108,7 @@ def test_span_hierarchy(monkeypatch: pytest.MonkeyPatch) -> None:
         patch("pulse.snapshot._capture_releases", return_value=([], success_fs)),
         patch("pulse.snapshot._capture_pr_timelines"),
         patch("pulse.snapshot._capture_upstream"),
-        patch("pulse.snapshot._capture_vuln_alerts"),
+        patch("pulse.snapshot._capture_vuln_alerts", return_value=[]),
     ):
         from pulse.snapshot import run_snapshot
         db_conn = _make_db()
@@ -170,7 +170,7 @@ def test_cardinality_no_repo_in_metric_labels(monkeypatch: pytest.MonkeyPatch) -
         patch("pulse.snapshot._capture_releases", return_value=([], success_fs)),
         patch("pulse.snapshot._capture_pr_timelines"),
         patch("pulse.snapshot._capture_upstream"),
-        patch("pulse.snapshot._capture_vuln_alerts"),
+        patch("pulse.snapshot._capture_vuln_alerts", return_value=[]),
     ):
         from pulse.snapshot import run_snapshot
         db_conn = _make_db()
@@ -217,7 +217,7 @@ def test_noop_mode_no_spans(monkeypatch: pytest.MonkeyPatch) -> None:
         patch("pulse.snapshot._capture_releases", return_value=([], success_fs)),
         patch("pulse.snapshot._capture_pr_timelines"),
         patch("pulse.snapshot._capture_upstream"),
-        patch("pulse.snapshot._capture_vuln_alerts"),
+        patch("pulse.snapshot._capture_vuln_alerts", return_value=[]),
     ):
         from pulse.snapshot import run_snapshot
         db_conn = _make_db()
