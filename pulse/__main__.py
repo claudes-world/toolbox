@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import atexit
 import dataclasses
 import json
 import os
+import signal
 import stat
 import sys
 import tempfile
@@ -57,6 +59,18 @@ def main(
     if repo_override and not dry_run:
         click.echo("ERROR: --repo requires --dry-run", err=True)
         sys.exit(1)
+
+    from pulse import otel as _otel
+
+    _otel.setup(service_name="pulse")
+
+    def _shutdown_handler(signum: int, frame: object) -> None:
+        _otel.shutdown(timeout_ms=2000)
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _shutdown_handler)
+    signal.signal(signal.SIGINT, _shutdown_handler)
+    atexit.register(_otel.shutdown)
 
     if config_check:
         _run_config_check()
