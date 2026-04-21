@@ -66,7 +66,7 @@ def main(
 
     def _shutdown_handler(signum: int, frame: object) -> None:
         _otel.shutdown(timeout_ms=2000)
-        sys.exit(0)
+        sys.exit(0 if signum == signal.SIGTERM else 128 + signum)
 
     signal.signal(signal.SIGTERM, _shutdown_handler)
     signal.signal(signal.SIGINT, _shutdown_handler)

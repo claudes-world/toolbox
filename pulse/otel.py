@@ -43,29 +43,46 @@ def setup(service_name: str = "pulse", endpoint: str | None = None) -> None:
     global _tracer_provider, _meter_provider, _shutdown_called
 
     with _shutdown_lock:
+        if _tracer_provider is not None:
+            return  # already initialized
         _shutdown_called = False
 
     resource = Resource.create({SERVICE_NAME: service_name})
 
     # Determine no-op mode from env var (explicit "" → no-op)
-    traces_env = os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", None)
-    no_op = traces_env == ""
+    traces_endpoint_env = os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", None)
+    no_op = traces_endpoint_env == ""
 
     if no_op:
         # SDK loaded, no exporters — all calls are safe no-ops
-        tp = TracerProvider(resource=resource)
+        tp = TracerProvider(resource=resource, shutdown_on_exit=False)
         trace.set_tracer_provider(tp)
         _tracer_provider = tp
 
-        mp = MeterProvider(resource=resource)
+        mp = MeterProvider(resource=resource, shutdown_on_exit=False)
         metrics.set_meter_provider(mp)
         _meter_provider = mp
         return
 
-    # --- Traces ---
-    traces_endpoint = endpoint or traces_env or _DEFAULT_TRACES_ENDPOINT
-    metrics_env = os.environ.get("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", None)
-    metrics_endpoint = metrics_env or _DEFAULT_METRICS_ENDPOINT
+    # --- Endpoint resolution with generic fallback ---
+    generic_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").rstrip("/")
+    metrics_endpoint_env = os.environ.get("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", None)
+
+    if endpoint is not None:
+        traces_endpoint = endpoint
+    elif traces_endpoint_env is not None:
+        traces_endpoint = traces_endpoint_env
+    elif generic_endpoint:
+        traces_endpoint = f"{generic_endpoint}/v1/traces"
+    else:
+        traces_endpoint = _DEFAULT_TRACES_ENDPOINT
+
+    if metrics_endpoint_env is not None:
+        metrics_endpoint = metrics_endpoint_env or _DEFAULT_METRICS_ENDPOINT
+    elif generic_endpoint:
+        metrics_endpoint = f"{generic_endpoint}/v1/metrics"
+    else:
+        metrics_endpoint = _DEFAULT_METRICS_ENDPOINT
 
     _log.warning(
         "OTEL: if collector is unreachable at %s, telemetry will be silently "
@@ -83,7 +100,7 @@ def setup(service_name: str = "pulse", endpoint: str | None = None) -> None:
         export_timeout_millis=5000,
         schedule_delay_millis=1000,
     )
-    tp = TracerProvider(resource=resource)
+    tp = TracerProvider(resource=resource, shutdown_on_exit=False)
     tp.add_span_processor(processor)
     trace.set_tracer_provider(tp)
     _tracer_provider = tp
@@ -95,7 +112,7 @@ def setup(service_name: str = "pulse", endpoint: str | None = None) -> None:
         export_interval_millis=15000,
         export_timeout_millis=5000,
     )
-    mp = MeterProvider(resource=resource, metric_readers=[reader])
+    mp = MeterProvider(resource=resource, metric_readers=[reader], shutdown_on_exit=False)
     metrics.set_meter_provider(mp)
     _meter_provider = mp
 
@@ -111,9 +128,8 @@ def shutdown(timeout_ms: int = 2000) -> None:
         if _shutdown_called:
             return
         _shutdown_called = True
-
-    tp = _tracer_provider
-    mp = _meter_provider
+        tp = _tracer_provider   # capture inside lock
+        mp = _meter_provider    # capture inside lock
 
     def _do_shutdown() -> None:
         if tp is not None:

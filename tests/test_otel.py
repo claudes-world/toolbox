@@ -49,14 +49,13 @@ def test_noop_mode_no_exporters_created(monkeypatch: pytest.MonkeyPatch) -> None
     _reset_otel_module()
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
 
-    with patch(
-        "opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter",
-        side_effect=AssertionError("should not be called"),
-    ):
-        try:
-            otel_mod.setup(service_name="test-noop-exporters")
-        except AssertionError:
-            pytest.fail("OTLPSpanExporter was instantiated in no-op mode")
+    otel_mod.setup(service_name="test-noop-exporters")
+
+    # TracerProvider must be set but have zero active span processors
+    tp = otel_mod._tracer_provider
+    assert tp is not None, "TracerProvider should be set in no-op mode"
+    processors = tp._active_span_processor._span_processors
+    assert len(processors) == 0, f"Expected no span processors in no-op mode, got: {processors}"
 
 
 # ---------------------------------------------------------------------------
