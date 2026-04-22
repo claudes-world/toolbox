@@ -110,3 +110,35 @@ Phase 2 will add an end-to-end test that:
 - Reports missing coverage per service
 
 See `tests/test_alloy_config.sh` for the Phase 1 config-parse test.
+
+## Smoke Test Results — 2026-04-22
+
+- **Alloy version:** v1.15.1 (linux/amd64, build 3e6d1d0, 2026-04-13)
+- **Install:** binary downloaded from GitHub releases and installed to `~/bin/alloy`; installer (`install.sh`) ran cleanly — config deployed, systemd unit deployed, service enabled
+- **Service status:** FAILED — see blocker below
+- **Traces confirmed:** none (service never reached running state)
+
+### Blocker: `otelcol.exporter.file` requires `--stability.level=public-preview`
+
+Alloy v1.15.1 classifies `otelcol.exporter.file` as `public-preview` stability. By default the runtime refuses to load components below `generally-available`. The unit file `ExecStart` does not pass the required flag, so Alloy exits with:
+
+```
+component "otelcol.exporter.file" is at stability level "public-preview",
+which is below the minimum allowed stability level "generally-available".
+Use --stability.level command-line flag to enable "public-preview" features
+```
+
+This cascades into `otelcol.exporter.file.sink.input` reference errors (component never registered = downstream references fail).
+
+**Fix needed (not applied — Phase 2 is smoke-only):** add `--stability.level=public-preview` to `ExecStart` in `collector/systemd/user/alloy.service`:
+
+```ini
+ExecStart=%h/bin/alloy run --stability.level=public-preview %h/.config/alloy/config.alloy
+```
+
+### Service state at end of smoke run
+
+- `alloy.service` — stopped (crash-loop halted manually after diagnosis)
+- `dobot-server.service` — active/running (up 15h, unaffected)
+- `pulse.service` — inactive/dead (last ran successfully at 17:31 ET, triggered by timer)
+- `traces.jsonl` — not created (Alloy never started successfully)
