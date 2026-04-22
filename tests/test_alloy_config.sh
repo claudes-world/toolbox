@@ -4,16 +4,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG="$SCRIPT_DIR/../collector/config.alloy"
 
-if ! test -x "$HOME/bin/alloy" && ! command -v alloy &>/dev/null; then
-  echo "SKIP: alloy binary not found — skipping config parse test"
+ALLOY_BIN="$HOME/bin/alloy"
+if [ ! -x "$ALLOY_BIN" ]; then
+  echo "SKIP: $ALLOY_BIN not found or not executable — install Alloy first"
   exit 0
-fi
-
-# Prefer the installed binary (matches what runs in production)
-if test -x "$HOME/bin/alloy"; then
-  ALLOY_BIN="$HOME/bin/alloy"
-else
-  ALLOY_BIN="$(command -v alloy)"
 fi
 
 echo "==> Checking Alloy config: $CONFIG"

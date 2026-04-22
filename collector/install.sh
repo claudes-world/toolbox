@@ -27,6 +27,7 @@ mkdir -p "$HOME/.config/systemd/user"
 # Idempotent config deploy — preserve user edits if config already exists
 if [ ! -e "$HOME/.config/alloy/config.alloy" ]; then
     cp "$SCRIPT_DIR/config.alloy" "$HOME/.config/alloy/config.alloy"
+    chmod 600 "$HOME/.config/alloy/config.alloy"
     echo "Deployed config: ~/.config/alloy/config.alloy"
 else
     echo "Existing config preserved: ~/.config/alloy/config.alloy"
