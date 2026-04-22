@@ -5,6 +5,7 @@ from urllib.parse import quote
 
 import httpx
 
+from pulse import otel as _otel
 from pulse.ipv4 import apply_ipv4_patch
 
 logger = logging.getLogger(__name__)
@@ -51,24 +52,26 @@ class GHRestClient:
         Returns upstream status dict for repos.upstream JSON blob.
         NEVER hardcodes branch names — uses captured default_branch values.
         """
-        encoded_fork_branch = quote(fork_default_branch, safe="")
-        encoded_parent_branch = quote(parent_default_branch, safe="")
-        url = (
-            f"/repos/{fork_owner}/{fork_repo}/compare"
-            f"/{parent_owner}:{encoded_parent_branch}...{fork_owner}:{encoded_fork_branch}"
-        )
-        resp = self._client.get(url)
-        self._check_ratelimit_header(resp)
-        if resp.status_code == 404:
-            return {"status": "parent_unavailable", "error_note": resp.text[:200]}
-        resp.raise_for_status()
-        data = resp.json()
-        return {
-            "status": "success",
-            "commits_behind": data.get("behind_by", 0),
-            "commits_ahead": data.get("ahead_by", 0),
-            "recent_upstream_releases": [],
-        }
+        with _otel.get_tracer("pulse").start_as_current_span("pulse.gh.rest.compare") as _span:
+            _span.set_attribute("repo.name", f"{fork_owner}/{fork_repo}")
+            encoded_fork_branch = quote(fork_default_branch, safe="")
+            encoded_parent_branch = quote(parent_default_branch, safe="")
+            url = (
+                f"/repos/{fork_owner}/{fork_repo}/compare"
+                f"/{parent_owner}:{encoded_parent_branch}...{fork_owner}:{encoded_fork_branch}"
+            )
+            resp = self._client.get(url)
+            self._check_ratelimit_header(resp)
+            if resp.status_code == 404:
+                return {"status": "parent_unavailable", "error_note": resp.text[:200]}
+            resp.raise_for_status()
+            data = resp.json()
+            return {
+                "status": "success",
+                "commits_behind": data.get("behind_by", 0),
+                "commits_ahead": data.get("ahead_by", 0),
+                "recent_upstream_releases": [],
+            }
 
     def close(self) -> None:
         self._client.close()
