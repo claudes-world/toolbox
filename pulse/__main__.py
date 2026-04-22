@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import atexit
 import dataclasses
 import json
+import logging
 import os
+import signal
 import stat
 import sys
 import tempfile
@@ -11,9 +14,24 @@ from pathlib import Path
 
 import click
 import yaml
+from opentelemetry import trace
 
 from pulse import __version__
 from pulse.ipv4 import apply_ipv4_patch
+
+
+class _OtelTraceFilter(logging.Filter):
+    """Inject OTEL trace_id and span_id into every LogRecord."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        ctx = trace.get_current_span().get_span_context()
+        if ctx.is_valid:
+            record.trace_id = format(ctx.trace_id, "032x")
+            record.span_id = format(ctx.span_id, "016x")
+        else:
+            record.trace_id = ""
+            record.span_id = ""
+        return True
 
 _DEFAULT_CONFIG_PATH = Path.home() / ".world" / "pulse" / "config.yml"
 _DEFAULT_DB_PATH = Path.home() / ".world" / "pulse" / "pulse.db"
@@ -57,6 +75,34 @@ def main(
     if repo_override and not dry_run:
         click.echo("ERROR: --repo requires --dry-run", err=True)
         sys.exit(1)
+
+    from pulse import otel as _otel
+
+    _otel.setup(service_name="pulse")
+
+    # Ensure root logger has at least one handler before attaching the filter.
+    # In the default CLI path root.handlers==[] until basicConfig is called,
+    # so attaching to handlers only would silently no-op.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s trace=%(trace_id)s span=%(span_id)s %(message)s",
+    )
+    # Add filter to root logger so it runs for ALL records that propagate,
+    # mutating the record before any handler formats it.
+    _trace_filter = _OtelTraceFilter()
+    _root_logger = logging.getLogger()
+    _root_logger.addFilter(_trace_filter)
+    # Belt-and-suspenders: also add to existing handlers
+    for _h in _root_logger.handlers:
+        _h.addFilter(_trace_filter)
+
+    def _shutdown_handler(signum: int, frame: object) -> None:
+        _otel.shutdown(timeout_ms=2000)
+        sys.exit(0 if signum == signal.SIGTERM else 128 + signum)
+
+    signal.signal(signal.SIGTERM, _shutdown_handler)
+    signal.signal(signal.SIGINT, _shutdown_handler)
+    atexit.register(_otel.shutdown)
 
     if config_check:
         _run_config_check()

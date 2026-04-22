@@ -4,11 +4,15 @@ import json
 import logging
 import sqlite3
 import time
+from collections import Counter as _Counter
 
 import click
 from datetime import datetime, timezone
 from pathlib import Path
 
+from pulse import __version__
+from pulse import instrumentation as _instr
+from pulse import otel as _otel
 from pulse.config import PulseConfig
 from pulse.gh_rest import GHRestClient
 from pulse.graphql import CostBudgetExceeded, GraphQLClient, PRNodeNotFound, ScopeMissing, TIMELINE_CUMULATIVE_WARN
@@ -17,6 +21,13 @@ from pulse.storage import atomic_write_json
 
 DEPENDABOT_AUTHORS = {"dependabot[bot]", "dependabot-preview[bot]", "app/dependabot"}
 RENOVATE_AUTHORS = {"renovate[bot]", "renovate-bot[bot]", "app/renovate"}
+
+# Map internal field names to the spec enum for capture_errors_total.field_name.
+# None means "not in spec — skip this field".
+_FIELD_NAME_MAP: dict[str, str | None] = {
+    "vulnerability_alerts": "vuln_alerts",
+    "review_events": None,  # not in spec — skip
+}
 
 # GraphQL queries — every query includes rateLimit
 
@@ -350,13 +361,16 @@ def _capture_vuln_alerts(
     conn: sqlite3.Connection,
     repo_id: int,
     cumulative_cost: list[int] | None = None,
-) -> None:
+) -> list:
     """Capture open vulnerability alerts and store as JSON in repos.vulnerability_alerts.
 
     Handles ScopeMissing with a LOUD field_status alert. Other exceptions stored as failed.
     Gracefully degrades: never aborts caller.
+
+    Returns the list of VulnerabilityAlert objects on success, or [] on any error.
     """
     alerts_blob: list | dict
+    captured_alerts: list = []
     try:
         alerts = graphql_client.fetch_vuln_alerts(
             owner=repo.org,
@@ -365,6 +379,7 @@ def _capture_vuln_alerts(
         )
         alerts_blob = [a.model_dump() for a in alerts]
         repo.field_statuses["vulnerability_alerts"] = FieldStatus(status="success")
+        captured_alerts = alerts
     except ScopeMissing as e:
         alerts_blob = {"status": "scope_missing", "error_note": str(e)[:200]}
         repo.field_statuses["vulnerability_alerts"] = FieldStatus(
@@ -396,6 +411,8 @@ def _capture_vuln_alerts(
         logging.getLogger(__name__).warning(
             "Failed to write vulnerability_alerts for repo_id=%s: %s", repo_id, e
         )
+
+    return captured_alerts
 
 
 def _event_to_review_event(node: dict) -> ReviewEvent:
@@ -772,6 +789,8 @@ def run_snapshot(
     rest_client: GHRestClient | None = None,
 ) -> str:
     """Run one full snapshot, persist to SQLite, write current/prev JSON. Returns snapshot_id."""
+    _instr.init_instruments()
+
     start_time = time.monotonic()
     now_utc = datetime.now(timezone.utc)
     snapshot_id = now_utc.strftime("%Y%m%dT%H%M%S.%fZ")
@@ -816,170 +835,208 @@ def run_snapshot(
     orgs_succeeded = 0
     # Cumulative rateLimit.cost tracker across all timeline queries in this run
     cumulative_timeline_cost: list[int] = [0]
-    for org_name, org_config in cfg.orgs.items():
-        # Enumerate repos
-        try:
-            repo_nodes = gql.paginate(
-                REPOS_QUERY,
-                variables={"org": org_name},
-                page_info_path=["data", "organization", "repositories", "pageInfo"],
-                nodes_path=["data", "organization", "repositories", "nodes"],
-                deadline_monotonic=deadline,
-                db_conn=db_conn,
-                org=org_name,
-                repo="__repos__",
-                field="repos",
-            )
-        except Exception as e:
-            msg = f"failed to enumerate repos for {org_name}: {e}"
-            click.echo(f"ERROR: {msg}", err=True)
-            org_errors.append(msg)
-            continue
+    # Accumulate vuln alert counts across all repos for dependabot gauge
+    _vuln_sev_counts: dict[str, int] = {}
 
-        orgs_succeeded += 1
-        for node in repo_nodes:
-            repo_name = node.get("name", "")
-            if not repo_name:
-                continue
-            if repo_name in (org_config.ignore or []):
-                continue
+    tracer = _otel.get_tracer("pulse")
+    with tracer.start_as_current_span("pulse.run") as run_span:
+        run_span.set_attribute("pulse.snapshot_id", snapshot_id)
+        run_span.set_attribute("pulse.version", __version__)
 
-            # Get stall thresholds
-            stall_override = (org_config.stall_overrides or {}).get(repo_name)
-            stall_pr_hours = (
-                stall_override.pr_hours if stall_override else cfg.defaults.stall_pr_hours
-            )
-            stall_issue_hours = (
-                stall_override.issue_hours if stall_override else cfg.defaults.stall_issue_hours
-            )
-
-            parent = node.get("parent") or {}
-            parent_owner = (parent.get("owner") or {}).get("login")
-            parent_name = parent.get("name")
-            parent_default_branch = (parent.get("defaultBranchRef") or {}).get("name")
-
-            has_issues = bool(node.get("hasIssuesEnabled", True))
-            default_branch_ref = node.get("defaultBranchRef") or {}
-
-            repo = RepoData(
-                org=org_name,
-                name=repo_name,
-                default_branch=default_branch_ref.get("name"),
-                is_fork=bool(node.get("isFork")),
-                is_archived=bool(node.get("isArchived")),
-                has_issues_enabled=has_issues,
-                parent_owner=parent_owner,
-                parent_name=parent_name,
-                parent_is_deleted=False,
-                capture_status="success",
-                field_statuses={},
-                parent_default_branch=parent_default_branch,
-            )
-
-            # Capture PRs
-            prs, pr_status = _capture_prs(
-                gql, org_name, repo_name,
-                cfg.defaults.max_prs_per_repo, stall_pr_hours,
-                now_utc, deadline,
-            )
-            repo.field_statuses["prs"] = pr_status
-
-            # Capture issues
-            if has_issues:
-                issues, issue_status = _capture_issues(
-                    gql, org_name, repo_name,
-                    cfg.defaults.max_issues_per_repo, stall_issue_hours,
-                    now_utc, deadline,
-                )
-                repo.field_statuses["issues"] = issue_status
-            else:
-                issues = []
-                repo.field_statuses["issues"] = FieldStatus(status="disabled")
-
-            # Capture releases
-            releases, release_status = _capture_releases(
-                gql, org_name, repo_name,
-                cfg.defaults.max_releases_per_repo, deadline,
-            )
-            repo.field_statuses["releases"] = release_status
-
-            # Determine overall repo status
-            field_statuses = list(repo.field_statuses.values())
-            failed_fields = [fs for fs in field_statuses if fs.status == "failed"]
-            partial_fields = [fs for fs in field_statuses if fs.status == "partial"]
-
-            counted_as = "partial" if (failed_fields or partial_fields) else "success"
-            if counted_as == "partial":
-                repo.capture_status = "partial"
-                repos_partial += 1
-            else:
-                repo.capture_status = "success"
-                repos_succeeded += 1
-
-            # Persist to SQLite
+        for org_name, org_config in cfg.orgs.items():
+            # Enumerate repos
             try:
-                repo_id = _persist_repo(db_conn, snapshot_id, repo, prs, issues, releases)
+                repo_nodes = gql.paginate(
+                    REPOS_QUERY,
+                    variables={"org": org_name},
+                    page_info_path=["data", "organization", "repositories", "pageInfo"],
+                    nodes_path=["data", "organization", "repositories", "nodes"],
+                    deadline_monotonic=deadline,
+                    db_conn=db_conn,
+                    org=org_name,
+                    repo="__repos__",
+                    field="repos",
+                )
             except Exception as e:
-                click.echo(f"ERROR: failed to persist {org_name}/{repo_name}: {e}", err=True)
-                repos_failed += 1
-                if counted_as == "partial":
-                    repos_partial -= 1
-                else:
-                    repos_succeeded -= 1
+                msg = f"failed to enumerate repos for {org_name}: {e}"
+                click.echo(f"ERROR: {msg}", err=True)
+                org_errors.append(msg)
                 continue
 
-            # Capture PR timelines (after persist so we have repo_id)
-            if repo_id is not None and prs:
-                _capture_pr_timelines(
-                    gql, db_conn, repo_id, prs, repo,
-                    deadline, cumulative_timeline_cost,
-                )
-                # Re-evaluate repo status after timeline capture
-                if "review_events" in repo.field_statuses:
-                    rev_status = repo.field_statuses["review_events"]
-                    if rev_status.status in ("partial", "failed"):
-                        if counted_as == "success":
-                            repos_succeeded -= 1
-                            repos_partial += 1
-                            repo.capture_status = "partial"
-                            counted_as = "partial"
+            orgs_succeeded += 1
+            for node in repo_nodes:
+                repo_name = node.get("name", "")
+                if not repo_name:
+                    continue
+                if repo_name in (org_config.ignore or []):
+                    continue
 
-            # Capture fork upstream delta (REST, graceful)
-            if repo_id is not None and _rest_client is not None:
-                _capture_upstream(_rest_client, repo, db_conn, repo_id)
-                up_status = repo.field_statuses.get("upstream")
-                if up_status and up_status.status in ("partial", "failed"):
-                    if counted_as == "success":
-                        repos_succeeded -= 1
-                        repos_partial += 1
-                        repo.capture_status = "partial"
-                        counted_as = "partial"
+                with tracer.start_as_current_span("pulse.repo.collect") as repo_span:
+                    repo_span.set_attribute("repo.name", f"{org_name}/{repo_name}")
 
-            # Capture vulnerability alerts (GraphQL, graceful)
-            if repo_id is not None:
-                _capture_vuln_alerts(gql, repo, db_conn, repo_id, cumulative_timeline_cost)
-                va_status = repo.field_statuses.get("vulnerability_alerts")
-                if va_status and va_status.status in ("partial", "failed", "scope_missing"):
-                    if counted_as == "success":
-                        repos_succeeded -= 1
-                        repos_partial += 1
-                        repo.capture_status = "partial"
-                        counted_as = "partial"
-
-            # Update field_statuses in the DB row after all captures
-            if repo_id is not None:
-                try:
-                    field_statuses_json = json.dumps(
-                        {k: {"status": v.status, "error_note": v.error_note}
-                         for k, v in repo.field_statuses.items()}
+                    # Get stall thresholds
+                    stall_override = (org_config.stall_overrides or {}).get(repo_name)
+                    stall_pr_hours = (
+                        stall_override.pr_hours if stall_override else cfg.defaults.stall_pr_hours
                     )
-                    with db_conn:
-                        db_conn.execute(
-                            "UPDATE repos SET field_statuses=?, capture_status=? WHERE id=?",
-                            (field_statuses_json, repo.capture_status, repo_id),
+                    stall_issue_hours = (
+                        stall_override.issue_hours if stall_override else cfg.defaults.stall_issue_hours
+                    )
+
+                    parent = node.get("parent") or {}
+                    parent_owner = (parent.get("owner") or {}).get("login")
+                    parent_name = parent.get("name")
+                    parent_default_branch = (parent.get("defaultBranchRef") or {}).get("name")
+
+                    has_issues = bool(node.get("hasIssuesEnabled", True))
+                    default_branch_ref = node.get("defaultBranchRef") or {}
+
+                    repo = RepoData(
+                        org=org_name,
+                        name=repo_name,
+                        default_branch=default_branch_ref.get("name"),
+                        is_fork=bool(node.get("isFork")),
+                        is_archived=bool(node.get("isArchived")),
+                        has_issues_enabled=has_issues,
+                        parent_owner=parent_owner,
+                        parent_name=parent_name,
+                        parent_is_deleted=False,
+                        capture_status="success",
+                        field_statuses={},
+                        parent_default_branch=parent_default_branch,
+                    )
+
+                    # Capture PRs
+                    prs, pr_status = _capture_prs(
+                        gql, org_name, repo_name,
+                        cfg.defaults.max_prs_per_repo, stall_pr_hours,
+                        now_utc, deadline,
+                    )
+                    repo.field_statuses["prs"] = pr_status
+
+                    # Capture issues
+                    if has_issues:
+                        issues, issue_status = _capture_issues(
+                            gql, org_name, repo_name,
+                            cfg.defaults.max_issues_per_repo, stall_issue_hours,
+                            now_utc, deadline,
                         )
-                except Exception as e:
-                    click.echo(f"WARNING: failed to update field_statuses for {org_name}/{repo_name}: {e}", err=True)
+                        repo.field_statuses["issues"] = issue_status
+                    else:
+                        issues = []
+                        repo.field_statuses["issues"] = FieldStatus(status="disabled")
+
+                    # Capture releases
+                    releases, release_status = _capture_releases(
+                        gql, org_name, repo_name,
+                        cfg.defaults.max_releases_per_repo, deadline,
+                    )
+                    repo.field_statuses["releases"] = release_status
+
+                    # Determine overall repo status
+                    field_statuses = list(repo.field_statuses.values())
+                    failed_fields = [fs for fs in field_statuses if fs.status == "failed"]
+                    partial_fields = [fs for fs in field_statuses if fs.status == "partial"]
+
+                    counted_as = "partial" if (failed_fields or partial_fields) else "success"
+                    if counted_as == "partial":
+                        repo.capture_status = "partial"
+                        repos_partial += 1
+                    else:
+                        repo.capture_status = "success"
+                        repos_succeeded += 1
+
+                    # Persist to SQLite
+                    try:
+                        repo_id = _persist_repo(db_conn, snapshot_id, repo, prs, issues, releases)
+                    except Exception as e:
+                        click.echo(f"ERROR: failed to persist {org_name}/{repo_name}: {e}", err=True)
+                        repos_failed += 1
+                        if counted_as == "partial":
+                            repos_partial -= 1
+                        else:
+                            repos_succeeded -= 1
+                        _instr.get_repos_failed().add(1, {"org": org_name, "reason": "other"})
+                        continue
+
+                    # Capture PR timelines (after persist so we have repo_id)
+                    if repo_id is not None and prs:
+                        _capture_pr_timelines(
+                            gql, db_conn, repo_id, prs, repo,
+                            deadline, cumulative_timeline_cost,
+                        )
+                        # Re-evaluate repo status after timeline capture
+                        if "review_events" in repo.field_statuses:
+                            rev_status = repo.field_statuses["review_events"]
+                            if rev_status.status in ("partial", "failed"):
+                                if counted_as == "success":
+                                    repos_succeeded -= 1
+                                    repos_partial += 1
+                                    repo.capture_status = "partial"
+                                    counted_as = "partial"
+
+                    # Capture fork upstream delta (REST, graceful)
+                    if repo_id is not None and _rest_client is not None:
+                        _capture_upstream(_rest_client, repo, db_conn, repo_id)
+                        up_status = repo.field_statuses.get("upstream")
+                        if up_status and up_status.status in ("partial", "failed"):
+                            if counted_as == "success":
+                                repos_succeeded -= 1
+                                repos_partial += 1
+                                repo.capture_status = "partial"
+                                counted_as = "partial"
+
+                    # Capture vulnerability alerts (GraphQL, graceful)
+                    if repo_id is not None:
+                        _repo_vuln_alerts = _capture_vuln_alerts(gql, repo, db_conn, repo_id, cumulative_timeline_cost)
+                        if _repo_vuln_alerts:
+                            for _v in _repo_vuln_alerts:
+                                _vuln_sev_counts[_v.severity] = _vuln_sev_counts.get(_v.severity, 0) + 1
+                        va_status = repo.field_statuses.get("vulnerability_alerts")
+                        if va_status and va_status.status in ("partial", "failed", "scope_missing"):
+                            if counted_as == "success":
+                                repos_succeeded -= 1
+                                repos_partial += 1
+                                repo.capture_status = "partial"
+                                counted_as = "partial"
+
+                    # Record field-level capture errors after ALL captures complete
+                    # (timelines, upstream, vuln alerts may have added new failed/partial statuses)
+                    for field_name, fstatus in repo.field_statuses.items():
+                        if fstatus.status in ("failed", "partial"):
+                            mapped = _FIELD_NAME_MAP.get(field_name, field_name)
+                            if mapped is None:
+                                continue  # not in spec — skip
+                            _instr.get_capture_errors().add(1, {"field_name": mapped})
+
+                    # Emit counters after final status is determined (all captures complete)
+                    # Partial repos produced data and must NOT increment repos_failed
+                    # (that would break the succeeded + failed = total invariant).
+                    if counted_as != "partial":
+                        _instr.get_repos_succeeded().add(1, {"org": org_name})
+
+                    # Update field_statuses in the DB row after all captures
+                    if repo_id is not None:
+                        try:
+                            field_statuses_json = json.dumps(
+                                {k: {"status": v.status, "error_note": v.error_note}
+                                 for k, v in repo.field_statuses.items()}
+                            )
+                            with db_conn:
+                                db_conn.execute(
+                                    "UPDATE repos SET field_statuses=?, capture_status=? WHERE id=?",
+                                    (field_statuses_json, repo.capture_status, repo_id),
+                                )
+                        except Exception as e:
+                            click.echo(f"WARNING: failed to update field_statuses for {org_name}/{repo_name}: {e}", err=True)
+
+        # Update dependabot gauge with cumulative counts across all repos
+        # Always call — empty dict clears stale gauge values from prior run
+        _instr.set_dependabot_alerts(_vuln_sev_counts)
+
+        # Record run-level metrics after all orgs processed
+        elapsed = time.monotonic() - start_time
+        _instr.get_run_duration().record(elapsed, {})
 
     duration_ms = int((time.monotonic() - start_time) * 1000)
 
