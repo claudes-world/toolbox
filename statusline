@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Status line: two lines.
+#   Line 1: user@host:path  branch
+#   Line 2: model  effort  │  [context bar] pct%
+# Claude Code pipes JSON via stdin.
+
+# Read JSON from stdin
+input=$(cat)
+
+# --- Extract data from JSON ---
+# Prefer .cwd, fall back to .workspace.current_dir, then .workspace.project_dir.
+# Do NOT fall back to $(pwd) — that reflects the agent's cwd, not the user's session directory.
+cwd=$(echo "$input" | jq -r '.cwd // .workspace.current_dir // .workspace.project_dir // empty' 2>/dev/null)
+cwd="${cwd/#$HOME/\~}"
+
+model_name=$(echo "$input" | jq -r '.model.display_name // .model.id // empty' 2>/dev/null)
+pct=$(echo "$input" | jq -r '.context_window.used_percentage // empty' 2>/dev/null)
+
+# --- reasoning effort (from settings, not in statusline JSON) ---
+effort=""
+settings_file="$HOME/.claude/settings.json"
+if [ -f "$settings_file" ]; then
+  effort_val=$(jq -r '.effortLevel // empty' "$settings_file" 2>/dev/null)
+  if [ -n "$effort_val" ]; then
+    effort="$(printf ' \033[00;35m%s\033[00m' "$effort_val")"
+  fi
+fi
+
+# --- user@host:path ---
+user_host_path="$(printf '\033[01;32m%s@%s\033[00m:\033[01;34m%s\033[00m' "$(whoami)" "$(hostname -s)" "$cwd")"
+
+# --- git branch ---
+branch=""
+if git_branch=$(git -C "$cwd" symbolic-ref --short HEAD 2>/dev/null); then
+  branch="$(printf ' \033[01;36m%s\033[00m' "$git_branch")"
+fi
+
+# --- model name ---
+model=""
+if [ -n "$model_name" ]; then
+  model="$(printf '\033[00;37m%s\033[00m' "$model_name")"
+fi
+
+# --- context progress bar ---
+context=""
+if [ -n "$pct" ]; then
+  # Integer percentage
+  pct=${pct%%.*}
+
+  # Pick color based on thresholds
+  if [ "$pct" -ge 70 ]; then
+    bar_color='\033[01;31m'   # bold red
+  elif [ "$pct" -ge 50 ]; then
+    bar_color='\033[01;33m'   # bold yellow
+  else
+    bar_color='\033[01;32m'   # bold green
+  fi
+
+  # Build 12-character progress bar
+  bar_width=12
+  filled=$(( pct * bar_width / 100 ))
+  empty=$(( bar_width - filled ))
+
+  bar=""
+  for i in $(seq 1 $filled); do bar="${bar}█"; done
+  for i in $(seq 1 $empty);  do bar="${bar}░"; done
+
+  context="$(printf "${bar_color}[%s] %d%%\033[00m" "$bar" "$pct")"
+fi
+
+# --- assemble and print ---
+# Line 1: user@host:path  branch
+printf '%s%s\n' "$user_host_path" "$branch"
+
+# Line 2: model  effort  │  context
+line2=""
+if [ -n "$model" ]; then
+  line2="${model}"
+fi
+if [ -n "$effort" ]; then
+  line2="${line2}${effort}"
+fi
+if [ -n "$context" ]; then
+  sep="$(printf ' \033[00;90m│\033[00m ')"
+  line2="${line2}${sep}${context}"
+fi
+if [ -n "$line2" ]; then
+  printf '%s' "$line2"
+fi
