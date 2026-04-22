@@ -1,0 +1,41 @@
+// Alloy config — OTEL unified collector
+// Receives OTLP from pulse, dobot-server, inbox, CPC
+// Exports to local file sink (cloud forwarding TBD)
+
+otelcol.receiver.otlp "default" {
+  grpc {
+    endpoint = "localhost:4317"
+  }
+  http {
+    endpoint = "localhost:4318"
+  }
+  output {
+    traces  = [otelcol.processor.batch.default.input]
+    metrics = [otelcol.processor.batch.default.input]
+    logs    = [otelcol.processor.batch.default.input]
+  }
+}
+
+otelcol.processor.batch "default" {
+  output {
+    traces  = [otelcol.exporter.file.sink.input]
+    metrics = [otelcol.exporter.file.sink.input]
+    logs    = [otelcol.exporter.file.sink.input]
+  }
+}
+
+// Receives all signals (traces + metrics + logs) and writes to a local file.
+otelcol.exporter.file "sink" {
+  path   = env("HOME") + "/.local/share/alloy/traces.jsonl"
+  append = true
+}
+
+// -------------------------------------------------------
+// Prometheus scraper block — disabled, prep for future
+// system-pulse metric scraping. Uncomment + wire when
+// metrics pipeline is stood up.
+// -------------------------------------------------------
+// prometheus.scrape "system_pulse" {
+//   targets    = [{"__address__" = "localhost:9090"}]
+//   forward_to = []
+// }

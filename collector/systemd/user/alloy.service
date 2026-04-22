@@ -1,0 +1,18 @@
+[Unit]
+Description=Grafana Alloy — unified OTEL collector
+Documentation=https://grafana.com/docs/alloy/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/bin/alloy run %h/.config/alloy/config.alloy
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=alloy
+UMask=0077
+
+[Install]
+WantedBy=default.target
