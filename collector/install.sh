@@ -36,7 +36,6 @@ fi
 cp "$SCRIPT_DIR/systemd/user/alloy.service" "$HOME/.config/systemd/user/alloy.service"
 
 systemctl --user daemon-reload
-systemctl --user enable alloy.service
 
 if systemctl --user is-active --quiet alloy.service; then
     systemctl --user restart alloy.service
@@ -45,5 +44,8 @@ else
     systemctl --user start alloy.service
     echo "alloy.service started."
 fi
+
+# Enable auto-start on boot only after a successful start/restart
+systemctl --user enable alloy.service
 
 echo "Tail logs: journalctl --user -u alloy -f"

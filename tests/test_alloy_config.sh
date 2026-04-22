@@ -4,21 +4,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG="$SCRIPT_DIR/../collector/config.alloy"
 
-if ! command -v alloy &>/dev/null && ! test -f "$HOME/bin/alloy"; then
+if ! test -x "$HOME/bin/alloy" && ! command -v alloy &>/dev/null; then
   echo "SKIP: alloy binary not found — skipping config parse test"
   exit 0
 fi
 
-ALLOY_BIN="${HOME}/bin/alloy"
-if command -v alloy &>/dev/null; then
-  ALLOY_BIN="alloy"
+# Prefer the installed binary (matches what runs in production)
+if test -x "$HOME/bin/alloy"; then
+  ALLOY_BIN="$HOME/bin/alloy"
+else
+  ALLOY_BIN="$(command -v alloy)"
 fi
 
 echo "==> Checking Alloy config: $CONFIG"
-# Use 'validate' (component-graph + type checking) when available; fall back to fmt.
-if "$ALLOY_BIN" validate --help &>/dev/null 2>&1; then
-  "$ALLOY_BIN" validate "$CONFIG"
-else
-  "$ALLOY_BIN" fmt --write=false "$CONFIG" > /dev/null
-fi
+# Validates config syntax via alloy fmt (alloy validate does not exist in 1.x)
+"$ALLOY_BIN" fmt --write=false "$CONFIG" > /dev/null
 echo "PASS: config.alloy is valid"

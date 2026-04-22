@@ -18,15 +18,14 @@ otelcol.receiver.otlp "default" {
 
 otelcol.processor.batch "default" {
   output {
-    traces  = [otelcol.exporter.file.traces.input]
-    metrics = [otelcol.exporter.file.traces.input]
-    logs    = [otelcol.exporter.file.traces.input]
+    traces  = [otelcol.exporter.file.sink.input]
+    metrics = [otelcol.exporter.file.sink.input]
+    logs    = [otelcol.exporter.file.sink.input]
   }
 }
 
-// Label "traces" is the component ID used in .input references above.
-// This exporter receives all signals (traces + metrics + logs).
-otelcol.exporter.file "traces" {
+// Receives all signals (traces + metrics + logs) and writes to a local file.
+otelcol.exporter.file "sink" {
   path   = env("HOME") + "/.local/share/alloy/traces.jsonl"
   append = true
 }

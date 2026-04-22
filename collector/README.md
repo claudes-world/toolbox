@@ -46,7 +46,7 @@ systemctl --user restart alloy.service
 # Tail logs
 journalctl --user -u alloy -f
 
-# Disable (persist across reboots)
+# Disable (removes auto-start on boot; service still runs until stopped)
 systemctl --user disable alloy.service
 ```
 
