@@ -25,9 +25,13 @@ otelcol.processor.batch "default" {
 }
 
 // Receives all signals (traces + metrics + logs) and writes to a local file.
+// rotation{} handles file management; append=true is mutually exclusive with rotation.
 otelcol.exporter.file "sink" {
-  path   = env("HOME") + "/.local/share/alloy/traces.jsonl"
-  append = true
+  path = sys.env("HOME") + "/.local/share/alloy/otlp.jsonl"
+  rotation {
+    max_megabytes = 100
+    max_backups   = 4
+  }
 }
 
 // -------------------------------------------------------
