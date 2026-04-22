@@ -520,5 +520,33 @@ def _run_dry_run(repo_override: str | None = None) -> None:
     click.echo(str(out_path))
 
 
+@main.command("migrate")
+def cmd_migrate() -> None:
+    """Migrate pulse.db from v0 to v1 (idempotent)."""
+    import sqlite3 as _sqlite3
+
+    from pulse.locks import LockHeld, PulseLock
+    from pulse.migrate import run_migration
+
+    db_path = _DEFAULT_DB_PATH
+    try:
+        with PulseLock():
+            msg = run_migration(db_path)
+            if msg == "no-op":
+                click.echo("pulse.db already at v1 — no migration needed.")
+            else:
+                click.echo(f"Migration complete. Backup preserved at {db_path.parent}/pulse.db.pre-v1-*")
+    except LockHeld as e:
+        click.echo(f"Migration blocked: pulse is currently running. Stop the service first.\n  {e}", err=True)
+        raise SystemExit(1)
+    except RuntimeError as e:
+        click.echo(f"Migration failed: {e}", err=True)
+        raise SystemExit(1)
+    except (_sqlite3.Error, OSError) as e:
+        click.echo(f"Migration failed ({type(e).__name__}): {e}", err=True)
+        click.echo(f"Check backup at: {db_path.parent}/pulse.db.pre-v1-* before retrying", err=True)
+        raise SystemExit(1)
+
+
 if __name__ == "__main__":
     main()

@@ -97,7 +97,13 @@ def open_db(path: Path) -> sqlite3.Connection:
             if any(k in msg for k in ("malformed", "corrupt", "not a database", "disk image")):
                 raise DBCorrupt(f"integrity_check raised exception (corrupt db): {e}") from e
             raise DBSetupError(f"integrity_check failed (env error): {e}") from e
+        tables = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+        fresh = not tables
         create_schema(conn)
+        if fresh:
+            conn.execute("PRAGMA user_version = 11")  # fresh v1 install
         return conn
     except DBCorrupt:
         conn.close()
@@ -127,7 +133,8 @@ def create_schema(conn: sqlite3.Connection) -> None:
                 repos_failed INTEGER NOT NULL DEFAULT 0,
                 repos_partial INTEGER NOT NULL DEFAULT 0,
                 schema_version TEXT NOT NULL DEFAULT '1.0',
-                capture_status TEXT NOT NULL DEFAULT 'success'
+                capture_status TEXT NOT NULL DEFAULT 'success',
+                reviewer_activity_7d TEXT   -- JSON blob: {bucket: {total, approved, change_requested, commented, dismissed}}
             )
         """)
         conn.execute("""
@@ -143,7 +150,9 @@ def create_schema(conn: sqlite3.Connection) -> None:
                 parent_name TEXT,
                 parent_is_deleted INTEGER NOT NULL DEFAULT 0,
                 capture_status TEXT NOT NULL DEFAULT 'success',
-                field_statuses TEXT
+                field_statuses TEXT,
+                upstream TEXT,
+                vulnerability_alerts TEXT
             )
         """)
         conn.execute("""
@@ -160,6 +169,8 @@ def create_schema(conn: sqlite3.Connection) -> None:
                 is_renovate INTEGER NOT NULL DEFAULT 0,
                 hours_idle REAL,
                 stalled INTEGER NOT NULL DEFAULT 0,
+                node_id TEXT,
+                review_events TEXT,
                 UNIQUE(repo_id, number)
             )
         """)

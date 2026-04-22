@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 
@@ -9,8 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from pulse.config import PulseConfig
-from pulse.graphql import GraphQLClient
-from pulse.schema import FieldStatus, IssueData, PRData, ReleaseData, RepoData
+from pulse.gh_rest import GHRestClient
+from pulse.graphql import CostBudgetExceeded, GraphQLClient, PRNodeNotFound, ScopeMissing, TIMELINE_CUMULATIVE_WARN
+from pulse.schema import FieldStatus, IssueData, PRData, ReleaseData, RepoData, ReviewEvent
 from pulse.storage import atomic_write_json
 
 DEPENDABOT_AUTHORS = {"dependabot[bot]", "dependabot-preview[bot]", "app/dependabot"}
@@ -33,7 +35,7 @@ query($org: String!, $cursor: String) {
         hasIssuesEnabled
         pullRequests(first: 1) { totalCount }
         issues(first: 1) { totalCount }
-        parent { owner { login } name }
+        parent { owner { login } name defaultBranchRef { name } }
       }
     }
   }
@@ -48,6 +50,7 @@ query($org: String!, $repo: String!, $first: Int!, $cursor: String) {
       totalCount
       pageInfo { hasNextPage endCursor }
       nodes {
+        id
         number title
         author { login }
         createdAt updatedAt
@@ -160,6 +163,7 @@ def _capture_prs(
                     is_renovate=author_login in RENOVATE_AUTHORS if author_login else False,
                     hours_idle=idle,
                     stalled=idle is not None and idle > stall_hours,
+                    node_id=node.get("id"),
                 )
             )
 
@@ -280,6 +284,248 @@ def _capture_releases(
 
 
 
+def _capture_upstream(
+    rest_client: GHRestClient,
+    repo: RepoData,
+    conn: sqlite3.Connection,
+    repo_id: int,
+) -> None:
+    """Capture fork upstream compare delta and store as JSON in repos.upstream.
+
+    Only runs if repo.is_fork == True and repo.parent is available.
+    Gracefully degrades: exceptions stored as failed status, never abort caller.
+    """
+    if not repo.is_fork:
+        return
+    if not repo.parent_owner or not repo.parent_name:
+        return
+
+    fork_branch = repo.default_branch
+    parent_branch = repo.parent_default_branch
+
+    if not fork_branch or not parent_branch:
+        upstream_blob = {
+            "status": "failed",
+            "error_note": "missing default_branch for fork or parent",
+        }
+        repo.field_statuses["upstream"] = FieldStatus(
+            status="failed", error_note=upstream_blob["error_note"]
+        )
+    else:
+        try:
+            result = rest_client.compare_fork_upstream(
+                fork_owner=repo.org,
+                fork_repo=repo.name,
+                fork_default_branch=fork_branch,
+                parent_owner=repo.parent_owner,
+                parent_default_branch=parent_branch,
+            )
+            upstream_blob = result
+            repo.field_statuses["upstream"] = FieldStatus(
+                status=result.get("status", "success")
+                if result.get("status") in ("success", "parent_unavailable")
+                else "failed"
+            )
+        except Exception as e:
+            upstream_blob = {"status": "failed", "error_note": str(e)[:200]}
+            repo.field_statuses["upstream"] = FieldStatus(
+                status="failed", error_note=str(e)[:200]
+            )
+
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE repos SET upstream=? WHERE id=?",
+                (json.dumps(upstream_blob), repo_id),
+            )
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            "Failed to write upstream for repo_id=%s: %s", repo_id, e
+        )
+
+
+def _capture_vuln_alerts(
+    graphql_client: GraphQLClient,
+    repo: RepoData,
+    conn: sqlite3.Connection,
+    repo_id: int,
+    cumulative_cost: list[int] | None = None,
+) -> None:
+    """Capture open vulnerability alerts and store as JSON in repos.vulnerability_alerts.
+
+    Handles ScopeMissing with a LOUD field_status alert. Other exceptions stored as failed.
+    Gracefully degrades: never aborts caller.
+    """
+    alerts_blob: list | dict
+    try:
+        alerts = graphql_client.fetch_vuln_alerts(
+            owner=repo.org,
+            name=repo.name,
+            cumulative_cost=cumulative_cost,
+        )
+        alerts_blob = [a.model_dump() for a in alerts]
+        repo.field_statuses["vulnerability_alerts"] = FieldStatus(status="success")
+    except ScopeMissing as e:
+        alerts_blob = {"status": "scope_missing", "error_note": str(e)[:200]}
+        repo.field_statuses["vulnerability_alerts"] = FieldStatus(
+            status="scope_missing",
+            error_note=f"ALERT: token lacks security_events scope — vuln alerts unavailable: {str(e)[:150]}",
+        )
+        logging.getLogger(__name__).warning(
+            "SCOPE MISSING: vulnerability alerts require security_events scope on token (repo=%s/%s): %s",
+            repo.org, repo.name, e,
+        )
+    except CostBudgetExceeded:
+        alerts_blob = {"status": "partial", "error_note": "skipped: cumulative cost budget reached"}
+        repo.field_statuses["vulnerability_alerts"] = FieldStatus(
+            status="partial", error_note="skipped: cumulative cost budget reached"
+        )
+    except Exception as e:
+        alerts_blob = {"status": "failed", "error_note": str(e)[:200]}
+        repo.field_statuses["vulnerability_alerts"] = FieldStatus(
+            status="failed", error_note=str(e)[:200]
+        )
+
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE repos SET vulnerability_alerts=? WHERE id=?",
+                (json.dumps(alerts_blob), repo_id),
+            )
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            "Failed to write vulnerability_alerts for repo_id=%s: %s", repo_id, e
+        )
+
+
+def _event_to_review_event(node: dict) -> ReviewEvent:
+    """Convert a raw timeline event node to a ReviewEvent."""
+    typename = node.get("__typename", "")
+    actor = (node.get("actor") or {}).get("login") or None
+    author_obj = (node.get("author") or {}).get("login") or None
+    # PullRequestReview uses 'author', all others use 'actor'
+    author = author_obj if typename == "PullRequestReview" else actor
+    label_obj = node.get("label") or {}
+    return ReviewEvent(
+        type=typename,
+        author=author,
+        state=node.get("state") if typename == "PullRequestReview" else None,
+        label=label_obj.get("name") if typename == "LabeledEvent" else None,
+        submitted_at=node.get("submittedAt") if typename == "PullRequestReview" else None,
+        created_at=node.get("createdAt") if typename != "PullRequestReview" else None,
+    )
+
+
+def _capture_pr_timelines(
+    gql: GraphQLClient,
+    conn: sqlite3.Connection,
+    repo_id: int,
+    prs: list[PRData],
+    repo: RepoData,
+    deadline: float | None,
+    cumulative_cost: list[int],
+) -> None:
+    """Fetch timeline events for each PR and write review_events JSON to the prs table.
+
+    Graceful degradation: per-PR failures set review_events=NULL and update
+    repo.field_statuses['review_events'] to partial. CostBudgetExceeded causes
+    remaining PRs to be skipped (review_events stays NULL).
+    """
+    budget_exceeded = False
+    any_failure = False
+    skipped_no_node_id = 0
+
+    for pr in prs:
+        if budget_exceeded:
+            # Skip remaining — leave review_events NULL
+            continue
+
+        if not pr.node_id:
+            # No node_id available — skip silently
+            skipped_no_node_id += 1
+            continue
+
+        try:
+            raw_events = gql.fetch_pr_timeline(
+                pr.node_id,
+                deadline_monotonic=deadline,
+                cumulative_cost=cumulative_cost,
+            )
+            events = [_event_to_review_event(n) for n in raw_events if n.get("__typename")]
+            review_json = json.dumps(
+                [
+                    {
+                        "type": e.type,
+                        "author": e.author,
+                        "state": e.state,
+                        "label": e.label,
+                        "submitted_at": e.submitted_at,
+                        "created_at": e.created_at,
+                    }
+                    for e in events
+                ]
+            )
+            with conn:
+                conn.execute(
+                    "UPDATE prs SET review_events=? WHERE repo_id=? AND number=?",
+                    (review_json, repo_id, pr.number),
+                )
+
+        except PRNodeNotFound:
+            # Node not found on GitHub — leave review_events NULL silently (not a failure)
+            pass
+
+        except CostBudgetExceeded as e:
+            import sys as _sys
+            print(f"WARNING: {e} — skipping remaining PR timelines", file=_sys.stderr)
+            budget_exceeded = True
+            any_failure = True
+
+        except Exception as e:
+            import sys as _sys
+            print(
+                f"WARNING: timeline capture failed for PR #{pr.number}: {e}",
+                file=_sys.stderr,
+            )
+            any_failure = True
+            # Leave review_events=NULL for this PR
+            existing = repo.field_statuses.get("review_events")
+            if existing is None or existing.status == "success":
+                repo.field_statuses["review_events"] = FieldStatus(
+                    status="partial",
+                    error_note=f"timeline capture failed for PR #{pr.number}: {str(e)[:100]}",
+                )
+
+    if skipped_no_node_id > 0 and prs:
+        if skipped_no_node_id == len(prs):
+            logging.getLogger(__name__).warning(
+                "All %d PRs for repo_id=%s lack node_id; timeline capture skipped entirely",
+                len(prs), repo_id,
+            )
+        else:
+            logging.getLogger(__name__).warning(
+                "%d/%d PRs for repo_id=%s lack node_id; their timelines skipped",
+                skipped_no_node_id, len(prs), repo_id,
+            )
+        # Treat as partial — we skipped work we should have done
+        any_failure = True
+
+    if budget_exceeded:
+        repo.field_statuses["review_events"] = FieldStatus(
+            status="partial",
+            error_note=f"skipped: cumulative cost approached {TIMELINE_CUMULATIVE_WARN}/hr limit",
+        )
+    elif any_failure:
+        # Set partial if not already set by the per-PR exception handler above
+        if "review_events" not in repo.field_statuses:
+            repo.field_statuses["review_events"] = FieldStatus(
+                status="partial",
+                error_note=f"{skipped_no_node_id}/{len(prs)} PRs lack node_id; timeline capture skipped",
+            )
+    else:
+        repo.field_statuses["review_events"] = FieldStatus(status="success")
+
+
 def _insert_snapshot_placeholder(
     db_conn: sqlite3.Connection,
     snapshot_id: str,
@@ -333,7 +579,7 @@ def _persist_repo(
     prs: list[PRData],
     issues: list[IssueData],
     releases: list[ReleaseData],
-) -> None:
+) -> int:
     field_statuses_json = json.dumps(
         {k: {"status": v.status, "error_note": v.error_note} for k, v in repo.field_statuses.items()}
     )
@@ -366,8 +612,9 @@ def _persist_repo(
                 """
                 INSERT OR REPLACE INTO prs
                   (repo_id, number, title, author, created_at, updated_at,
-                   is_draft, is_dependabot, is_renovate, hours_idle, stalled)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   is_draft, is_dependabot, is_renovate, hours_idle, stalled,
+                   node_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     repo_id,
@@ -381,6 +628,7 @@ def _persist_repo(
                     int(pr.is_renovate),
                     pr.hours_idle,
                     int(pr.stalled),
+                    pr.node_id,
                 ),
             )
 
@@ -421,6 +669,7 @@ def _persist_repo(
                 ),
             )
 
+    return repo_id
 
 
 def _prune_old_snapshots(
@@ -483,6 +732,8 @@ def _build_current_json(
                 "parent_is_deleted": bool(repo_row["parent_is_deleted"]),
                 "capture_status": repo_row["capture_status"],
                 "field_statuses": json.loads(repo_row["field_statuses"] or "{}"),
+                "upstream": json.loads(repo_row["upstream"]) if repo_row["upstream"] else None,
+                "vulnerability_alerts": json.loads(repo_row["vulnerability_alerts"]) if repo_row["vulnerability_alerts"] else None,
                 "prs": [
                     {
                         **dict(r),
@@ -490,6 +741,7 @@ def _build_current_json(
                         "is_dependabot": bool(r["is_dependabot"]),
                         "is_renovate": bool(r["is_renovate"]),
                         "stalled": bool(r["stalled"]),
+                        "review_events": json.loads(r["review_events"]) if r["review_events"] else None,
                     }
                     for r in pr_rows
                 ],
@@ -517,6 +769,7 @@ def run_snapshot(
     gql: GraphQLClient,
     deadline: float | None,
     output_dir: Path | None = None,
+    rest_client: GHRestClient | None = None,
 ) -> str:
     """Run one full snapshot, persist to SQLite, write current/prev JSON. Returns snapshot_id."""
     start_time = time.monotonic()
@@ -550,8 +803,19 @@ def run_snapshot(
         orgs_queried=orgs_queried,
     )
 
+    # Set up REST client (caller may pass one in for testing; otherwise create from env)
+    _rest_client_owner = rest_client is None
+    if rest_client is None:
+        import os as _os
+        _token = _os.environ.get("GH_TOKEN") or _os.environ.get("GITHUB_TOKEN")
+        if _token:
+            rest_client = GHRestClient(token=_token)
+    _rest_client = rest_client
+
     org_errors: list[str] = []
     orgs_succeeded = 0
+    # Cumulative rateLimit.cost tracker across all timeline queries in this run
+    cumulative_timeline_cost: list[int] = [0]
     for org_name, org_config in cfg.orgs.items():
         # Enumerate repos
         try:
@@ -592,6 +856,7 @@ def run_snapshot(
             parent = node.get("parent") or {}
             parent_owner = (parent.get("owner") or {}).get("login")
             parent_name = parent.get("name")
+            parent_default_branch = (parent.get("defaultBranchRef") or {}).get("name")
 
             has_issues = bool(node.get("hasIssuesEnabled", True))
             default_branch_ref = node.get("defaultBranchRef") or {}
@@ -608,6 +873,7 @@ def run_snapshot(
                 parent_is_deleted=False,
                 capture_status="success",
                 field_statuses={},
+                parent_default_branch=parent_default_branch,
             )
 
             # Capture PRs
@@ -652,7 +918,7 @@ def run_snapshot(
 
             # Persist to SQLite
             try:
-                _persist_repo(db_conn, snapshot_id, repo, prs, issues, releases)
+                repo_id = _persist_repo(db_conn, snapshot_id, repo, prs, issues, releases)
             except Exception as e:
                 click.echo(f"ERROR: failed to persist {org_name}/{repo_name}: {e}", err=True)
                 repos_failed += 1
@@ -660,6 +926,60 @@ def run_snapshot(
                     repos_partial -= 1
                 else:
                     repos_succeeded -= 1
+                continue
+
+            # Capture PR timelines (after persist so we have repo_id)
+            if repo_id is not None and prs:
+                _capture_pr_timelines(
+                    gql, db_conn, repo_id, prs, repo,
+                    deadline, cumulative_timeline_cost,
+                )
+                # Re-evaluate repo status after timeline capture
+                if "review_events" in repo.field_statuses:
+                    rev_status = repo.field_statuses["review_events"]
+                    if rev_status.status in ("partial", "failed"):
+                        if counted_as == "success":
+                            repos_succeeded -= 1
+                            repos_partial += 1
+                            repo.capture_status = "partial"
+                            counted_as = "partial"
+
+            # Capture fork upstream delta (REST, graceful)
+            if repo_id is not None and _rest_client is not None:
+                _capture_upstream(_rest_client, repo, db_conn, repo_id)
+                up_status = repo.field_statuses.get("upstream")
+                if up_status and up_status.status in ("partial", "failed"):
+                    if counted_as == "success":
+                        repos_succeeded -= 1
+                        repos_partial += 1
+                        repo.capture_status = "partial"
+                        counted_as = "partial"
+
+            # Capture vulnerability alerts (GraphQL, graceful)
+            if repo_id is not None:
+                _capture_vuln_alerts(gql, repo, db_conn, repo_id, cumulative_timeline_cost)
+                va_status = repo.field_statuses.get("vulnerability_alerts")
+                if va_status and va_status.status in ("partial", "failed", "scope_missing"):
+                    if counted_as == "success":
+                        repos_succeeded -= 1
+                        repos_partial += 1
+                        repo.capture_status = "partial"
+                        counted_as = "partial"
+
+            # Update field_statuses in the DB row after all captures
+            if repo_id is not None:
+                try:
+                    field_statuses_json = json.dumps(
+                        {k: {"status": v.status, "error_note": v.error_note}
+                         for k, v in repo.field_statuses.items()}
+                    )
+                    with db_conn:
+                        db_conn.execute(
+                            "UPDATE repos SET field_statuses=?, capture_status=? WHERE id=?",
+                            (field_statuses_json, repo.capture_status, repo_id),
+                        )
+                except Exception as e:
+                    click.echo(f"WARNING: failed to update field_statuses for {org_name}/{repo_name}: {e}", err=True)
 
     duration_ms = int((time.monotonic() - start_time) * 1000)
 
@@ -679,6 +999,21 @@ def run_snapshot(
         capture_status=snapshot_capture_status,
     )
 
+    # Compute and cache 7-day reviewer activity rollup
+    # Local import to avoid circular dependency (rollup imports DEPENDABOT_AUTHORS from this module)
+    try:
+        from pulse.rollup import compute_reviewer_activity_7d
+        rollup = compute_reviewer_activity_7d(db_conn)
+        with db_conn:
+            db_conn.execute(
+                "UPDATE snapshots SET reviewer_activity_7d=? WHERE id=?",
+                (json.dumps(rollup), snapshot_id),
+            )
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            "reviewer_activity_7d rollup failed for snapshot %s: %s", snapshot_id, e
+        )
+
     # Write JSON artifacts
     if output_dir is not None:
         current_data = _build_current_json(db_conn, snapshot_id)
@@ -696,5 +1031,12 @@ def run_snapshot(
 
     # Prune old snapshots
     _prune_old_snapshots(db_conn, cfg.defaults.history_days)
+
+    # Close REST client if we created it
+    if _rest_client_owner and _rest_client is not None:
+        try:
+            _rest_client.close()
+        except Exception:
+            pass
 
     return snapshot_id
