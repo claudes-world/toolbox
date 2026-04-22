@@ -12,6 +12,7 @@ All tools use a shared Python venv at `~/venvs/transcribe/` and are symlinked in
 | [speak](#speak) | Text-to-speech with OpenAI, Google, or ElevenLabs |
 | [md-speak](#md-speak) | Read markdown documents aloud with multiple voices |
 | [voice-hook](#voice-hook) | Claude Code hook: auto-transcribe Telegram voice notes |
+| [pulse](pulse/README.md) | GitHub org activity snapshots — open PRs, issues, releases, Dependabot |
 
 ---
 
@@ -116,6 +117,35 @@ md-speak --no-describe document.md      # skip AI descriptions
 
 ---
 
+### pulse
+
+GitHub org activity monitor. Periodic GraphQL snapshots — open PRs, issues, Dependabot PRs, releases — stored in SQLite, rendered to a markdown digest.
+
+Full documentation: [`pulse/README.md`](pulse/README.md)
+
+**Quick start:**
+```bash
+~/venvs/transcribe/bin/pip install -e ~/code/toolbox/
+ln -sf ~/code/toolbox/bin/pulse ~/bin/pulse   # add to PATH
+mkdir -p ~/.world/pulse && chmod 700 ~/.world/pulse
+echo "GH_TOKEN=ghp_yourtoken" > ~/.world/pulse/env && chmod 600 ~/.world/pulse/env
+cp ~/code/toolbox/systemd/user/config.yml ~/.world/pulse/config.yml
+# edit ~/.world/pulse/config.yml — set your org name under `orgs:`
+export $(grep -v '^#' ~/.world/pulse/env | xargs)
+pulse --self-check    # validate token, config, storage
+pulse --now           # run snapshot + render digest
+```
+
+**Files:**
+- `pulse/` — Python package (config, storage, GraphQL, snapshot, digest)
+- `bin/pulse` — executable entry point
+- `systemd/user/` — service + timer units
+- `tests/test_config.py`, `tests/test_storage.py` — unit tests
+
+**Cost:** No paid API calls. GraphQL queries use GitHub PAT (free tier).
+
+---
+
 ## Setup
 
 Clone the repo and symlink each tool into `~/bin/`:
@@ -136,9 +166,24 @@ python3 -m venv ~/venvs/transcribe
 ~/venvs/transcribe/bin/pip install openai elevenlabs google-cloud-texttospeech mistune anthropic
 ```
 
+## Additional tools
+
+Standalone tools that don't have their own README section yet.
+
+| Tool | Description | Docs |
+|------|-------------|------|
+| gen-image | Generate images via Google Gemini/Imagen API | `gen-image/` |
+| morning-brief | Gather system health, PR staleness, weather, and dependency alerts in parallel; output JSON or human-readable text | `morning-brief/` |
+| openai-usage | Query OpenAI costs and usage; optionally send summary to Telegram | `openai-usage/` |
+| ports | Dynamic port map of all listening TCP services on the VPS (port, process, PID, tunnel hostname, systemd status) | `ports/` |
+| tag-mp3 | Tag an mp3 file with ID3 metadata and optional album art | `tag-mp3/` |
+| tg-sanitize | Telegram MarkdownV2 sanitizer — escapes special characters for safe bot messages | `tg-sanitize/` |
+
 ## Hooks
 
-Claude Code hooks that run automatically during sessions. These live in `hooks/` and are wired up via `.claude/settings.local.json`.
+Claude Code hooks that run automatically during sessions. Full hook registry and wiring guide: [`hooks/README.md`](hooks/README.md).
+
+These live in `hooks/` and are wired up via `.claude/settings.local.json`.
 
 ### voice-hook
 

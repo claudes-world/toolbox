@@ -1,0 +1,28 @@
+# pulse.service
+[Unit]
+Description=org-pulse GitHub API snapshot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=%h/.world/pulse/env
+WorkingDirectory=%h
+# flock -n: non-blocking external concurrency guard for the service path.
+# `pulse --service` enters _run_now_no_lock(), which skips PulseLock entirely
+# — this flock is the sole concurrency guard here.
+# The on-demand `pulse --now` path uses PulseLock internally (locks.py).
+ExecStart=/usr/bin/flock -n /run/user/%U/pulse.lock %h/code/toolbox/bin/pulse --service
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pulse
+# NOTE: NO Restart=on-failure — would cause retry storms during rate-limit
+# windows. The timer cadence drives the next attempt instead.
+PrivateTmp=true
+ProtectSystem=strict
+NoNewPrivileges=true
+ReadWritePaths=%h/.world/pulse /run/user/%U
+
+[Install]
+WantedBy=default.target

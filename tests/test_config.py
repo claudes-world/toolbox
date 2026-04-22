@@ -1,0 +1,253 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from pulse.config import ConfigError, load_config
+
+MINIMAL_VALID = """\
+schema_version: "1.0"
+orgs:
+  claudes-world:
+    ignore: []
+    stall_overrides: {}
+defaults:
+  stall_pr_hours: 12
+  stall_issue_hours: 72
+  history_days: 7
+  cadence_minutes: 30
+  github_api_base: "https://api.github.com"
+  max_prs_per_repo: 30
+  max_issues_per_repo: 50
+  max_releases_per_repo: 10
+"""
+
+WITH_STALL_OVERRIDES = """\
+schema_version: "1.0"
+orgs:
+  claudes-world:
+    ignore: [some-repo]
+    stall_overrides:
+      my-repo:
+        pr_hours: 24
+        issue_hours: 48
+defaults:
+  stall_pr_hours: 12
+  stall_issue_hours: 72
+  history_days: 7
+  cadence_minutes: 30
+  github_api_base: "https://api.github.com"
+  max_prs_per_repo: 30
+  max_issues_per_repo: 50
+  max_releases_per_repo: 10
+"""
+
+
+def _write(tmp_path: Path, content: str) -> Path:
+    p = tmp_path / "config.yml"
+    p.write_text(content)
+    return p
+
+
+def test_valid_minimal_loads(tmp_path: Path) -> None:
+    cfg = load_config(_write(tmp_path, MINIMAL_VALID))
+    assert cfg.schema_version == "1.0"
+    assert "claudes-world" in cfg.orgs
+    assert cfg.defaults.stall_pr_hours == 12
+
+
+def test_valid_with_stall_overrides(tmp_path: Path) -> None:
+    cfg = load_config(_write(tmp_path, WITH_STALL_OVERRIDES))
+    override = cfg.orgs["claudes-world"].stall_overrides["my-repo"]
+    assert override.pr_hours == 24
+    assert override.issue_hours == 48
+
+
+def test_extra_field_raises(tmp_path: Path) -> None:
+    bad = MINIMAL_VALID + "extra_field: oops\n"
+    with pytest.raises(ConfigError):
+        load_config(_write(tmp_path, bad))
+
+
+def test_missing_defaults_raises(tmp_path: Path) -> None:
+    no_defaults = """\
+schema_version: "1.0"
+orgs:
+  claudes-world: {}
+"""
+    with pytest.raises(ConfigError):
+        load_config(_write(tmp_path, no_defaults))
+
+
+def test_invalid_type_stall_pr_hours(tmp_path: Path) -> None:
+    bad = MINIMAL_VALID.replace("stall_pr_hours: 12", "stall_pr_hours: not-a-number")
+    with pytest.raises(ConfigError):
+        load_config(_write(tmp_path, bad))
+
+
+def test_stall_pr_hours_zero_raises(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yml"
+    cfg.write_text("""\
+schema_version: "1.0"
+orgs:
+  claudes-world:
+    ignore: []
+defaults:
+  stall_pr_hours: 0
+  stall_issue_hours: 72
+  history_days: 7
+  cadence_minutes: 30
+  github_api_base: "https://api.github.com"
+  max_prs_per_repo: 30
+  max_issues_per_repo: 50
+  max_releases_per_repo: 10
+""")
+    with pytest.raises(ConfigError):
+        load_config(cfg)
+
+
+def test_stall_pr_hours_negative_raises(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yml"
+    cfg.write_text("""\
+schema_version: "1.0"
+orgs:
+  claudes-world:
+    ignore: []
+defaults:
+  stall_pr_hours: -1
+  stall_issue_hours: 72
+  history_days: 7
+  cadence_minutes: 30
+  github_api_base: "https://api.github.com"
+  max_prs_per_repo: 30
+  max_issues_per_repo: 50
+  max_releases_per_repo: 10
+""")
+    with pytest.raises(ConfigError):
+        load_config(cfg)
+
+
+def test_history_days_out_of_range_raises(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yml"
+    cfg.write_text("""\
+schema_version: "1.0"
+orgs:
+  claudes-world:
+    ignore: []
+defaults:
+  stall_pr_hours: 12
+  stall_issue_hours: 72
+  history_days: 400
+  cadence_minutes: 30
+  github_api_base: "https://api.github.com"
+  max_prs_per_repo: 30
+  max_issues_per_repo: 50
+  max_releases_per_repo: 10
+""")
+    with pytest.raises(ConfigError):
+        load_config(cfg)
+
+
+def test_load_config_nonexistent_path(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="not found"):
+        load_config(tmp_path / "does_not_exist.yml")
+
+
+def test_cadence_minutes_zero_raises(tmp_path: Path) -> None:
+    bad = MINIMAL_VALID.replace("cadence_minutes: 30", "cadence_minutes: 0")
+    with pytest.raises(ConfigError):
+        load_config(_write(tmp_path, bad))
+
+
+def test_cadence_minutes_negative_raises(tmp_path: Path) -> None:
+    bad = MINIMAL_VALID.replace("cadence_minutes: 30", "cadence_minutes: -5")
+    with pytest.raises(ConfigError):
+        load_config(_write(tmp_path, bad))
+
+
+def test_stall_issue_hours_zero_raises(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yml"
+    cfg.write_text(
+        "schema_version: '1.0'\n"
+        "orgs:\n  claudes-world:\n    ignore: []\n"
+        "defaults:\n"
+        "  stall_pr_hours: 12\n"
+        "  stall_issue_hours: 0\n"
+        "  history_days: 7\n"
+        "  cadence_minutes: 30\n"
+        "  github_api_base: 'https://api.github.com'\n"
+        "  max_prs_per_repo: 30\n"
+        "  max_issues_per_repo: 50\n"
+        "  max_releases_per_repo: 10\n"
+    )
+    with pytest.raises(ConfigError):
+        load_config(cfg)
+
+
+def test_stall_issue_hours_negative_raises(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yml"
+    cfg.write_text(
+        "schema_version: '1.0'\n"
+        "orgs:\n  claudes-world:\n    ignore: []\n"
+        "defaults:\n"
+        "  stall_pr_hours: 12\n"
+        "  stall_issue_hours: -1\n"
+        "  history_days: 7\n"
+        "  cadence_minutes: 30\n"
+        "  github_api_base: 'https://api.github.com'\n"
+        "  max_prs_per_repo: 30\n"
+        "  max_issues_per_repo: 50\n"
+        "  max_releases_per_repo: 10\n"
+    )
+    with pytest.raises(ConfigError):
+        load_config(cfg)
+
+
+def test_stall_override_issue_hours_zero_raises(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yml"
+    cfg.write_text(
+        "schema_version: '1.0'\n"
+        "orgs:\n"
+        "  claudes-world:\n"
+        "    ignore: []\n"
+        "    stall_overrides:\n"
+        "      some-repo:\n"
+        "        pr_hours: 12\n"
+        "        issue_hours: 0\n"
+        "defaults:\n"
+        "  stall_pr_hours: 12\n"
+        "  stall_issue_hours: 72\n"
+        "  history_days: 7\n"
+        "  cadence_minutes: 30\n"
+        "  github_api_base: 'https://api.github.com'\n"
+        "  max_prs_per_repo: 30\n"
+        "  max_issues_per_repo: 50\n"
+        "  max_releases_per_repo: 10\n"
+    )
+    with pytest.raises(ConfigError):
+        load_config(cfg)
+
+
+def test_stall_override_pr_hours_zero_raises(tmp_path: Path) -> None:
+    content = """\
+schema_version: "1.0"
+orgs:
+  claudes-world:
+    ignore: []
+    stall_overrides:
+      some-repo:
+        pr_hours: 0
+        issue_hours: 24
+defaults:
+  stall_pr_hours: 12
+  stall_issue_hours: 72
+  history_days: 7
+  cadence_minutes: 30
+  github_api_base: "https://api.github.com"
+  max_prs_per_repo: 30
+  max_issues_per_repo: 50
+  max_releases_per_repo: 10
+"""
+    with pytest.raises(ConfigError):
+        load_config(_write(tmp_path, content))
