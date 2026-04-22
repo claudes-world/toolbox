@@ -17,11 +17,11 @@ CHAT_ID="${TELEGRAM_CHAT_ID:-}"
 
 if [[ "$EVENT" == *"PreCompact"* ]] || [[ "$MATCHER" == *"manual"* && -z "$EVENT" ]]; then
   # Could be PreCompact
-  curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
+  curl -s -4 --connect-timeout 2 --max-time 4 -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
     -d "chat_id=${CHAT_ID}&text=🗜 Compacting context...&disable_notification=true" \
     > /dev/null 2>&1 || true
 elif [[ "$EVENT" == *"PostCompact"* ]]; then
-  curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
+  curl -s -4 --connect-timeout 2 --max-time 4 -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
     -d "chat_id=${CHAT_ID}&text=✅ Context compacted.&disable_notification=true" \
     > /dev/null 2>&1 || true
 fi
