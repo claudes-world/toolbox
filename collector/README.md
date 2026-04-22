@@ -30,6 +30,12 @@ bash ~/code/toolbox/collector/install.sh
 The script is idempotent. Re-running it deploys any updated unit file while
 preserving your `~/.config/alloy/config.alloy` if it already exists.
 
+> **Note:** The service unit passes `--stability.level=public-preview` to
+> `alloy run`. This flag is required because `otelcol.exporter.file` is
+> classified as public-preview in Alloy v1.15.1+. Without it, Alloy exits
+> immediately. If you construct the `alloy run` command manually (e.g. for
+> debugging), include this flag or the exporter will not load.
+
 ## Service Management
 
 ```bash

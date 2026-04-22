@@ -6,7 +6,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/bin/alloy run %h/.config/alloy/config.alloy
+ExecStart=%h/bin/alloy run --stability.level=public-preview %h/.config/alloy/config.alloy
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
