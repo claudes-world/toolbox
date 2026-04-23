@@ -8,7 +8,7 @@ PORT="${1:?Usage: systemd-wait-port.sh <port> [max_wait_secs]}"
 MAX="${2:-10}"
 
 for ((i=1; i<=MAX; i++)); do
-    if ss -tln | grep -q ":${PORT} "; then
+    if ss -tln | grep -Fq ":${PORT} "; then
         exit 0
     fi
     sleep 1
