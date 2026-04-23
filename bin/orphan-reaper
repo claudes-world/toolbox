@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# orphan-reaper — scan for untracked long-lived node/bun/python processes
+#
+# Usage:
+#   orphan-reaper          dry-run: report orphan candidates, no kill
+#   orphan-reaper --yes    terminate orphan candidates via SIGTERM
+#   orphan-reaper --help   show this help
+#
+# A process is an "orphan candidate" if ALL of the following hold:
+#   1. It is owned by the current user
+#   2. Its command matches node, bun, or python
+#   3. It has been running for > 24 hours (etimes > 86400s)
+#   4. No ancestor in its ppid chain is a MainPID of a systemd user unit
+#
+# By default (dry-run) the script only prints a report.
+# Pass --yes to send SIGTERM to each candidate and log to the system journal.
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+DRY_RUN=true
+for arg in "$@"; do
+  case "$arg" in
+    --yes)   DRY_RUN=false ;;
+    --help|-h)
+      sed -n '/^# orphan-reaper/,/^set -/{ /^set -/d; s/^# \{0,1\}//; p }' "$0"
+      exit 0
+      ;;
+    *)
+      echo "orphan-reaper: unknown option: $arg" >&2
+      echo "Usage: orphan-reaper [--yes] [--help]" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# Collect MainPIDs of all systemd user units
+# ---------------------------------------------------------------------------
+collect_managed_pids() {
+  systemctl --user show '*.service' --property=MainPID 2>/dev/null \
+    | grep '^MainPID=' \
+    | grep -v '=0$' \
+    | sed 's/^MainPID=//' \
+    || true
+}
+
+# ---------------------------------------------------------------------------
+# Walk the ppid chain for a given PID.
+# Returns 0 (true) if any ancestor is in managed_pids, 1 (false) otherwise.
+# Stops at PID 1 (init), depth limit, or a missing PID.
+# ---------------------------------------------------------------------------
+MAX_DEPTH=30
+
+is_managed() {
+  local pid="$1"
+  local depth=0
+
+  # Check if the process itself is a systemd MainPID before walking ancestors.
+  # Without this, a service's MainPID would be reported as an orphan because
+  # its own parent is the systemd user manager (not a MainPID).
+  if echo "$managed_pids" | grep -qxF "$pid"; then
+    return 0
+  fi
+
+  while [ "$depth" -lt "$MAX_DEPTH" ]; do
+    depth=$(( depth + 1 ))
+
+    # Look up the parent PID; ps returns nothing if the process is gone
+    local ppid
+    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ') || true
+
+    # Process has already exited or ppid is unavailable
+    if [ -z "$ppid" ] || [ "$ppid" = "0" ]; then
+      return 1
+    fi
+
+    # Reached init — not managed by a user unit
+    if [ "$ppid" = "1" ]; then
+      return 1
+    fi
+
+    # Check if this ancestor is a managed pid
+    if echo "$managed_pids" | grep -qxF "$ppid"; then
+      return 0
+    fi
+
+    pid="$ppid"
+  done
+
+  # Depth limit hit — treat as unmanaged to be conservative (report it)
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+if "$DRY_RUN"; then
+  echo "[DRY RUN] orphan-reaper: scanning for untracked node/bun/python processes > 24h"
+else
+  echo "orphan-reaper: scanning for untracked node/bun/python processes > 24h (KILL MODE)"
+fi
+
+# Collect managed PIDs once (newline-separated string)
+managed_pids=$(collect_managed_pids)
+
+# Safety check: if systemctl failed (e.g. no D-Bus session) managed_pids is empty.
+# In --yes mode this is dangerous — every long-lived process would appear unmanaged.
+# Abort rather than silently risk killing legitimate services.
+if [ -z "$managed_pids" ] && ! "$DRY_RUN"; then
+  echo "orphan-reaper: ERROR: systemctl --user returned no managed PIDs (D-Bus unavailable?)" >&2
+  echo "orphan-reaper: Refusing to kill in --yes mode without a valid managed-PID list." >&2
+  echo "orphan-reaper: Run without --yes to see candidates, or verify systemd user session." >&2
+  exit 1
+fi
+
+# Find candidate processes: current user, node/bun/python/python3, running > 24h
+# Columns: pid, etimes (elapsed seconds), ppid, cmd (rest of line)
+# Use awk to filter by elapsed time AND by the basename of the executable (col 4).
+# Matching on basename avoids false positives from args like "tail -f python.log"
+# and correctly handles path-prefixed binaries (/usr/bin/node, /path/to/python3.11).
+candidates=$(
+  ps -u "$(id -un)" -o pid,etimes,ppid,cmd --no-headers 2>/dev/null \
+    | awk '$2 > 86400 {
+        split($4, a, "/")
+        exe = a[length(a)]
+        if (exe ~ /^(node|bun|python[0-9.]*)$/) print
+      }' \
+    || true
+)
+
+if [ -z "$candidates" ]; then
+  echo "orphan-reaper: no orphans found."
+  exit 0
+fi
+
+orphan_count=0
+killed_count=0
+
+while IFS= read -r line; do
+  [ -z "$line" ] && continue
+
+  # Parse: pid etimes ppid cmd...
+  pid=$(echo "$line" | awk '{print $1}')
+  age=$(echo "$line" | awk '{print $2}')
+  cmd=$(echo "$line" | awk '{$1=$2=$3=""; sub(/^[[:space:]]+/, ""); print}')
+
+  # Skip blank pid (shouldn't happen, but guard anyway)
+  [ -z "$pid" ] && continue
+
+  # Skip processes managed by a systemd user unit ancestor
+  if is_managed "$pid"; then
+    continue
+  fi
+
+  orphan_count=$(( orphan_count + 1 ))
+  echo "ORPHAN  pid=${pid}  age=${age}s  cmd=${cmd}"
+
+  if ! "$DRY_RUN"; then
+    if kill -TERM "$pid" 2>/dev/null; then
+      logger -t orphan-reaper "SIGTERM pid=${pid} age=${age}s cmd=${cmd}"
+      killed_count=$(( killed_count + 1 ))
+    else
+      echo "orphan-reaper: warning: could not kill pid=${pid} (already gone?)" >&2
+    fi
+  fi
+
+done <<< "$candidates"
+
+if [ "$orphan_count" -eq 0 ]; then
+  echo "orphan-reaper: no orphans found."
+elif "$DRY_RUN"; then
+  echo "Total: ${orphan_count} orphan candidate(s). Re-run with --yes to terminate."
+else
+  echo "Total: ${orphan_count} orphan candidate(s) found. Sent SIGTERM to ${killed_count}."
+fi
