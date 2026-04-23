@@ -252,7 +252,7 @@ def main():
             print(f"{args.out}", file=sys.stderr)
         else:
             sys.stdout.buffer.write(audio_data)
-    except Exception as e:
+    except BaseException as e:
         if _span:
             _span.record_exception(e)
             if _trace:

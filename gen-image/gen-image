@@ -127,7 +127,7 @@ def main():
         output.write_bytes(image_data)
         print(f"{output}", file=sys.stderr)
         print(str(output))
-    except Exception as e:
+    except BaseException as e:
         if _span:
             _span.record_exception(e)
             if _trace:

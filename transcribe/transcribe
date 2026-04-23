@@ -111,7 +111,7 @@ def main():
         finally:
             if converted:
                 converted.unlink(missing_ok=True)
-    except Exception as e:
+    except BaseException as e:
         if _span:
             _span.record_exception(e)
             if _trace:

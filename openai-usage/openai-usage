@@ -217,7 +217,7 @@ def main():
             print("Sent to Telegram", file=sys.stderr)
         else:
             print(report)
-    except Exception as e:
+    except BaseException as e:
         if _span:
             _span.record_exception(e)
             if _trace:
