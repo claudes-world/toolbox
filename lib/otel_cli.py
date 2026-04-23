@@ -95,9 +95,12 @@ def _handle_signal(sig, frame) -> None:
     to a CLI tool kills the process before BatchSpanProcessor flushes. With
     SimpleSpanProcessor this is less critical (sync flush), but explicit handling
     ensures clean shutdown on Ctrl-C and systemd stop signals.
+
+    Exit with the conventional signal exit code (128 + signum) so callers and
+    pipelines see the correct status. Using sys.exit(0) would mask interruptions.
     """
     shutdown()
-    sys.exit(0)
+    sys.exit(128 + sig)
 
 
 signal.signal(signal.SIGTERM, _handle_signal)
