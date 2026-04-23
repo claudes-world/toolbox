@@ -23,6 +23,15 @@ import sys
 from pathlib import Path
 from urllib.request import Request, urlopen
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
+try:
+    import otel_cli
+    otel_cli.setup('gen-image')
+    _tracer = otel_cli.get_tracer(__name__)
+except Exception:
+    otel_cli = None  # type: ignore[assignment]
+    _tracer = None
+
 SECRETS_FILE = Path.home() / ".secrets" / "google-ai.env"
 
 MODELS = {
@@ -84,33 +93,47 @@ def generate_image(prompt: str, model: str, api_key: str, aspect_ratio: str = "1
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate images via Google AI")
-    parser.add_argument("prompt", help="Image description")
-    parser.add_argument("--out", "-o", type=Path, default=None,
-                        help="Output file (default: generated-<timestamp>.png)")
-    parser.add_argument("--model", "-m", default="imagen-4-fast",
-                        choices=list(MODELS.keys()),
-                        help="Model (default: imagen-4-fast)")
-    parser.add_argument("--aspect", "-a", default="1:1",
-                        help="Aspect ratio: 1:1, 16:9, 9:16, 4:3, 3:4 (default: 1:1)")
-    args = parser.parse_args()
+    from opentelemetry import trace as _trace
+    _span_ctx = _tracer.start_as_current_span('gen-image.run') if _tracer else None
+    _span = _span_ctx.__enter__() if _span_ctx else None
+    try:
+        parser = argparse.ArgumentParser(description="Generate images via Google AI")
+        parser.add_argument("prompt", help="Image description")
+        parser.add_argument("--out", "-o", type=Path, default=None,
+                            help="Output file (default: generated-<timestamp>.png)")
+        parser.add_argument("--model", "-m", default="imagen-4-fast",
+                            choices=list(MODELS.keys()),
+                            help="Model (default: imagen-4-fast)")
+        parser.add_argument("--aspect", "-a", default="1:1",
+                            help="Aspect ratio: 1:1, 16:9, 9:16, 4:3, 3:4 (default: 1:1)")
+        args = parser.parse_args()
 
-    api_key = load_api_key()
+        api_key = load_api_key()
 
-    print(f"Generating with {args.model}...", file=sys.stderr)
-    image_data = generate_image(args.prompt, args.model, api_key, args.aspect)
+        print(f"Generating with {args.model}...", file=sys.stderr)
+        image_data = generate_image(args.prompt, args.model, api_key, args.aspect)
 
-    if args.out:
-        output = args.out
-    else:
-        from datetime import datetime
-        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-        slug = args.prompt[:30].lower().replace(" ", "-").replace("/", "")
-        output = Path(f"/tmp/gen-{ts}-{slug}.png")
+        if args.out:
+            output = args.out
+        else:
+            from datetime import datetime
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            slug = args.prompt[:30].lower().replace(" ", "-").replace("/", "")
+            output = Path(f"/tmp/gen-{ts}-{slug}.png")
 
-    output.write_bytes(image_data)
-    print(f"{output}", file=sys.stderr)
-    print(str(output))
+        output.write_bytes(image_data)
+        print(f"{output}", file=sys.stderr)
+        print(str(output))
+    except Exception as e:
+        if _span:
+            _span.record_exception(e)
+            _span.set_status(_trace.StatusCode.ERROR, str(e))
+        raise
+    finally:
+        if _span_ctx:
+            _span_ctx.__exit__(None, None, None)
+        if otel_cli:
+            otel_cli.shutdown()
 
 
 if __name__ == "__main__":

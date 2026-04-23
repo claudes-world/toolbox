@@ -15,6 +15,10 @@
 
 set -euo pipefail
 
+# shellcheck source=../lib/otel.sh
+_OTEL_LIB="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)/../lib/otel.sh"
+{ [ -f "$_OTEL_LIB" ] && source "$_OTEL_LIB" && otel_start_span "${0##*/}"; } || true
+
 # ── configuration ─────────────────────────────────────────────────────────────
 
 STALE_HOURS="${STALE_HOURS:-48}"
@@ -31,7 +35,7 @@ fi
 # ── temp dir for module outputs ───────────────────────────────────────────────
 
 TMPDIR_BRIEF=$(mktemp -d)
-trap 'rm -rf "$TMPDIR_BRIEF"' EXIT
+trap '_exit_code=$?; rm -rf "$TMPDIR_BRIEF"; { otel_end_span "$_exit_code"; } 2>/dev/null || true' EXIT
 
 # ── module 1: weather ────────────────────────────────────────────────────────
 
