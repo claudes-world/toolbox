@@ -16,12 +16,22 @@ Requires OPENAI_API_KEY in the environment.
 """
 
 import argparse
+import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 from openai import OpenAI
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
+try:
+    import otel_cli
+    otel_cli.setup('transcribe')
+    _tracer = otel_cli.get_tracer(__name__)
+except Exception:
+    otel_cli = None  # type: ignore[assignment]
+    _tracer = None
 
 DEFAULT_GLOSSARY = Path(__file__).resolve().parent / "glossary.txt"
 MINI_MODEL = "gpt-4o-mini-transcribe"
@@ -63,37 +73,55 @@ def transcribe(audio_path: str, model: str, prompt: str | None) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Transcribe audio via OpenAI API")
-    parser.add_argument("audio_file", help="Path to the audio file")
-    parser.add_argument("--full", action="store_true", help=f"Use {FULL_MODEL} (default: {MINI_MODEL})")
-    parser.add_argument("--no-glossary", action="store_true", help="Skip glossary prompt")
-    parser.add_argument("--glossary", type=Path, default=None, help="Custom glossary file path")
-    args = parser.parse_args()
-
-    audio = Path(args.audio_file)
-    if not audio.exists():
-        print(f"error: file not found: {audio}", file=sys.stderr)
-        sys.exit(1)
-
-    converted = None
-    if audio.suffix.lower() not in SUPPORTED_FORMATS:
-        print(f"converting {audio.suffix} to mp3...", file=sys.stderr)
-        audio = converted = convert_to_mp3(audio)
-
-    model = FULL_MODEL if args.full else MINI_MODEL
-
-    if args.no_glossary:
-        prompt = None
-    else:
-        glossary_path = args.glossary if args.glossary else DEFAULT_GLOSSARY
-        prompt = load_glossary(glossary_path)
-
     try:
-        text = transcribe(str(audio), model, prompt)
-        print(text)
+        from opentelemetry import trace as _trace
+    except ImportError:
+        _trace = None  # type: ignore[assignment]
+    _span_ctx = _tracer.start_as_current_span('transcribe.run') if _tracer else None
+    _span = _span_ctx.__enter__() if _span_ctx else None
+    try:
+        parser = argparse.ArgumentParser(description="Transcribe audio via OpenAI API")
+        parser.add_argument("audio_file", help="Path to the audio file")
+        parser.add_argument("--full", action="store_true", help=f"Use {FULL_MODEL} (default: {MINI_MODEL})")
+        parser.add_argument("--no-glossary", action="store_true", help="Skip glossary prompt")
+        parser.add_argument("--glossary", type=Path, default=None, help="Custom glossary file path")
+        args = parser.parse_args()
+
+        audio = Path(args.audio_file)
+        if not audio.exists():
+            print(f"error: file not found: {audio}", file=sys.stderr)
+            sys.exit(1)
+
+        converted = None
+        if audio.suffix.lower() not in SUPPORTED_FORMATS:
+            print(f"converting {audio.suffix} to mp3...", file=sys.stderr)
+            audio = converted = convert_to_mp3(audio)
+
+        model = FULL_MODEL if args.full else MINI_MODEL
+
+        if args.no_glossary:
+            prompt = None
+        else:
+            glossary_path = args.glossary if args.glossary else DEFAULT_GLOSSARY
+            prompt = load_glossary(glossary_path)
+
+        try:
+            text = transcribe(str(audio), model, prompt)
+            print(text)
+        finally:
+            if converted:
+                converted.unlink(missing_ok=True)
+    except BaseException as e:
+        if _span:
+            _span.record_exception(e)
+            if _trace:
+                _span.set_status(_trace.StatusCode.ERROR, str(e))
+        raise
     finally:
-        if converted:
-            converted.unlink(missing_ok=True)
+        if _span_ctx:
+            _span_ctx.__exit__(None, None, None)
+        if otel_cli:
+            otel_cli.shutdown()
 
 
 if __name__ == "__main__":

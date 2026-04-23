@@ -81,25 +81,10 @@ After install (or after restarting dependent services):
 
 4. Verify output file is being written:
    ```bash
-   tail -f ~/.local/share/alloy/traces.jsonl
+   tail -f ~/.local/share/alloy/otlp.jsonl
    ```
 
 5. Restart a connected service (e.g. pulse) and confirm spans appear in the file.
-
-## Logrotate Config
-
-Add to `/etc/logrotate.d/alloy-traces` (or `~/.config/logrotate/alloy-traces`):
-
-```
-/home/<user>/.local/share/alloy/traces.jsonl {
-    weekly
-    rotate 4
-    compress
-    missingok
-    notifempty
-    copytruncate
-}
-```
 
 ## Configuration
 
@@ -112,7 +97,7 @@ enable the Prometheus scraper block.
 Phase 2 will add an end-to-end test that:
 - Starts alloy.service
 - Sends synthetic OTLP spans from each instrumented service
-- Asserts spans appear in `traces.jsonl` within 10 s
+- Asserts spans appear in `otlp.jsonl` within 10 s
 - Reports missing coverage per service
 
 See `tests/test_alloy_config.sh` for the Phase 1 config-parse test.
