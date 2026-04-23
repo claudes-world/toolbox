@@ -26,11 +26,16 @@ otel_start_span() {
 }
 
 otel_end_span() {
+  [ -z "$_OTEL_START_NS" ] && return 0
   local exit_code="${1:-0}"
   local end_ns
   end_ns=$(date +%s%N)
-  local duration_ns=$(( end_ns - _OTEL_START_NS ))
   local caller_agent="${AGENT_NAME:-cli-direct}"
+  # JSON-escape double-quotes and backslashes in string values
+  local safe_svc="${_OTEL_SERVICE_NAME//\\/\\\\}"
+  safe_svc="${safe_svc//\"/\\\"}"
+  local safe_agent="${caller_agent//\\/\\\\}"
+  safe_agent="${safe_agent//\"/\\\"}"
   local status_code=0  # OK
   local status_msg=""
   if [ "$exit_code" -ne 0 ]; then
@@ -65,11 +70,11 @@ otel_end_span() {
       }]
     }]
   }' \
-    "$_OTEL_SERVICE_NAME" \
-    "$caller_agent" \
+    "$safe_svc" \
+    "$safe_agent" \
     "$_OTEL_TRACE_ID" \
     "$_OTEL_SPAN_ID" \
-    "$_OTEL_SERVICE_NAME" \
+    "$safe_svc" \
     "$_OTEL_START_NS" \
     "$end_ns" \
     "$exit_code" \

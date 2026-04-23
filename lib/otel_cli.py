@@ -66,10 +66,13 @@ def setup(service_name: str) -> None:
     )
     if endpoint:  # empty string = no-op mode
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-        exporter = OTLPSpanExporter(endpoint=endpoint)
+        exporter = OTLPSpanExporter(endpoint=endpoint, timeout=1)
         _provider.add_span_processor(SimpleSpanProcessor(exporter))
 
     trace.set_tracer_provider(_provider)
+
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
 
 
 def get_tracer(name: str) -> trace.Tracer:
@@ -86,6 +89,8 @@ def shutdown(timeout_ms: int = 2000) -> None:
         _provider.shutdown()
     except Exception:
         pass
+    finally:
+        _provider = None
 
 
 def _handle_signal(sig, frame) -> None:
@@ -101,7 +106,3 @@ def _handle_signal(sig, frame) -> None:
     """
     shutdown()
     sys.exit(128 + sig)
-
-
-signal.signal(signal.SIGTERM, _handle_signal)
-signal.signal(signal.SIGINT, _handle_signal)
