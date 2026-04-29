@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "Usage: agent-health-mcp-check SESSION" >&2
+}
+
+if [[ $# -ne 1 || -z "${1:-}" ]]; then
+  usage
+  echo "MCP_UNKNOWN:bad-args"
+  exit 2
+fi
+
+session="$1"
+projects_dir="$HOME/.claude/projects"
+telegram_tool="mcp__plugin_telegram_telegram__reply"
+
+# Best-effort heuristic: this depends on Claude Code's JSONL transcript format
+# and the wording of system-reminder blocks. If either changes, this probe needs
+# to be updated. Callers should treat MCP_UNKNOWN as fail-open.
+project_key_for_session() {
+  local value="$1"
+
+  if [[ "$value" == /* ]]; then
+    value="${value#/}"
+    value="${value//\//-}"
+    printf -- "-%s\n" "$value"
+    return
+  fi
+
+  printf -- "-home-claude-%s\n" "${value//\//-}"
+}
+
+find_latest_transcript() {
+  local key candidate
+  key="$(project_key_for_session "$session")"
+
+  if [[ -d "$projects_dir/$key" ]]; then
+    find "$projects_dir/$key" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null |
+      sort -nr |
+      awk 'NR == 1 { sub(/^[^ ]+ /, ""); print }'
+    return
+  fi
+
+  candidate="$(
+    find "$projects_dir" -maxdepth 1 -type d -name "*${session//\//-}*" -printf '%T@ %p\n' 2>/dev/null |
+      sort -nr |
+      awk 'NR == 1 { sub(/^[^ ]+ /, ""); print }'
+  )"
+  if [[ -n "$candidate" ]]; then
+    find "$candidate" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null |
+      sort -nr |
+      awk 'NR == 1 { sub(/^[^ ]+ /, ""); print }'
+  fi
+}
+
+if [[ ! -d "$projects_dir" ]]; then
+  echo "MCP_UNKNOWN:no-projects-dir"
+  exit 2
+fi
+
+transcript="$(find_latest_transcript || true)"
+if [[ -z "$transcript" || ! -f "$transcript" ]]; then
+  echo "MCP_UNKNOWN:no-transcript"
+  exit 2
+fi
+
+recent="$(tail -n 100 "$transcript" 2>/dev/null || true)"
+if [[ -z "$recent" ]]; then
+  echo "MCP_UNKNOWN:empty-transcript-tail"
+  exit 2
+fi
+
+latest_tool_line="$(
+  printf '%s\n' "$recent" |
+    awk -v tool="$telegram_tool" 'index($0, tool) { line = NR } END { if (line) print line }'
+)"
+
+latest_missing_line="$(
+  printf '%s\n' "$recent" |
+    awk '
+      {
+        lower = tolower($0)
+      }
+      lower ~ /system-reminder/ && lower ~ /telegram/ && (lower ~ /mcp servers have disconnected/ || lower ~ /deferred tools are no longer available/) {
+        line = NR
+      }
+      END { if (line) print line }
+    '
+)"
+
+if [[ -n "$latest_tool_line" && ( -z "$latest_missing_line" || "$latest_tool_line" -gt "$latest_missing_line" ) ]]; then
+  echo "MCP_OK"
+  exit 0
+fi
+
+if [[ -n "$latest_missing_line" ]]; then
+  echo "MCP_MISSING:recent-disconnect-reminder"
+  exit 1
+fi
+
+echo "MCP_UNKNOWN:no-recent-telegram-tool-signal"
+exit 2

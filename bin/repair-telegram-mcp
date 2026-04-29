@@ -1,0 +1,339 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage:
+  repair-telegram-mcp [SESSION]
+  repair-telegram-mcp SESSION --dry-run
+  repair-telegram-mcp SESSION --force
+
+Env:
+  REPAIR_POLL_SECONDS        default 60
+  REPAIR_MAX_WAIT_SECONDS    default 180
+  REPAIR_INPUT_LEN_THRESHOLD default 40
+USAGE
+}
+
+dry_run=0
+force=0
+session=""
+
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run)
+      dry_run=1
+      ;;
+    --force)
+      force=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --*)
+      usage
+      exit 2
+      ;;
+    *)
+      if [[ -n "$session" ]]; then
+        usage
+        exit 2
+      fi
+      session="$arg"
+      ;;
+  esac
+done
+
+if [[ -z "$session" ]]; then
+  session="$(tmux display-message -p '#S' 2>/dev/null || true)"
+fi
+
+if [[ -z "$session" ]]; then
+  echo "repair-telegram-mcp: no SESSION supplied and no current tmux session" >&2
+  exit 2
+fi
+
+poll_seconds="${REPAIR_POLL_SECONDS:-60}"
+max_wait_seconds="${REPAIR_MAX_WAIT_SECONDS:-180}"
+input_len_threshold="${REPAIR_INPUT_LEN_THRESHOLD:-40}"
+
+for numeric in poll_seconds max_wait_seconds input_len_threshold; do
+  value="${!numeric}"
+  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+    echo "repair-telegram-mcp: $numeric must be a non-negative integer" >&2
+    exit 2
+  fi
+done
+
+if (( poll_seconds == 0 || max_wait_seconds == 0 )); then
+  echo "repair-telegram-mcp: REPAIR_POLL_SECONDS and REPAIR_MAX_WAIT_SECONDS must be greater than zero" >&2
+  exit 2
+fi
+
+world_dir="$HOME/.world"
+mkdir -p "$world_dir"
+
+log_file="$world_dir/repair-telegram-mcp.log"
+session_safe="$(printf '%s' "$session" | tr -c 'A-Za-z0-9_.-' '_')"
+lock_file="$world_dir/repair-telegram-mcp.${session_safe}.lock"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+timestamp() {
+  TZ=America/New_York date '+%Y-%m-%dT%H:%M:%S%z'
+}
+
+input_len() {
+  printf '%s' "$1" | wc -c | tr -d ' '
+}
+
+log_action() {
+  local action="$1"
+  local reason="${2:-}"
+  local len="${3:-0}"
+  printf '%s session=%q action=%q reason=%q input_len=%s\n' \
+    "$(timestamp)" "$session" "$action" "$reason" "$len" >>"$log_file"
+}
+
+strip_display() {
+  sed $'s/\x1b\[[0-9;]*[a-zA-Z]//g; s/\xc2\xa0/ /g'
+}
+
+capture_input() {
+  local raw
+  raw="$(tmux capture-pane -t "$session" -p 2>/dev/null)" || return 2
+
+  printf '%s\n' "$raw" |
+    strip_display |
+    awk '
+      function strip_prompt(line) {
+        sub(/^│[[:space:]]*/, "", line)
+        sub(/^❯[[:space:]]*/, "", line)
+        return line
+      }
+      function strip_continuation(line) {
+        sub(/^│[[:space:]]*/, "", line)
+        return line
+      }
+      {
+        lines[NR] = $0
+        line = $0
+        if (index(line, "❯") == 1 || line ~ /^│[[:space:]]*❯/) {
+          last = NR
+        }
+      }
+      END {
+        if (!last) {
+          exit 88
+        }
+
+        out = ""
+        for (i = last; i <= NR; i++) {
+          line = lines[i]
+          if (i > last && index(line, "─────") == 1) {
+            break
+          }
+
+          if (i == last) {
+            line = strip_prompt(line)
+            out = line
+          } else {
+            line = strip_continuation(line)
+            out = out "\n" line
+          }
+        }
+
+        sub(/[[:space:]\n\r]+$/, "", out)
+        print out
+      }
+    '
+}
+
+capture_input_or_exit() {
+  local out rc
+  set +e
+  out="$(capture_input)"
+  rc=$?
+  set -e
+
+  if (( rc == 88 )); then
+    log_action "no-prompt" "agent-mid-turn-or-not-input-mode" 0
+    echo "repair-telegram-mcp: no prompt visible - agent likely mid-turn or REPL not in input mode, retry later" >&2
+    exit 8
+  fi
+
+  if (( rc != 0 )); then
+    log_action "capture-failed" "tmux-capture-pane-failed" 0
+    echo "repair-telegram-mcp: failed to capture tmux pane for session '$session'" >&2
+    exit 8
+  fi
+
+  printf '%s' "$out"
+}
+
+regex_escape() {
+  sed 's/[][\/.^$*+?{}()|\\]/\\&/g' <<<"$1"
+}
+
+repl_alive() {
+  local session_re pane pane_cmd
+  session_re="$(regex_escape "$session")"
+
+  if pgrep -f "bun.*${session_re}.*plugin-cache" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  pane="$(tmux capture-pane -t "$session" -p 2>/dev/null | strip_display || true)"
+  pane_cmd="$(tmux display-message -t "$session" -p '#{pane_current_command}' 2>/dev/null || true)"
+  if [[ "$pane_cmd" == *claude* ]] && pgrep -f 'claude' >/dev/null 2>&1 && grep -q '❯' <<<"$pane"; then
+    return 0
+  fi
+
+  return 1
+}
+
+if ! tmux has-session -t "$session" 2>/dev/null; then
+  log_action "missing-session" "tmux-has-session-failed" 0
+  echo "repair-telegram-mcp: tmux session '$session' not found" >&2
+  exit 3
+fi
+
+if ! repl_alive; then
+  log_action "zombie" "tmux-session-without-live-claude-repl" 0
+  echo "repair-telegram-mcp: zombie detected for '$session' (tmux exists but no live Claude REPL); use feedback_dead_repl_zombie_tmux.md full-restart procedure" >&2
+  exit 4
+fi
+
+exec 9>"$lock_file"
+if ! flock -n 9; then
+  log_action "lock-contention" "another-repair-running" 0
+  echo "repair-telegram-mcp: another repair is already running for '$session'" >&2
+  exit 7
+fi
+
+log_action "start" "dry_run=${dry_run},force=${force}" 0
+
+if (( force == 0 )); then
+  health_cmd="$script_dir/agent-health-mcp-check"
+  if [[ ! -x "$health_cmd" ]]; then
+    health_cmd="agent-health-mcp-check"
+  fi
+
+  set +e
+  probe_out="$("$health_cmd" "$session" 2>&1)"
+  probe_rc=$?
+  set -e
+
+  case "$probe_out" in
+    MCP_OK*)
+      log_action "probe-ok" "mcp-healthy" 0
+      if (( dry_run == 0 )); then
+        echo "no-op: MCP healthy, use --force to override"
+        exit 0
+      fi
+      echo "dry-run: MCP healthy; normal run would no-op, continuing parser/poll check" >&2
+      ;;
+    MCP_MISSING:*)
+      log_action "probe-missing" "$probe_out" 0
+      ;;
+    *)
+      log_action "probe-unavailable" "rc=${probe_rc}:${probe_out}" 0
+      ;;
+  esac
+fi
+
+deadline=$((SECONDS + max_wait_seconds))
+stable_input=""
+stable_reason=""
+
+while (( SECONDS < deadline )); do
+  s0="$(capture_input_or_exit)"
+  len0="$(input_len "$s0")"
+  log_action "poll-capture" "first" "$len0"
+
+  remaining=$((deadline - SECONDS))
+  if (( remaining <= 0 )); then
+    break
+  fi
+  sleep_for="$poll_seconds"
+  if (( sleep_for > remaining )); then
+    sleep_for="$remaining"
+  fi
+  sleep "$sleep_for"
+
+  s1="$(capture_input_or_exit)"
+  len1="$(input_len "$s1")"
+  log_action "poll-capture" "second" "$len1"
+
+  if [[ "$s0" == "$s1" ]]; then
+    if [[ -z "$s1" ]]; then
+      stable_input="$s1"
+      stable_reason="empty-stable"
+      log_action "input-stable" "$stable_reason" 0
+      break
+    fi
+
+    if (( len1 < input_len_threshold )); then
+      log_action "input-stable-short" "continue-polling" "$len1"
+      continue
+    fi
+
+    stable_input="$s1"
+    stable_reason="long-stable"
+    log_action "input-stable" "$stable_reason" "$len1"
+    break
+  fi
+
+  log_action "input-changed" "restart-wait" "$len1"
+done
+
+if [[ -z "$stable_reason" ]]; then
+  log_action "timeout" "input-never-stabilized" 0
+  echo "repair-telegram-mcp: poll timeout waiting for stable input in '$session'" >&2
+  exit 5
+fi
+
+stable_len="$(input_len "$stable_input")"
+if [[ "$stable_input" == /* ]]; then
+  log_action "refuse-slash-fragment" "input-starts-with-slash" "$stable_len"
+  echo "repair-telegram-mcp: refusing to commit partial slash command; clear the input manually and retry" >&2
+  exit 6
+fi
+
+if (( dry_run == 1 )); then
+  log_action "dry-run-would-send" "$stable_reason" "$stable_len"
+  if [[ -n "$stable_input" ]]; then
+    echo "DRY-RUN would press Enter to commit existing input (${stable_len} bytes), then send /reload-plugins to '$session'"
+  else
+    echo "DRY-RUN would send /reload-plugins to '$session'"
+  fi
+  exit 0
+fi
+
+if [[ -n "$stable_input" ]]; then
+  log_action "commit-existing-input" "$stable_reason" "$stable_len"
+  tmux send-keys -t "$session" Enter
+  sleep 1
+
+  set +e
+  verify_input="$(capture_input)"
+  verify_rc=$?
+  set -e
+
+  if (( verify_rc != 0 )); then
+    log_action "post-enter-verify-failed" "prompt-not-visible-after-enter" "$stable_len"
+    echo "repair-telegram-mcp: post-Enter verify failed; prompt not visible after committing existing input" >&2
+    exit 9
+  fi
+
+  verify_len="$(input_len "$verify_input")"
+  if [[ -n "$verify_input" ]]; then
+    log_action "post-enter-verify-failed" "input-not-cleared" "$verify_len"
+    echo "repair-telegram-mcp: post-Enter verify failed; input field still has content" >&2
+    exit 9
+  fi
+fi
+
+tmux send-keys -t "$session" '/reload-plugins' Enter
+log_action "sent" "reload-plugins" 0
+echo "repair-telegram-mcp: sent /reload-plugins to '$session'"
