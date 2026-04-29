@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# pulse-pr — query the latest org-pulse snapshot for a single repo's PR + issue state.
+#
+# Usage:
+#   pulse-pr <repo>           # repo can be "clan-world" or "OmniPass-world/clan-world"
+#   pulse-pr <repo> --md      # markdown output (pipeable into share-doc)
+#   pulse-pr --list           # list all repos in the snapshot
+#
+# Reads ~/.world/pulse/snapshots/current.json (refreshed every 30min by pulse.timer).
+set -euo pipefail
+
+SNAPSHOT="${SNAPSHOT:-$HOME/.world/pulse/snapshots/current.json}"
+
+if [ ! -f "$SNAPSHOT" ]; then
+  echo "error: snapshot not found at $SNAPSHOT" >&2
+  echo "       run 'systemctl --user start pulse.service' to refresh" >&2
+  exit 1
+fi
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "error: jq required" >&2
+  exit 1
+fi
+
+usage() {
+  cat <<EOF
+pulse-pr — quick repo PR + issue overview from the org-pulse snapshot.
+
+Usage:
+  pulse-pr <repo>           Show PRs + issues for repo (e.g. "clan-world")
+  pulse-pr <repo> --md      Markdown output (pipe into share-doc)
+  pulse-pr --list           List all repos in the snapshot
+  pulse-pr --age            Print snapshot age + freshness status
+  pulse-pr -h | --help      This help
+
+Repo arg can be bare name ("clan-world") or "<org>/<name>" ("OmniPass-world/clan-world").
+If multiple orgs have a repo with the same bare name, --list and use the qualified form.
+EOF
+}
+
+case "${1:-}" in
+  -h|--help|"") usage; exit 0 ;;
+  --list)
+    captured_at=$(jq -r '.captured_at_et' "$SNAPSHOT")
+    echo "Repos in snapshot (captured $captured_at):"
+    jq -r '.repos[] | "  \(.org)/\(.name)  ·  \(.prs | length) PRs  ·  \(.issues | length) issues"' "$SNAPSHOT" | sort
+    exit 0
+    ;;
+  --age)
+    captured_at_utc=$(jq -r '.captured_at_utc' "$SNAPSHOT")
+    captured_at_et=$(jq -r '.captured_at_et' "$SNAPSHOT")
+    captured_epoch=$(date -d "$captured_at_utc" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" "${captured_at_utc%Z}" +%s)
+    now_epoch=$(date +%s)
+    age_seconds=$((now_epoch - captured_epoch))
+    age_minutes=$((age_seconds / 60))
+    if [ "$age_minutes" -lt 35 ]; then status="✅ fresh"; else status="⚠️  stale (>35min)"; fi
+    echo "Snapshot captured: $captured_at_et"
+    echo "Age: ${age_minutes}min  $status"
+    exit 0
+    ;;
+esac
+
+REPO_ARG="$1"
+shift || true
+FORMAT="terminal"
+for arg in "$@"; do
+  case "$arg" in
+    --md) FORMAT="md" ;;
+    *) echo "unknown arg: $arg" >&2; exit 2 ;;
+  esac
+done
+
+# Resolve repo: accept bare name or org/name
+if [[ "$REPO_ARG" == */* ]]; then
+  ORG="${REPO_ARG%/*}"
+  NAME="${REPO_ARG#*/}"
+  FILTER=".repos[] | select(.org == \"$ORG\" and .name == \"$NAME\")"
+else
+  NAME="$REPO_ARG"
+  # Find by name only — error if ambiguous
+  matches=$(jq -r ".repos[] | select(.name == \"$NAME\") | \"\\(.org)/\\(.name)\"" "$SNAPSHOT")
+  count=$(echo -n "$matches" | grep -c '^' || true)
+  if [ "$count" -eq 0 ]; then
+    echo "error: no repo named '$NAME' in snapshot. Run with --list to see available repos." >&2
+    exit 1
+  elif [ "$count" -gt 1 ]; then
+    echo "error: multiple repos named '$NAME':" >&2
+    echo "$matches" | sed 's/^/  /' >&2
+    echo "Disambiguate with full org/name." >&2
+    exit 1
+  fi
+  ORG="${matches%/*}"
+  FILTER=".repos[] | select(.name == \"$NAME\")"
+fi
+
+# Get the snapshot capture time + repo data
+CAPTURED_AT=$(jq -r '.captured_at_et' "$SNAPSHOT")
+REPO_JSON=$(jq -c "$FILTER" "$SNAPSHOT")
+
+if [ -z "$REPO_JSON" ] || [ "$REPO_JSON" == "null" ]; then
+  echo "error: repo '$ORG/$NAME' not found in snapshot." >&2
+  exit 1
+fi
+
+DEFAULT_BRANCH=$(echo "$REPO_JSON" | jq -r '.default_branch // "main"')
+N_PRS=$(echo "$REPO_JSON" | jq '.prs | length')
+N_ISSUES=$(echo "$REPO_JSON" | jq '.issues | length')
+
+# Prepare formatted blocks
+PR_BLOCK=$(echo "$REPO_JSON" | jq -r '.prs[] | "  #\(.number)  \(.title)\n        author: \(.author)  ·  idle: \(.hours_idle | floor)h  ·  stalled: \(.stalled)  ·  updated: \(.updated_at)"')
+ISSUE_BLOCK=$(echo "$REPO_JSON" | jq -r '.issues[] | "  #\(.number)  \(.title)\n        labels: \(.labels // [] | join(", ") // "-")  ·  idle: \(.hours_idle | floor)h"')
+
+if [ "$FORMAT" == "md" ]; then
+  cat <<MD
+# Pulse snapshot — \`$ORG/$NAME\`
+
+**Captured:** $CAPTURED_AT  ·  **Default branch:** \`$DEFAULT_BRANCH\`
+
+## Open PRs ($N_PRS)
+
+$(echo "$REPO_JSON" | jq -r '.prs[] | "- **#\(.number)** \(.title)  \n  _author_ \(.author)  ·  _idle_ \(.hours_idle | floor)h  ·  _updated_ \(.updated_at)"')
+
+## Open issues ($N_ISSUES)
+
+$(echo "$REPO_JSON" | jq -r '.issues[] | "- **#\(.number)** \(.title)  \n  _labels_ \(.labels // [] | join(", ") // "—")  ·  _idle_ \(.hours_idle | floor)h"')
+MD
+else
+  echo "═══════════════════════════════════════════════════════════════"
+  echo "  $ORG/$NAME"
+  echo "  Captured: $CAPTURED_AT  ·  Default: $DEFAULT_BRANCH"
+  echo "═══════════════════════════════════════════════════════════════"
+  echo ""
+  echo "Open PRs ($N_PRS):"
+  if [ "$N_PRS" -gt 0 ]; then echo "$PR_BLOCK"; else echo "  (none)"; fi
+  echo ""
+  echo "Open issues ($N_ISSUES):"
+  if [ "$N_ISSUES" -gt 0 ]; then echo "$ISSUE_BLOCK"; else echo "  (none)"; fi
+  echo ""
+fi
