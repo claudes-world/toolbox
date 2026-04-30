@@ -13,6 +13,7 @@ All tools use a shared Python venv at `~/venvs/transcribe/` and are symlinked in
 | [md-speak](#md-speak) | Read markdown documents aloud with multiple voices |
 | [voice-hook](#voice-hook) | Claude Code hook: auto-transcribe Telegram voice notes |
 | [pulse](pulse/README.md) | GitHub org activity snapshots — open PRs, issues, releases, Dependabot |
+| [repair-telegram-mcp](#repair-telegram-mcp) | Repair Telegram MCP partial disconnects in a live Claude Code tmux session |
 
 ---
 
@@ -143,6 +144,56 @@ pulse --now           # run snapshot + render digest
 - `tests/test_config.py`, `tests/test_storage.py` — unit tests
 
 **Cost:** No paid API calls. GraphQL queries use GitHub PAT (free tier).
+
+---
+
+### repair-telegram-mcp
+
+Repair a Telegram MCP partial disconnect in a live Claude Code tmux session by sending `/reload-plugins` through tmux after an input-stability guard. This is for the case where tmux and the Telegram bun plugin are alive, but MCP tools are missing; dead REPL zombies still need the separate full-restart procedure.
+
+**Setup:**
+- tmux session running Claude Code with Telegram plugin
+- `agent-health-mcp-check` available beside this script or on `PATH`
+- Optional symlinks:
+  ```bash
+  ln -sf ~/code/toolbox/bin/repair-telegram-mcp ~/bin/repair-telegram-mcp
+  ln -sf ~/code/toolbox/bin/agent-health-mcp-check ~/bin/agent-health-mcp-check
+  ```
+
+**Usage:**
+```bash
+repair-telegram-mcp [SESSION]   # defaults to current tmux session
+repair-telegram-mcp SESSION --dry-run
+repair-telegram-mcp SESSION --force
+
+agent-health-mcp-check SESSION  # MCP_OK, MCP_MISSING:<reason>, or MCP_UNKNOWN:<reason>
+```
+
+**Environment:**
+- `REPAIR_POLL_SECONDS` — seconds between input captures, default `60`
+- `REPAIR_MAX_WAIT_SECONDS` — total wait before timeout, default `180`
+- `REPAIR_INPUT_LEN_THRESHOLD` — stable non-empty input length needed before auto-commit, default `40`
+
+**Exit codes:**
+| Code | Meaning |
+| --- | --- |
+| 0 | Sent successfully, dry-run completed, or MCP was already healthy |
+| 2 | Bad args or no session |
+| 3 | tmux session missing |
+| 4 | Zombie: tmux exists but no live Claude REPL |
+| 5 | Input never stabilized |
+| 6 | Refused partial slash command |
+| 7 | Another repair is running for the session |
+| 8 | No visible `❯` prompt, capture failed, or stable input was below the safety threshold |
+| 9 | Post-Enter verify failed |
+
+**Files:**
+- `bin/repair-telegram-mcp` — tmux repair command with input-stability guard
+- `bin/agent-health-mcp-check` — best-effort transcript probe for Telegram MCP tool availability
+- `~/.world/repair-telegram-mcp.log` — action log
+- `~/.world/repair-telegram-mcp.<session>.lock` — per-session flock lock
+
+**Cost:** No paid API calls.
 
 ---
 
