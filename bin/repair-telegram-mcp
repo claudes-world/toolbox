@@ -95,6 +95,12 @@ log_action() {
     "$(timestamp)" "$session" "$action" "$reason" "$len" >>"$log_file"
 }
 
+log_input_below_threshold() {
+  local len="$1"
+  printf '%s session=%q action=input_below_threshold reason=stable_but_short input_len=%s threshold=%s\n' \
+    "$(timestamp)" "$session" "$len" "$input_len_threshold" >>"$log_file"
+}
+
 strip_display() {
   sed $'s/\x1b\[[0-9;]*[a-zA-Z]//g; s/\xc2\xa0/ /g'
 }
@@ -274,8 +280,9 @@ while (( SECONDS < deadline )); do
     fi
 
     if (( len1 < input_len_threshold )); then
-      log_action "input-stable-short" "continue-polling" "$len1"
-      continue
+      log_input_below_threshold "$len1"
+      echo "repair-telegram-mcp: input below safety threshold (len=$len1, min=$input_len_threshold) - refusing to auto-commit, manual intervention needed" >&2
+      exit 8
     fi
 
     stable_input="$s1"

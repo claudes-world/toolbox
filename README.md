@@ -175,15 +175,17 @@ agent-health-mcp-check SESSION  # MCP_OK, MCP_MISSING:<reason>, or MCP_UNKNOWN:<
 - `REPAIR_INPUT_LEN_THRESHOLD` — stable non-empty input length needed before auto-commit, default `40`
 
 **Exit codes:**
-- `0` sent successfully, dry-run completed, or MCP was already healthy
-- `2` bad args or no session
-- `3` tmux session missing
-- `4` zombie: tmux exists but no live Claude REPL
-- `5` input never stabilized
-- `6` refused partial slash command
-- `7` another repair is running for the session
-- `8` no visible `❯` prompt
-- `9` post-Enter verify failed
+| Code | Meaning |
+| --- | --- |
+| 0 | Sent successfully, dry-run completed, or MCP was already healthy |
+| 2 | Bad args or no session |
+| 3 | tmux session missing |
+| 4 | Zombie: tmux exists but no live Claude REPL |
+| 5 | Input never stabilized |
+| 6 | Refused partial slash command |
+| 7 | Another repair is running for the session |
+| 8 | No visible `❯` prompt, capture failed, or stable input was below the safety threshold |
+| 9 | Post-Enter verify failed |
 
 **Files:**
 - `bin/repair-telegram-mcp` — tmux repair command with input-stability guard
