@@ -1,0 +1,12 @@
+[Unit]
+Description=Hourly backup of ~/.claude/projects to GCS
+Requires=backup-memory-to-gcs.service
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5m
+Persistent=true
+Unit=backup-memory-to-gcs.service
+
+[Install]
+WantedBy=timers.target

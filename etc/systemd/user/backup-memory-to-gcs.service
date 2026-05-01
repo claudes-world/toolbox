@@ -1,0 +1,11 @@
+[Unit]
+Description=Backup ~/.claude/projects to gs://do-box1/memory-backups
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/bin/backup-memory-to-gcs
+Environment="TZ=America/New_York"
+StandardOutput=journal
+StandardError=journal

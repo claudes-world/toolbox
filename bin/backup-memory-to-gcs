@@ -1,0 +1,70 @@
+#!/bin/bash
+# Memory backup → gs://do-box1/memory-backups/<hostname>/
+#
+# Per ADR 0004 (backup-and-disaster-recovery), the ~/.claude/projects/*/memory/
+# directories contain auto-memory state that must survive disk failure.
+# This script rsyncs the full ~/.claude/projects tree to GCS using gcloud storage
+# (gsutil is deprecated as of 2025).
+#
+# Schedule: ~/.config/systemd/user/backup-memory-to-gcs.timer fires daily.
+# Bucket: do-box1 (versioning enabled, 30-day non-current lifecycle, soft delete 7d).
+#
+# Owner: claudes-world. Authority: ADR 0004 + Liam directive 2026-04-30 23:54 ET.
+
+set -euo pipefail
+
+BUCKET="do-box1"
+PREFIX="memory-backups/$(hostname)"
+SOURCE="${HOME}/.claude/projects/"
+TIMESTAMP=$(TZ=America/New_York date +%Y%m%d-%H%M%S)
+LOG="${HOME}/.claude/backup-memory.log"
+
+# Telegram alerting (best-effort) — uses CPC bot creds if available
+TELEGRAM_ALERT="${HOME}/bin/telegram-alert"
+
+log() {
+  echo "[$(TZ=America/New_York date +%Y-%m-%dT%H:%M:%S%z)] $*" | tee -a "$LOG"
+}
+
+alert_failure() {
+  local msg="$1"
+  log "ERROR: $msg"
+  if [ -x "$TELEGRAM_ALERT" ]; then
+    "$TELEGRAM_ALERT" "❌ memory backup failed: $msg" 2>/dev/null || true
+  fi
+}
+
+log "starting memory backup → gs://${BUCKET}/${PREFIX}/"
+
+# Verify gcloud + bucket access first (fail fast if creds expired)
+if ! gcloud storage ls "gs://${BUCKET}/" >/dev/null 2>&1; then
+  alert_failure "cannot access gs://${BUCKET}/ — gcloud auth or IAM issue"
+  exit 1
+fi
+
+# Rsync — recursive, preserves mtimes, --delete-unmatched-destination-objects
+# means files removed locally are also removed from the backup (matches local state).
+# This is OK because of bucket-level object versioning + 30-day lifecycle on
+# non-current versions: we get 30 days of recovery for accidental deletes.
+if ! gcloud storage rsync \
+  "$SOURCE" \
+  "gs://${BUCKET}/${PREFIX}/" \
+  --recursive \
+  --delete-unmatched-destination-objects \
+  2>>"$LOG"; then
+  alert_failure "gcloud storage rsync failed (see $LOG)"
+  exit 2
+fi
+
+# Write a per-run timestamp marker (also synced) so we know when last backup ran
+echo "$TIMESTAMP" > "/tmp/backup-memory-marker.txt"
+gcloud storage cp "/tmp/backup-memory-marker.txt" \
+  "gs://${BUCKET}/${PREFIX}/.last-backup-${TIMESTAMP}.txt" 2>>"$LOG" || true
+rm -f "/tmp/backup-memory-marker.txt"
+
+# Count synced objects for log
+OBJ_COUNT=$(find "$SOURCE" -type f 2>/dev/null | wc -l)
+SIZE_HUMAN=$(du -sh "$SOURCE" 2>/dev/null | awk '{print $1}')
+log "completed: ${OBJ_COUNT} files, ${SIZE_HUMAN}"
+
+exit 0
