@@ -72,9 +72,19 @@ class Segment:
 # --- Smart text processing ---
 
 def humanize_url(url: str) -> str:
-    """Convert URLs to human-readable descriptions."""
-    parsed = urlparse(url)
-    host = parsed.hostname or url
+    """Convert URLs to human-readable descriptions.
+
+    Falls back to the raw URL if parsing fails — urlparse + .hostname + .port
+    all raise ValueError on non-integer port literals (e.g. compose URLs like
+    `http://convex-backend:${CADDY_HOST_PORT}`), which would otherwise crash
+    md-speak on docs containing shell-style variable placeholders.
+    """
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname or url
+        port = parsed.port
+    except ValueError:
+        return url
     path = parsed.path.strip("/")
 
     # GitHub repos
@@ -96,7 +106,6 @@ def humanize_url(url: str) -> str:
 
     # Localhost
     if host in ("localhost", "127.0.0.1"):
-        port = parsed.port or ""
         return f"local service on port {port}" if port else "local service"
 
     # Generic: just the domain
@@ -585,7 +594,7 @@ def get_tts_client():
     return texttospeech.TextToSpeechClient(), texttospeech
 
 
-def generate_ssml_audio(ssml: str, voice: str, output_path: str, rate: float = 0.95):
+def generate_ssml_audio(ssml: str, voice: str, output_path: str, rate: float = 1.045):
     """Generate audio from SSML via Google Cloud TTS."""
     client, tts = get_tts_client()
     lang_code = "-".join(voice.split("-")[:2])
@@ -703,7 +712,7 @@ def main():
         char_count += text_chars
         preview = re.sub(r'<[^>]+>', '', ssml).strip()[:60]
         print(f"  [{i+1}/{len(batches)}] {voice}: {preview}{'...' if len(preview) >= 60 else ''}", file=sys.stderr)
-        rate = 1.05 if voice == VOICES["body"] else 0.95
+        rate = 1.155 if voice == VOICES["body"] else 1.045  # +10% from prior 1.05/0.95
         generate_ssml_audio(ssml, voice, audio_path, rate=rate)
         parts.append(audio_path)
 

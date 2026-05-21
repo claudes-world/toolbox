@@ -26,6 +26,20 @@ TRIMMED=$(echo "$INPUT" | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
 if [ "$(echo "$TRIMMED" | wc -l)" -eq 1 ] && echo "$TRIMMED" | grep -qE '^/.+\.md$' && [ -f "$TRIMMED" ]; then
   # --- Mode 2: Share existing file ---
   FILEPATH="$TRIMMED"
+
+  # CPC (Pocket Console) reads files only from $TMPDIR (~/claudes-world/tmp).
+  # Paths outside that produce a dead deep-link, and audio generated next to
+  # the file is also unreachable. Reject loudly rather than fail silently.
+  case "$FILEPATH" in
+    "$TMPDIR"/*) ;;
+    *)
+      echo "error: file must live under $TMPDIR for CPC to read it" >&2
+      echo "       got: $FILEPATH" >&2
+      echo "       move it (e.g. mv \"$FILEPATH\" \"$TMPDIR/\") and retry" >&2
+      exit 2
+      ;;
+  esac
+
   TITLE=$(head -1 "$FILEPATH" | sed 's/^#* *//')
 
   if [ "$NO_AUDIO" -eq 0 ]; then
@@ -66,14 +80,91 @@ else
 fi
 
 # Send to Telegram: audio + deep link button
+# Source common.sh if it exists (legacy path that may set BOTTOKEN). If absent,
+# fall back to TELEGRAM_BOT_TOKEN from the env (the canonical name).
 . "$(dirname "$(readlink -f "$0")")/common.sh" 2>/dev/null || true
+BOTTOKEN="${BOTTOKEN:-${TELEGRAM_BOT_TOKEN:-}}"
 CHAT_ID="${TELEGRAM_CHAT_ID:-}"
+
+# If the helper has no auth, fail loudly so the caller knows the deep-link
+# was never sent — silent no-ops mask the problem.
+if [ -z "$BOTTOKEN" ]; then
+  echo "error: no bot token (set TELEGRAM_BOT_TOKEN or BOTTOKEN; common.sh missing)" >&2
+  exit 3
+fi
+if [ -z "$CHAT_ID" ]; then
+  echo "error: no chat_id (set TELEGRAM_CHAT_ID)" >&2
+  exit 3
+fi
 
 if [ -n "$BOTTOKEN" ] && [ -n "$CHAT_ID" ]; then
   ENCODED_PATH=$(python3 -c "from urllib.parse import quote; print(quote('${FILEPATH}'))")
   DEEP_URL="https://cpc.claude.do/#file=${ENCODED_PATH}"
 
+  # Telegram bot sendAudio caps uploads at ~50MB. Long docs (1000+ lines)
+  # can produce mp3s well above that — chop into ~8min segments via ffmpeg
+  # so each part lands under the cap. Deep-link button only on the final
+  # part (so the user reaches the doc reader after they've finished
+  # listening, and the chat doesn't get N button-laden notifications).
+  AUDIO_SIZE_THRESHOLD=$((48 * 1024 * 1024))
+  AUDIO_SIZE=0
   if [ "$NO_AUDIO" -eq 0 ] && [ -n "${AUDIOPATH:-}" ] && [ -f "$AUDIOPATH" ] && [ -s "$AUDIOPATH" ]; then
+    AUDIO_SIZE=$(stat -c %s "$AUDIOPATH" 2>/dev/null || echo 0)
+  fi
+
+  if [ "$NO_AUDIO" -eq 0 ] && [ -n "${AUDIOPATH:-}" ] && [ -f "$AUDIOPATH" ] && [ -s "$AUDIOPATH" ] && [ "$AUDIO_SIZE" -gt "$AUDIO_SIZE_THRESHOLD" ]; then
+    # --- Multi-part send: chop via ffmpeg, deep-link on final part ---
+    SEG_DIR=$(mktemp -d -t share-doc-segs.XXXXXX)
+    # stream-copy split keeps the existing mp3 encoding; ~8min per segment
+    # at typical TTS bitrate stays well under the 50MB cap with margin.
+    ffmpeg -nostdin -loglevel error -i "$AUDIOPATH" \
+      -f segment -segment_time 480 -c copy -reset_timestamps 1 \
+      "${SEG_DIR}/part_%03d.mp3" 2>/dev/null || true
+    # shellcheck disable=SC2206
+    PARTS=("$SEG_DIR"/part_*.mp3)
+    TOTAL=${#PARTS[@]}
+    MSG_ID=""
+    if [ "$TOTAL" -eq 0 ]; then
+      # ffmpeg failed; fall back to deep-link-only sendMessage (audio omitted)
+      curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
+        -H "Content-Type: application/json" \
+        -d "$(jq -n \
+          --arg cid "$CHAT_ID" \
+          --arg title "📄 ${TITLE} (audio chop failed — text only)" \
+          --arg url "$DEEP_URL" \
+          '{chat_id: $cid, text: $title, reply_markup: {inline_keyboard: [[{text: "Read in Pocket Console", web_app: {url: $url}}]]}}'
+        )" > "$TMPDIR/.last-send-response.json" 2>&1 || true
+      MSG_ID=$(jq -r '.result.message_id // empty' "$TMPDIR/.last-send-response.json" 2>/dev/null || true)
+    else
+      for i in "${!PARTS[@]}"; do
+        PART="${PARTS[$i]}"
+        NUM=$((i + 1))
+        PART_TITLE="${TITLE} — part ${NUM}/${TOTAL}"
+        if [ "$NUM" -eq "$TOTAL" ]; then
+          # Final part — attach the deep-link button
+          curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendAudio" \
+            -F "chat_id=${CHAT_ID}" \
+            -F "audio=@${PART}" \
+            -F "title=${PART_TITLE}" \
+            -F "caption=📄 ${PART_TITLE}" \
+            -F "reply_markup={\"inline_keyboard\":[[{\"text\":\"Read in Pocket Console\",\"web_app\":{\"url\":\"${DEEP_URL}\"}}]]}" \
+            -F "disable_notification=true" \
+            > "$TMPDIR/.last-send-response.json" 2>&1 || true
+          MSG_ID=$(jq -r '.result.message_id // empty' "$TMPDIR/.last-send-response.json" 2>/dev/null || true)
+        else
+          # Intermediate part — no button, just the audio
+          curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendAudio" \
+            -F "chat_id=${CHAT_ID}" \
+            -F "audio=@${PART}" \
+            -F "title=${PART_TITLE}" \
+            -F "caption=📄 ${PART_TITLE}" \
+            -F "disable_notification=true" \
+            > /dev/null 2>&1 || true
+        fi
+      done
+    fi
+    rm -rf "$SEG_DIR"
+  elif [ "$NO_AUDIO" -eq 0 ] && [ -n "${AUDIOPATH:-}" ] && [ -f "$AUDIOPATH" ] && [ -s "$AUDIOPATH" ]; then
     # Send audio with inline keyboard button for deep link
     curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendAudio" \
       -F "chat_id=${CHAT_ID}" \
