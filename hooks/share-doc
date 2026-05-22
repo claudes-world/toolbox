@@ -102,7 +102,7 @@ if [ -n "$BOTTOKEN" ] && [ -n "$CHAT_ID" ]; then
   DEEP_URL="https://cpc.claude.do/#file=${ENCODED_PATH}"
 
   # Telegram bot sendAudio caps uploads at ~50MB. Long docs (1000+ lines)
-  # can produce mp3s well above that — chop into ~8min segments via ffmpeg
+  # can produce mp3s well above that — chop into ~25min segments via ffmpeg
   # so each part lands under the cap. Deep-link button only on the final
   # part (so the user reaches the doc reader after they've finished
   # listening, and the chat doesn't get N button-laden notifications).
@@ -115,10 +115,12 @@ if [ -n "$BOTTOKEN" ] && [ -n "$CHAT_ID" ]; then
   if [ "$NO_AUDIO" -eq 0 ] && [ -n "${AUDIOPATH:-}" ] && [ -f "$AUDIOPATH" ] && [ -s "$AUDIOPATH" ] && [ "$AUDIO_SIZE" -gt "$AUDIO_SIZE_THRESHOLD" ]; then
     # --- Multi-part send: chop via ffmpeg, deep-link on final part ---
     SEG_DIR=$(mktemp -d -t share-doc-segs.XXXXXX)
-    # stream-copy split keeps the existing mp3 encoding; ~8min per segment
-    # at typical TTS bitrate stays well under the 50MB cap with margin.
+    # stream-copy split keeps the existing mp3 encoding; ~25min per segment
+    # at typical TTS bitrate (~32kbps) is ~6MB/part — well under the 50MB
+    # cap with margin, and produces far fewer chunks than the prior 8min
+    # split (e.g. 9 parts → ~3 parts for an hour-long report).
     ffmpeg -nostdin -loglevel error -i "$AUDIOPATH" \
-      -f segment -segment_time 480 -c copy -reset_timestamps 1 \
+      -f segment -segment_time 1500 -c copy -reset_timestamps 1 \
       "${SEG_DIR}/part_%03d.mp3" 2>/dev/null || true
     # shellcheck disable=SC2206
     PARTS=("$SEG_DIR"/part_*.mp3)
