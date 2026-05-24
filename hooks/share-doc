@@ -115,14 +115,15 @@ if [ -n "$BOTTOKEN" ] && [ -n "$CHAT_ID" ]; then
   if [ "$NO_AUDIO" -eq 0 ] && [ -n "${AUDIOPATH:-}" ] && [ -f "$AUDIOPATH" ] && [ -s "$AUDIOPATH" ] && [ "$AUDIO_SIZE" -gt "$AUDIO_SIZE_THRESHOLD" ]; then
     # --- Multi-part send: chop via ffmpeg, deep-link on final part ---
     SEG_DIR=$(mktemp -d -t share-doc-segs.XXXXXX)
+    trap 'rm -rf "$SEG_DIR"' EXIT INT TERM
     # stream-copy split keeps the existing mp3 encoding; ~25min per segment
     # at typical TTS bitrate (~32kbps) is ~6MB/part — well under the 50MB
     # cap with margin, and produces far fewer chunks than the prior 8min
     # split (e.g. 9 parts → ~3 parts for an hour-long report).
     ffmpeg -nostdin -loglevel error -i "$AUDIOPATH" \
       -f segment -segment_time 1500 -c copy -reset_timestamps 1 \
-      "${SEG_DIR}/part_%03d.mp3" 2>/dev/null || true
-    # shellcheck disable=SC2206
+      "${SEG_DIR}/part_%03d.mp3" 2>/dev/null
+    shopt -s nullglob
     PARTS=("$SEG_DIR"/part_*.mp3)
     TOTAL=${#PARTS[@]}
     MSG_ID=""
@@ -165,7 +166,6 @@ if [ -n "$BOTTOKEN" ] && [ -n "$CHAT_ID" ]; then
         fi
       done
     fi
-    rm -rf "$SEG_DIR"
   elif [ "$NO_AUDIO" -eq 0 ] && [ -n "${AUDIOPATH:-}" ] && [ -f "$AUDIOPATH" ] && [ -s "$AUDIOPATH" ]; then
     # Send audio with inline keyboard button for deep link
     curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendAudio" \
