@@ -11,7 +11,20 @@ echo "" >> /tmp/agent-hooks.log
 
 # Fields: agent_id, agent_type, last_assistant_message, agent_transcript_path
 AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null || true)
-AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // "agent"' 2>/dev/null || true)
+AGENT_TYPE_RAW=$(echo "$INPUT" | jq -r '.agent_type // empty' 2>/dev/null || true)
+
+# Filter Claude Code internal sidechains (suggestion / compact / idle / Plan-mode
+# auto-fired agents) — they emit SubagentStop with empty agent_type and have NO
+# corresponding SubagentStart. Per memory `feedback_cc_internal_sidechains_emit_subagentstop`
+# + Liam directive 2026-06-05 msg 21099. ~90% of SubagentStops in /tmp/agent-hooks.log
+# (2372 of 2559 in one sample) are these internal events. Filtering empty agent_type
+# keeps named agents (general-purpose, web-researcher, code-review-*, super-swarm-orchestrator,
+# Explore, etc.) while muting the spam.
+if [ -z "$AGENT_TYPE_RAW" ]; then
+  echo "skip: empty agent_type (CC internal sidechain) id=${AGENT_ID:0:8}" >> /tmp/agent-hooks.log
+  exit 0
+fi
+AGENT_TYPE="$AGENT_TYPE_RAW"
 AGENT_SHORT="${AGENT_ID:0:8}"
 # Per Gemini review: `head -c 2000` truncates by BYTES, which can split multi-byte
 # UTF-8 characters (emoji, CJK, accents) mid-byte and produce invalid UTF-8 that
