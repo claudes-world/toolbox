@@ -131,7 +131,11 @@ CONTEXT_WINDOW="$DEFAULT_CONTEXT_WINDOW"
 # with 4-[1-9][0-9] so 4.10+ stays on 1M without silent regression —
 # bash char-class globs don't span 10+ without the second alternative.
 case "$MODEL" in
-  *opus-4-[6-9]*|*opus-4-[1-9][0-9]*|*sonnet-4-[6-9]*|*sonnet-4-[1-9][0-9]*|*\[1m\]*|*-1m|*-1m-*)
+  *opus-4-[6-9]*|*opus-4-[1-9][0-9]*|*sonnet-4-[6-9]*|*sonnet-4-[1-9][0-9]*|*fable-[5-9]*|*fable-[1-9][0-9]*|*\[1m\]*|*-1m|*-1m-*)
+    # fable-[5-9] added 2026-06-10 (Liam msg 21817): the transcript usage
+    # object records the bare model id "claude-fable-5" — the harness's
+    # displayed "[1m]" suffix never appears there, so the [1m] pattern
+    # missed it and an "86%" advisory fired at ~17% real utilization.
     CONTEXT_WINDOW="$EXTENDED_CONTEXT_WINDOW"
     ;;
 esac
