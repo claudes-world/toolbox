@@ -28,6 +28,7 @@ pull request, PR, issue, branch, fork, upstream, origin, HEAD, main, master,
 staging, production, dev, hotfix, feature flag, rollback, deploy, ship it,
 codex, doc, docs, AGENTS.md,  CLAUDE.md, README.md, ultrathink, index.html, gcloud, GCP, gcs, gsm, V0, postgres, OpenClaw, moltbook
 Sepolia, EURC, USDC, ETH, testnet, hackathon, BaseScan, EtherScan,
-ack, CLI, GUI, TUI, Kimi, GitFlow, gh, GitFlow-lite, do-box, do-mac, dobot, dobot-server, pm_dobot, idea_dobot, GStack, gstack_dobot, narrator_dobot, OTEL,
-Mikail, YAGNI, Vellum, Claude-do, Chaintail, Clan World, @ClanWorldGame
+ack, CLI, GUI, TUI, Kimi, GitFlow, gh, GitFlow-lite, OTEL,
+do-box, do-mac, dobot, dobot-server, pm_dobot, idea_dobot, GStack, gstack_dobot, narrator_dobot, claude_dobot, codex_dobot,
+Mikail, YAGNI, Vellum, Claude-do, Chaintail, Clan World, @ClanWorldGame, EasyA, Seeker Phone, Phantom, Solflare, devnet, mainnet, SOL, 
 
