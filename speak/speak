@@ -30,6 +30,15 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
+try:
+    import otel_cli
+    otel_cli.setup('speak')
+    _tracer = otel_cli.get_tracer(__name__)
+except Exception:
+    otel_cli = None  # type: ignore[assignment]
+    _tracer = None
+
 # --- TTS API timeout ---
 # Hard ceiling on any single TTS API call so the tool can never hang forever
 # (root cause of a 2026-06-17 silent voice failure: OpenAI TTS hung with no
@@ -211,63 +220,81 @@ ALL_VOICES = sorted(OPENAI_VOICES | set(ELEVENLABS_VOICES.keys()))
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Text-to-speech with multiple providers")
-    parser.add_argument("text", nargs="?", default=None, help="Text to speak (or pipe via stdin)")
-    parser.add_argument("--provider", "-p", default="openai", choices=["openai", "google", "elevenlabs"],
-                        help="TTS provider (default: openai)")
-    parser.add_argument("--voice", "-v", default=None,
-                        help=f"Voice name (default: {OPENAI_DEFAULT_VOICE} for openai, {GOOGLE_DEFAULT_VOICE} for google, {ELEVENLABS_DEFAULT_VOICE} for elevenlabs)")
-    parser.add_argument("--model", default="flash", choices=ELEVENLABS_MODELS.keys(),
-                        help="ElevenLabs model (default: flash, ignored for openai)")
-    parser.add_argument("--out", type=Path, default=None, help="Output file path (default: stdout)")
-    parser.add_argument("--mp3", action="store_true", help="Output mp3 instead of ogg opus")
-    args = parser.parse_args()
-
-    if args.text:
-        text = args.text
-    elif not sys.stdin.isatty():
-        text = sys.stdin.read().strip()
-    else:
-        print("error: provide text as an argument or pipe via stdin", file=sys.stderr)
-        sys.exit(1)
-
-    if not text:
-        print("error: empty text", file=sys.stderr)
-        sys.exit(1)
-
-    ogg = not args.mp3
-
     try:
-        if args.provider == "openai":
-            voice = args.voice or OPENAI_DEFAULT_VOICE
-            if voice not in OPENAI_VOICES:
-                print(f"error: unknown openai voice '{voice}'. Available: {', '.join(sorted(OPENAI_VOICES))}", file=sys.stderr)
-                sys.exit(1)
-            audio_data, ext = speak_openai(text, voice, ogg)
-        elif args.provider == "google":
-            voice = args.voice or GOOGLE_DEFAULT_VOICE
-            audio_data, ext = speak_google(text, voice, ogg)
-        else:
-            voice = args.voice or ELEVENLABS_DEFAULT_VOICE
-            audio_data, ext = speak_elevenlabs(text, voice, args.model, ogg)
-    except SystemExit:
-        raise
-    except BaseException as exc:  # noqa: BLE001 — any TTS failure must exit non-zero cleanly
-        # Includes timeouts (after SPEAK_TIMEOUT={SPEAK_TIMEOUT}s) and API errors.
-        # A clear one-line stderr message lets the combined `say-voice` wrapper
-        # trigger its text fallback instead of hanging or dumping a traceback.
-        reason = str(exc).strip() or exc.__class__.__name__
-        reason = " ".join(reason.split())
-        if len(reason) > 200:
-            reason = reason[:197] + "..."
-        print(f"speak: {args.provider} TTS failed (timeout={SPEAK_TIMEOUT:g}s): {reason}", file=sys.stderr)
-        sys.exit(1)
+        from opentelemetry import trace as _trace
+    except ImportError:
+        _trace = None  # type: ignore[assignment]
+    _span_ctx = _tracer.start_as_current_span('speak.run') if _tracer else None
+    _span = _span_ctx.__enter__() if _span_ctx else None
+    try:
+        parser = argparse.ArgumentParser(description="Text-to-speech with multiple providers")
+        parser.add_argument("text", nargs="?", default=None, help="Text to speak (or pipe via stdin)")
+        parser.add_argument("--provider", "-p", default="openai", choices=["openai", "google", "elevenlabs"],
+                            help="TTS provider (default: openai)")
+        parser.add_argument("--voice", "-v", default=None,
+                            help=f"Voice name (default: {OPENAI_DEFAULT_VOICE} for openai, {GOOGLE_DEFAULT_VOICE} for google, {ELEVENLABS_DEFAULT_VOICE} for elevenlabs)")
+        parser.add_argument("--model", default="flash", choices=ELEVENLABS_MODELS.keys(),
+                            help="ElevenLabs model (default: flash, ignored for openai)")
+        parser.add_argument("--out", type=Path, default=None, help="Output file path (default: stdout)")
+        parser.add_argument("--mp3", action="store_true", help="Output mp3 instead of ogg opus")
+        args = parser.parse_args()
 
-    if args.out:
-        args.out.write_bytes(audio_data)
-        print(f"{args.out}", file=sys.stderr)
-    else:
-        sys.stdout.buffer.write(audio_data)
+        if args.text:
+            text = args.text
+        elif not sys.stdin.isatty():
+            text = sys.stdin.read().strip()
+        else:
+            print("error: provide text as an argument or pipe via stdin", file=sys.stderr)
+            sys.exit(1)
+
+        if not text:
+            print("error: empty text", file=sys.stderr)
+            sys.exit(1)
+
+        ogg = not args.mp3
+
+        try:
+            if args.provider == "openai":
+                voice = args.voice or OPENAI_DEFAULT_VOICE
+                if voice not in OPENAI_VOICES:
+                    print(f"error: unknown openai voice '{voice}'. Available: {', '.join(sorted(OPENAI_VOICES))}", file=sys.stderr)
+                    sys.exit(1)
+                audio_data, ext = speak_openai(text, voice, ogg)
+            elif args.provider == "google":
+                voice = args.voice or GOOGLE_DEFAULT_VOICE
+                audio_data, ext = speak_google(text, voice, ogg)
+            else:
+                voice = args.voice or ELEVENLABS_DEFAULT_VOICE
+                audio_data, ext = speak_elevenlabs(text, voice, args.model, ogg)
+        except SystemExit:
+            raise
+        except BaseException as exc:  # noqa: BLE001 — any TTS failure must exit non-zero cleanly
+            # Includes timeouts (after SPEAK_TIMEOUT={SPEAK_TIMEOUT}s) and API errors.
+            # A clear one-line stderr message lets the combined `say-voice` wrapper
+            # trigger its text fallback instead of hanging or dumping a traceback.
+            reason = str(exc).strip() or exc.__class__.__name__
+            reason = " ".join(reason.split())
+            if len(reason) > 200:
+                reason = reason[:197] + "..."
+            print(f"speak: {args.provider} TTS failed (timeout={SPEAK_TIMEOUT:g}s): {reason}", file=sys.stderr)
+            sys.exit(1)
+
+        if args.out:
+            args.out.write_bytes(audio_data)
+            print(f"{args.out}", file=sys.stderr)
+        else:
+            sys.stdout.buffer.write(audio_data)
+    except BaseException as e:
+        if _span:
+            _span.record_exception(e)
+            if _trace:
+                _span.set_status(_trace.StatusCode.ERROR, str(e))
+        raise
+    finally:
+        if _span_ctx:
+            _span_ctx.__exit__(None, None, None)
+        if otel_cli:
+            otel_cli.shutdown()
 
 
 if __name__ == "__main__":

@@ -2,6 +2,10 @@
 # Hook for SubagentStop: notify Telegram (threaded) and update tracker
 set -euo pipefail
 
+# shellcheck source=../lib/otel.sh
+_OTEL_LIB="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)/../lib/otel.sh"
+{ [ -f "$_OTEL_LIB" ] && source "$_OTEL_LIB" && otel_start_span "${0##*/}" && trap 'otel_end_span $?' EXIT; } || true
+
 INPUT=$(cat)
 TRACKER="/tmp/agent-tracker.json"
 

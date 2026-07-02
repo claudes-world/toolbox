@@ -31,6 +31,15 @@ from urllib.parse import urlparse
 
 import mistune
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
+try:
+    import otel_cli
+    otel_cli.setup('md-speak')
+    _tracer = otel_cli.get_tracer(__name__)
+except Exception:
+    otel_cli = None  # type: ignore[assignment]
+    _tracer = None
+
 # --- Voice configuration (env-overridable) ---
 
 VOICES = {
@@ -675,75 +684,93 @@ def stitch_audio(parts: list[str], output_path: str):
 # --- Main ---
 
 def main():
-    parser = argparse.ArgumentParser(description="Read markdown aloud with multiple voices")
-    parser.add_argument("file", help="Markdown file to read")
-    parser.add_argument("--out", "-o", type=Path, default=None, help="Output file (default: <input>.mp3)")
-    parser.add_argument("--no-describe", action="store_true", help="Skip AI descriptions of code/images")
-    parser.add_argument("--no-outro", action="store_true", help="Skip the spoken 'This is the end of: <file>' closing line (use for video narration / clips)")
-    args = parser.parse_args()
+    try:
+        from opentelemetry import trace as _trace
+    except ImportError:
+        _trace = None  # type: ignore[assignment]
+    _span_ctx = _tracer.start_as_current_span('md-speak.run') if _tracer else None
+    _span = _span_ctx.__enter__() if _span_ctx else None
+    try:
+        parser = argparse.ArgumentParser(description="Read markdown aloud with multiple voices")
+        parser.add_argument("file", help="Markdown file to read")
+        parser.add_argument("--out", "-o", type=Path, default=None, help="Output file (default: <input>.mp3)")
+        parser.add_argument("--no-describe", action="store_true", help="Skip AI descriptions of code/images")
+        parser.add_argument("--no-outro", action="store_true", help="Skip the spoken 'This is the end of: <file>' closing line (use for video narration / clips)")
+        args = parser.parse_args()
 
-    md_path = Path(args.file)
-    if not md_path.exists():
-        print(f"error: file not found: {md_path}", file=sys.stderr)
-        sys.exit(1)
+        md_path = Path(args.file)
+        if not md_path.exists():
+            print(f"error: file not found: {md_path}", file=sys.stderr)
+            sys.exit(1)
 
-    output = args.out or md_path.with_suffix(".mp3")
-    md_text = md_path.read_text()
+        output = args.out or md_path.with_suffix(".mp3")
+        md_text = md_path.read_text()
 
-    print(f"Parsing {md_path.name}...", file=sys.stderr)
-    segments = process_markdown(md_text, use_ai=not args.no_describe)
-    print(f"Generated {len(segments)} segments", file=sys.stderr)
+        print(f"Parsing {md_path.name}...", file=sys.stderr)
+        segments = process_markdown(md_text, use_ai=not args.no_describe)
+        print(f"Generated {len(segments)} segments", file=sys.stderr)
 
-    # Batch into SSML by voice
-    batches = segments_to_ssml_batches(segments)
-    chunk_count = len(batches)
-    print(f"Batched into {chunk_count} SSML calls (was {len(segments)} segments)", file=sys.stderr)
-    if chunk_count > 20:
-        print(f"warning: high chunk count ({chunk_count}) — document may be very long or segmentation is fragmented", file=sys.stderr)
+        # Batch into SSML by voice
+        batches = segments_to_ssml_batches(segments)
+        chunk_count = len(batches)
+        print(f"Batched into {chunk_count} SSML calls (was {len(segments)} segments)", file=sys.stderr)
+        if chunk_count > 20:
+            print(f"warning: high chunk count ({chunk_count}) — document may be very long or segmentation is fragmented", file=sys.stderr)
 
-    # Generate audio for each batch
-    tmpdir = tempfile.mkdtemp(prefix="md-speak-")
-    parts: list[str] = []
-    char_count = 0
+        # Generate audio for each batch
+        tmpdir = tempfile.mkdtemp(prefix="md-speak-")
+        parts: list[str] = []
+        char_count = 0
 
-    for i, (ssml, voice) in enumerate(batches):
-        audio_path = f"{tmpdir}/batch-{i}.mp3"
-        # Count chars (rough — includes SSML tags but close enough)
-        text_chars = len(re.sub(r'<[^>]+>', '', ssml))
-        char_count += text_chars
-        preview = re.sub(r'<[^>]+>', '', ssml).strip()[:60]
-        print(f"  [{i+1}/{len(batches)}] {voice}: {preview}{'...' if len(preview) >= 60 else ''}", file=sys.stderr)
-        rate = 1.155 if voice == VOICES["body"] else 1.045  # +10% from prior 1.05/0.95
-        generate_ssml_audio(ssml, voice, audio_path, rate=rate)
-        parts.append(audio_path)
+        for i, (ssml, voice) in enumerate(batches):
+            audio_path = f"{tmpdir}/batch-{i}.mp3"
+            # Count chars (rough — includes SSML tags but close enough)
+            text_chars = len(re.sub(r'<[^>]+>', '', ssml))
+            char_count += text_chars
+            preview = re.sub(r'<[^>]+>', '', ssml).strip()[:60]
+            print(f"  [{i+1}/{len(batches)}] {voice}: {preview}{'...' if len(preview) >= 60 else ''}", file=sys.stderr)
+            rate = 1.155 if voice == VOICES["body"] else 1.045  # +10% from prior 1.05/0.95
+            generate_ssml_audio(ssml, voice, audio_path, rate=rate)
+            parts.append(audio_path)
 
-    if not parts:
-        print("error: no audio segments generated", file=sys.stderr)
-        sys.exit(1)
+        if not parts:
+            print("error: no audio segments generated", file=sys.stderr)
+            sys.exit(1)
 
-    # Generate "end of document" closing line in the female voice (unless suppressed)
-    if not args.no_outro:
-        doc_name = md_path.stem.replace("-", " ").replace("_", " ").title()
-        end_ssml = f'<speak><break time="800ms"/><p>{escape_ssml("This is the end of: " + doc_name)}</p></speak>'
-        end_audio_path = f"{tmpdir}/end-segment.mp3"
-        print(f"  [END] {VOICES['special']}: This is the end of: {doc_name}", file=sys.stderr)
-        generate_ssml_audio(end_ssml, VOICES["special"], end_audio_path)
-        parts.append(end_audio_path)
+        # Generate "end of document" closing line in the female voice (unless suppressed)
+        if not args.no_outro:
+            doc_name = md_path.stem.replace("-", " ").replace("_", " ").title()
+            end_ssml = f'<speak><break time="800ms"/><p>{escape_ssml("This is the end of: " + doc_name)}</p></speak>'
+            end_audio_path = f"{tmpdir}/end-segment.mp3"
+            print(f"  [END] {VOICES['special']}: This is the end of: {doc_name}", file=sys.stderr)
+            generate_ssml_audio(end_ssml, VOICES["special"], end_audio_path)
+            parts.append(end_audio_path)
 
-    print(f"Stitching {len(parts)} audio parts...", file=sys.stderr)
-    stitch_audio(parts, str(output))
+        print(f"Stitching {len(parts)} audio parts...", file=sys.stderr)
+        stitch_audio(parts, str(output))
 
-    # Add metadata (artist, title, album art)
-    doc_title = md_path.stem.replace("-", " ").replace("_", " ").title()
-    add_mp3_metadata(str(output), title=doc_title)
+        # Add metadata (artist, title, album art)
+        doc_title = md_path.stem.replace("-", " ").replace("_", " ").title()
+        add_mp3_metadata(str(output), title=doc_title)
 
-    # Cleanup
-    for p in parts:
-        Path(p).unlink(missing_ok=True)
-    Path(tmpdir).rmdir()
+        # Cleanup
+        for p in parts:
+            Path(p).unlink(missing_ok=True)
+        Path(tmpdir).rmdir()
 
-    print(f"{output} ({char_count} chars)", file=sys.stderr)
-    print(str(output))
+        print(f"{output} ({char_count} chars)", file=sys.stderr)
+        print(str(output))
+    except BaseException as e:
+        if _span:
+            _span.record_exception(e)
+            if _trace:
+                _span.set_status(_trace.StatusCode.ERROR, str(e))
+        raise
+    finally:
+        if _span_ctx:
+            _span_ctx.__exit__(None, None, None)
+        if otel_cli:
+            otel_cli.shutdown()
 
 
 if __name__ == "__main__":
