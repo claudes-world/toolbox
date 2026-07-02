@@ -38,7 +38,7 @@ VOICES = {
     "body": os.environ.get("MD_VOICE_BODY", "en-US-Wavenet-J"),
     "special": os.environ.get("MD_VOICE_SPECIAL", "en-US-Neural2-C"),
     "table_key": os.environ.get("MD_VOICE_TABLE_KEY", "en-US-Neural2-H"),    # col 0 — row labels
-    "table_val": os.environ.get("MD_VOICE_TABLE_VAL", "en-US-Neural2-F"),    # col 1+ — values
+    "table_val": os.environ.get("MD_VOICE_TABLE_VAL", "en-US-Wavenet-F"),    # col 1+ — values (Neural2-F was unclear per Liam 2026-05-21)
     "quote": os.environ.get("MD_VOICE_QUOTE", "en-US-Wavenet-D"),
 }
 
@@ -679,6 +679,7 @@ def main():
     parser.add_argument("file", help="Markdown file to read")
     parser.add_argument("--out", "-o", type=Path, default=None, help="Output file (default: <input>.mp3)")
     parser.add_argument("--no-describe", action="store_true", help="Skip AI descriptions of code/images")
+    parser.add_argument("--no-outro", action="store_true", help="Skip the spoken 'This is the end of: <file>' closing line (use for video narration / clips)")
     args = parser.parse_args()
 
     md_path = Path(args.file)
@@ -720,13 +721,14 @@ def main():
         print("error: no audio segments generated", file=sys.stderr)
         sys.exit(1)
 
-    # Generate "end of document" closing line in the female voice
-    doc_name = md_path.stem.replace("-", " ").replace("_", " ").title()
-    end_ssml = f'<speak><break time="800ms"/><p>{escape_ssml("This is the end of: " + doc_name)}</p></speak>'
-    end_audio_path = f"{tmpdir}/end-segment.mp3"
-    print(f"  [END] {VOICES['special']}: This is the end of: {doc_name}", file=sys.stderr)
-    generate_ssml_audio(end_ssml, VOICES["special"], end_audio_path)
-    parts.append(end_audio_path)
+    # Generate "end of document" closing line in the female voice (unless suppressed)
+    if not args.no_outro:
+        doc_name = md_path.stem.replace("-", " ").replace("_", " ").title()
+        end_ssml = f'<speak><break time="800ms"/><p>{escape_ssml("This is the end of: " + doc_name)}</p></speak>'
+        end_audio_path = f"{tmpdir}/end-segment.mp3"
+        print(f"  [END] {VOICES['special']}: This is the end of: {doc_name}", file=sys.stderr)
+        generate_ssml_audio(end_ssml, VOICES["special"], end_audio_path)
+        parts.append(end_audio_path)
 
     print(f"Stitching {len(parts)} audio parts...", file=sys.stderr)
     stitch_audio(parts, str(output))

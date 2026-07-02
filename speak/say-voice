@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# say-voice — resilient text→voice for Telegram that NEVER silently fails.
+#
+# Reads text from stdin, synthesizes a voice note (speak), and sends it as a
+# proper Telegram voice message (send-voice). On ANY failure — TTS error, TTS
+# timeout, missing/empty audio, or send-voice failure — it falls back to
+# sending the ORIGINAL TEXT to the same chat via the Telegram Bot API
+# sendMessage, prefixed with a clear "voice unavailable" notice. So the
+# message always lands one way or the other.
+#
+# Background: 2026-06-17 a silent voice failure occurred — `speak` (OpenAI TTS)
+# hung forever with no timeout, no .ogg was produced, and the downstream
+# `send-voice` never ran. `speak` now has a hard timeout (SPEAK_TIMEOUT, 60s
+# default) and this wrapper guarantees a text fallback on any failure.
+#
+# Usage:
+#   echo "your message" | say-voice <chat_id> [caption]
+#   say-voice <chat_id> < text.txt
+#   cat text.txt | SPEAK_TIMEOUT=30 say-voice 1676859445
+#
+# Token: claude_do_bot, from ~/.secrets/cpc.env (TELEGRAM_BOT_TOKEN) — same
+# source send-voice uses; never printed.
+set -uo pipefail
+
+BIN_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+SPEAK="${BIN_DIR}/speak"
+[ -x "$SPEAK" ] || SPEAK="$(command -v speak || echo /home/claude/bin/speak)"
+SEND_VOICE="$(command -v send-voice || echo /home/claude/bin/send-voice)"
+
+CHAT_ID="${1:?usage: say-voice <chat_id> [caption]   (text on stdin)}"
+CAPTION="${2:-}"
+
+# Read the message text from stdin.
+TEXT="$(cat)"
+if [ -z "${TEXT//[[:space:]]/}" ]; then
+  echo "say-voice: empty text on stdin" >&2
+  exit 2
+fi
+
+# --- text fallback via Bot API sendMessage ---
+# Sends the ORIGINAL text to the same chat when voice can't be delivered.
+# Loads the bot token the same way send-voice does; never echoes it.
+send_text_fallback() {
+  local reason="$1"
+  echo "say-voice: voice path failed ($reason) — sending text fallback to chat ${CHAT_ID}" >&2
+
+  local token
+  token=$(grep -E '^TELEGRAM_BOT_TOKEN=' ~/.secrets/cpc.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' ')
+  if [ -z "$token" ]; then
+    echo "say-voice: FATAL — no TELEGRAM_BOT_TOKEN in ~/.secrets/cpc.env, cannot send text fallback either" >&2
+    return 1
+  fi
+
+  local body
+  body="⚠️ [voice unavailable — sending as text]
+${TEXT}"
+
+  local resp
+  resp=$(curl -s -m 30 "https://api.telegram.org/bot${token}/sendMessage" \
+    --data-urlencode "chat_id=${CHAT_ID}" \
+    --data-urlencode "text=${body}" \
+    -d "disable_notification=false")
+
+  if printf '%s' "$resp" | grep -q '"ok":true'; then
+    echo "say-voice: text fallback delivered" >&2
+    return 0
+  else
+    # Avoid leaking secrets: the token is in the URL, not in $resp, so the
+    # response body is safe to print for debugging.
+    echo "say-voice: FATAL — text fallback also failed -> ${resp}" >&2
+    return 1
+  fi
+}
+
+# --- voice path: TTS then send ---
+OGG="$(mktemp --suffix=.ogg /tmp/say-voice-XXXXXX)"
+cleanup() { rm -f "$OGG"; }
+trap cleanup EXIT
+
+# 1. Synthesize (speak has its own SPEAK_TIMEOUT ceiling so it can't hang).
+if ! printf '%s' "$TEXT" | "$SPEAK" --out "$OGG" 2>/tmp/say-voice-speak.err; then
+  send_text_fallback "TTS failed: $(tr '\n' ' ' </tmp/say-voice-speak.err | tail -c 200)"
+  exit $?
+fi
+
+# 2. Guard against a missing or empty audio file.
+if [ ! -s "$OGG" ]; then
+  send_text_fallback "TTS produced no audio (empty/missing .ogg)"
+  exit $?
+fi
+
+# 3. Send the voice note.
+if ! "$SEND_VOICE" "$CHAT_ID" "$OGG" "$CAPTION" 2>/tmp/say-voice-send.err; then
+  send_text_fallback "send-voice failed: $(tr '\n' ' ' </tmp/say-voice-send.err | tail -c 200)"
+  exit $?
+fi
+
+echo "say-voice: voice sent" >&2

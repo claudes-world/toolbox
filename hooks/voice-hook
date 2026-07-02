@@ -36,8 +36,12 @@ if [ -z "$FILE_ID" ]; then
   exit 0
 fi
 
-# Load bot token
-BOTTOKEN=$(grep TELEGRAM_BOT_TOKEN /home/claude/.claude/channels/telegram/.env 2>/dev/null | cut -d= -f2)
+# Load bot token. Per-agent aware: tmux plugin agents (pm-dobot, gstack-dobot,
+# etc.) export TELEGRAM_STATE_DIR to their OWN channels dir in run.sh, and each
+# owns a distinct bot token. Telegram file_ids are bot-specific, so getFile MUST
+# use the same bot that received the voice note. The orchestrator leaves
+# TELEGRAM_STATE_DIR unset, so it falls back to its own channels dir (unchanged).
+BOTTOKEN=$(grep TELEGRAM_BOT_TOKEN "${TELEGRAM_STATE_DIR:-/home/claude/.claude/channels/telegram}/.env" 2>/dev/null | cut -d= -f2)
 if [ -z "$BOTTOKEN" ]; then
   exit 0
 fi
