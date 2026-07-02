@@ -1,0 +1,21 @@
+[Unit]
+Description=Grafana Alloy — unified OTEL collector
+Documentation=https://grafana.com/docs/alloy/
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=%h/bin/alloy run --stability.level=public-preview %h/.config/alloy/config.alloy
+ExecStartPost=%h/code/toolbox/lib/systemd-wait-port.sh 4317
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=alloy
+UMask=0077
+
+[Install]
+WantedBy=default.target
