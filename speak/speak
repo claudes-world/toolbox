@@ -30,6 +30,22 @@ import sys
 import tempfile
 from pathlib import Path
 
+# --- TTS API timeout ---
+# Hard ceiling on any single TTS API call so the tool can never hang forever
+# (root cause of a 2026-06-17 silent voice failure: OpenAI TTS hung with no
+# timeout, no .ogg produced, downstream send never ran). Overridable via env.
+# On timeout the provider call raises and we exit non-zero with a clear message.
+def _speak_timeout() -> float:
+    raw = os.environ.get("SPEAK_TIMEOUT", "60")
+    try:
+        val = float(raw)
+        return val if val > 0 else 60.0
+    except ValueError:
+        return 60.0
+
+
+SPEAK_TIMEOUT = _speak_timeout()
+
 # --- Provider: OpenAI ---
 
 OPENAI_VOICES = {"alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer"}
@@ -54,7 +70,9 @@ def load_openai_key() -> str:
 def speak_openai(text: str, voice: str, ogg: bool) -> tuple[bytes, str]:
     from openai import OpenAI
 
-    client = OpenAI(api_key=load_openai_key())
+    # timeout: hard ceiling on the whole request so a stalled TTS call can
+    # never hang forever (no timeout = the 2026-06-17 silent-failure root cause).
+    client = OpenAI(api_key=load_openai_key(), timeout=SPEAK_TIMEOUT, max_retries=0)
     # OpenAI supports opus natively — no ffmpeg needed
     fmt = "opus" if ogg else "mp3"
     response = client.audio.speech.create(
@@ -105,6 +123,7 @@ def speak_google(text: str, voice: str, ogg: bool) -> tuple[bytes, str]:
         input=synthesis_input,
         voice=voice_params,
         audio_config=audio_config,
+        timeout=SPEAK_TIMEOUT,
     )
     return response.audio_content, ext
 
@@ -173,7 +192,7 @@ def speak_elevenlabs(text: str, voice: str, model: str, ogg: bool) -> tuple[byte
 
     model_id = ELEVENLABS_MODELS.get(model, ELEVENLABS_MODELS["flash"])
 
-    client = ElevenLabs(api_key=load_elevenlabs_key())
+    client = ElevenLabs(api_key=load_elevenlabs_key(), timeout=SPEAK_TIMEOUT)
     audio = client.text_to_speech.convert(
         text=text,
         voice_id=voice_id,
@@ -218,18 +237,31 @@ def main():
 
     ogg = not args.mp3
 
-    if args.provider == "openai":
-        voice = args.voice or OPENAI_DEFAULT_VOICE
-        if voice not in OPENAI_VOICES:
-            print(f"error: unknown openai voice '{voice}'. Available: {', '.join(sorted(OPENAI_VOICES))}", file=sys.stderr)
-            sys.exit(1)
-        audio_data, ext = speak_openai(text, voice, ogg)
-    elif args.provider == "google":
-        voice = args.voice or GOOGLE_DEFAULT_VOICE
-        audio_data, ext = speak_google(text, voice, ogg)
-    else:
-        voice = args.voice or ELEVENLABS_DEFAULT_VOICE
-        audio_data, ext = speak_elevenlabs(text, voice, args.model, ogg)
+    try:
+        if args.provider == "openai":
+            voice = args.voice or OPENAI_DEFAULT_VOICE
+            if voice not in OPENAI_VOICES:
+                print(f"error: unknown openai voice '{voice}'. Available: {', '.join(sorted(OPENAI_VOICES))}", file=sys.stderr)
+                sys.exit(1)
+            audio_data, ext = speak_openai(text, voice, ogg)
+        elif args.provider == "google":
+            voice = args.voice or GOOGLE_DEFAULT_VOICE
+            audio_data, ext = speak_google(text, voice, ogg)
+        else:
+            voice = args.voice or ELEVENLABS_DEFAULT_VOICE
+            audio_data, ext = speak_elevenlabs(text, voice, args.model, ogg)
+    except SystemExit:
+        raise
+    except BaseException as exc:  # noqa: BLE001 — any TTS failure must exit non-zero cleanly
+        # Includes timeouts (after SPEAK_TIMEOUT={SPEAK_TIMEOUT}s) and API errors.
+        # A clear one-line stderr message lets the combined `say-voice` wrapper
+        # trigger its text fallback instead of hanging or dumping a traceback.
+        reason = str(exc).strip() or exc.__class__.__name__
+        reason = " ".join(reason.split())
+        if len(reason) > 200:
+            reason = reason[:197] + "..."
+        print(f"speak: {args.provider} TTS failed (timeout={SPEAK_TIMEOUT:g}s): {reason}", file=sys.stderr)
+        sys.exit(1)
 
     if args.out:
         args.out.write_bytes(audio_data)
