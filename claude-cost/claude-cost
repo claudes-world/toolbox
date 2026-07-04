@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+"""Estimate Claude Code API-equivalent cost from local session logs.
+
+Parses ~/.claude/projects/**/*.jsonl (the transcripts Claude Code writes for
+every session and subagent), sums token usage per model, and applies
+cache-aware Anthropic list pricing. Useful for: "what did the last N days of
+work cost?", feeding a cost tile in the CPC mini-app (--json), or an agent
+checking spend before a big run.
+
+Pricing is list price per the claude-api reference (cached 2026-06-24); the
+Max subscription bills by quota, so treat the number as "what this would cost
+on the metered API", not a literal invoice.
+
+Usage:
+    claude-cost                     # last 3 days, human table
+    claude-cost --days 7            # last 7 days
+    claude-cost --since 2026-07-01  # explicit start (UTC)
+    claude-cost --by-project        # break down per project dir
+    claude-cost --model fable       # only models matching substring
+    claude-cost --json              # machine-readable (for CPC / agents)
+
+Cache-aware pricing: cache reads bill at 0.1x input, 5-minute cache writes at
+1.25x, 1-hour cache writes at 2x. The "naive" figure is what the same work
+would cost with no prompt caching at all.
+"""
+
+import argparse
+import glob
+import json
+import os
+import sys
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+
+# per-MILLION-token list price: (input, output). Match by substring, first hit.
+PRICING = [
+    ("fable-5",    (10.0, 50.0)),
+    ("mythos-5",   (10.0, 50.0)),
+    ("opus-4-8",   (5.0,  25.0)),
+    ("opus-4-7",   (5.0,  25.0)),
+    ("opus-4-6",   (5.0,  25.0)),
+    ("opus-4-5",   (5.0,  25.0)),
+    ("opus",       (5.0,  25.0)),
+    ("sonnet-5",   (3.0,  15.0)),   # intro $2/$10 through 2026-08-31 (see --json intro field)
+    ("sonnet-4-6", (3.0,  15.0)),
+    ("sonnet-4-5", (3.0,  15.0)),
+    ("sonnet",     (3.0,  15.0)),
+    ("haiku",      (1.0,  5.0)),
+]
+SONNET5_INTRO = (2.0, 10.0)  # promotional; applied only to a "sonnet-5" match
+
+CACHE_READ_MULT = 0.10
+CACHE_WRITE_5M_MULT = 1.25
+CACHE_WRITE_1H_MULT = 2.0
+
+
+def price_for(model):
+    for key, price in PRICING:
+        if key in model:
+            return key, price
+    return "other", (3.0, 15.0)  # unknown model → assume Sonnet-tier
+
+
+def cost_of(price_in, price_out, fresh_in, cache_read, cw5m, cw1h, out):
+    m = 1e6
+    return (
+        fresh_in * price_in / m
+        + cache_read * price_in * CACHE_READ_MULT / m
+        + cw5m * price_in * CACHE_WRITE_5M_MULT / m
+        + cw1h * price_in * CACHE_WRITE_1H_MULT / m
+        + out * price_out / m
+    )
+
+
+def blank():
+    return dict(calls=0, fresh_in=0, cache_read=0, cw5m=0, cw1h=0, out=0,
+                cost=0.0, cost_intro=0.0, naive=0.0)
+
+
+def parse(projects_dir, cutoff, model_filter):
+    by_model = defaultdict(blank)
+    by_project = defaultdict(blank)
+    seen = set()
+    files = glob.glob(os.path.join(projects_dir, "**", "*.jsonl"), recursive=True)
+    for fp in files:
+        # project = the top-level dir name under projects/
+        rel = os.path.relpath(fp, projects_dir)
+        project = rel.split(os.sep, 1)[0]
+        try:
+            with open(fp, errors="ignore") as f:
+                for line in f:
+                    if '"usage"' not in line:
+                        continue
+                    try:
+                        o = json.loads(line)
+                    except Exception:
+                        continue
+                    ts = o.get("timestamp")
+                    if ts and cutoff:
+                        try:
+                            t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                            if t < cutoff:
+                                continue
+                        except Exception:
+                            pass
+                    msg = o.get("message") or {}
+                    usage = msg.get("usage") or o.get("usage")
+                    if not usage:
+                        continue
+                    model = (msg.get("model") or o.get("model") or "").lower()
+                    if not model or model in ("<synthetic>", "unknown"):
+                        continue
+                    if model_filter and model_filter not in model:
+                        continue
+                    mid = msg.get("id") or o.get("uuid")
+                    if mid:
+                        if mid in seen:
+                            continue
+                        seen.add(mid)
+
+                    fresh_in = usage.get("input_tokens", 0) or 0
+                    cache_read = usage.get("cache_read_input_tokens", 0) or 0
+                    out = usage.get("output_tokens", 0) or 0
+                    # cache writes: prefer the {ephemeral_5m,1h} breakdown when present
+                    cc = usage.get("cache_creation") or {}
+                    cw5m = cc.get("ephemeral_5m_input_tokens", 0) or 0
+                    cw1h = cc.get("ephemeral_1h_input_tokens", 0) or 0
+                    if not (cw5m or cw1h):
+                        cw5m = usage.get("cache_creation_input_tokens", 0) or 0
+
+                    key, (pin, pout) = price_for(model)
+                    c = cost_of(pin, pout, fresh_in, cache_read, cw5m, cw1h, out)
+                    intro = c
+                    if key == "sonnet-5":
+                        ipin, ipout = SONNET5_INTRO
+                        intro = cost_of(ipin, ipout, fresh_in, cache_read, cw5m, cw1h, out)
+                    # naive = no caching at all (cache tokens billed as fresh input)
+                    naive = ((fresh_in + cache_read + cw5m + cw1h) * pin + out * pout) / 1e6
+
+                    for agg in (by_model[key], by_project[project]):
+                        agg["calls"] += 1
+                        agg["fresh_in"] += fresh_in
+                        agg["cache_read"] += cache_read
+                        agg["cw5m"] += cw5m
+                        agg["cw1h"] += cw1h
+                        agg["out"] += out
+                        agg["cost"] += c
+                        agg["cost_intro"] += intro
+                        agg["naive"] += naive
+        except Exception:
+            continue
+    return by_model, by_project
+
+
+def m(n):
+    return f"{n / 1e6:.1f}M"
+
+
+def totals(d):
+    t = blank()
+    for a in d.values():
+        for k in t:
+            t[k] += a[k]
+    return t
+
+
+def print_human(by_model, by_project, window_label, show_projects):
+    print(f"Claude API-equivalent cost — {window_label}")
+    print(f"{'model':11} {'calls':>6} {'fresh':>7} {'cache_rd':>9} {'cache_wr':>9} {'output':>7} {'cost$':>9}")
+    print("-" * 66)
+    for k in sorted(by_model, key=lambda x: -by_model[x]["cost"]):
+        a = by_model[k]
+        cw = a["cw5m"] + a["cw1h"]
+        print(f"{k:11} {a['calls']:>6} {m(a['fresh_in']):>7} {m(a['cache_read']):>9} "
+              f"{m(cw):>9} {m(a['out']):>7} {a['cost']:>9.2f}")
+    print("-" * 66)
+    t = totals(by_model)
+    tot_input_side = t["fresh_in"] + t["cache_read"] + t["cw5m"] + t["cw1h"]
+    cache_pct = 100 * t["cache_read"] / max(tot_input_side, 1)
+    print(f"input-side tokens: {m(tot_input_side)}  |  cache-served: {cache_pct:.0f}%")
+    print(f"TOTAL (list): ${t['cost']:,.2f}   |   with Sonnet-5 intro pricing: ${t['cost_intro']:,.2f}")
+    print(f"Naive (no caching at all): ${t['naive']:,.2f}  → caching saved ~${t['naive'] - t['cost']:,.0f}")
+    if show_projects:
+        print("\nby project (top 12 by cost):")
+        for p in sorted(by_project, key=lambda x: -by_project[x]["cost"])[:12]:
+            a = by_project[p]
+            print(f"  {a['cost']:>8.2f}  {p}")
+
+
+def to_json(by_model, by_project, window_label, since_iso, show_projects):
+    t = totals(by_model)
+    tot_input_side = t["fresh_in"] + t["cache_read"] + t["cw5m"] + t["cw1h"]
+    out = {
+        "window": window_label,
+        "since_utc": since_iso,
+        "total_cost_usd": round(t["cost"], 2),
+        "total_cost_intro_usd": round(t["cost_intro"], 2),
+        "naive_cost_usd": round(t["naive"], 2),
+        "cache_saved_usd": round(t["naive"] - t["cost"], 2),
+        "cache_read_pct": round(100 * t["cache_read"] / max(tot_input_side, 1), 1),
+        "by_model": {
+            k: {
+                "calls": a["calls"],
+                "fresh_input": a["fresh_in"],
+                "cache_read": a["cache_read"],
+                "cache_write": a["cw5m"] + a["cw1h"],
+                "output": a["out"],
+                "cost_usd": round(a["cost"], 2),
+            }
+            for k, a in sorted(by_model.items(), key=lambda kv: -kv[1]["cost"])
+        },
+    }
+    if show_projects:
+        out["by_project"] = {
+            p: round(a["cost"], 2)
+            for p, a in sorted(by_project.items(), key=lambda kv: -kv[1]["cost"])
+        }
+    print(json.dumps(out, indent=2))
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Estimate Claude API-equivalent cost from session logs.")
+    ap.add_argument("--days", type=int, default=3, help="look back N days (default 3)")
+    ap.add_argument("--since", help="explicit start date YYYY-MM-DD (UTC); overrides --days")
+    ap.add_argument("--all", action="store_true", help="no time filter (every session on disk)")
+    ap.add_argument("--by-project", action="store_true", help="also break down per project dir")
+    ap.add_argument("--model", help="only models whose id contains this substring")
+    ap.add_argument("--json", action="store_true", help="machine-readable output")
+    ap.add_argument("--projects-dir", default=os.path.expanduser("~/.claude/projects"))
+    args = ap.parse_args()
+
+    if args.all:
+        cutoff, since_iso, label = None, None, "all sessions on disk"
+    elif args.since:
+        cutoff = datetime.fromisoformat(args.since).replace(tzinfo=timezone.utc)
+        since_iso, label = cutoff.isoformat(), f"since {args.since}"
+    else:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=args.days)
+        since_iso, label = cutoff.isoformat(), f"last {args.days} days"
+
+    if not os.path.isdir(args.projects_dir):
+        print(f"projects dir not found: {args.projects_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    by_model, by_project = parse(args.projects_dir, cutoff, (args.model or "").lower())
+    if not by_model:
+        print("no usage found in window", file=sys.stderr)
+        sys.exit(0)
+
+    if args.json:
+        to_json(by_model, by_project, label, since_iso, args.by_project)
+    else:
+        print_human(by_model, by_project, label, args.by_project)
+
+
+if __name__ == "__main__":
+    main()

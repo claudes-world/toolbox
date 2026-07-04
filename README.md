@@ -223,6 +223,7 @@ Standalone tools that don't have their own README section yet.
 
 | Tool | Description | Docs |
 |------|-------------|------|
+| claude-cost | Estimate Claude API-equivalent cost from local session logs (cache-aware, per-model); human table or `--json` for CPC/agents | `claude-cost/` |
 | gen-image | Generate images via Google Gemini/Imagen API | `gen-image/` |
 | morning-brief | Gather system health, PR staleness, weather, and dependency alerts in parallel; output JSON or human-readable text | `morning-brief/` |
 | openai-usage | Query OpenAI costs and usage; optionally send summary to Telegram | `openai-usage/` |
