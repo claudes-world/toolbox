@@ -13,8 +13,11 @@ EVENT=$(echo "$INPUT" | jq -r '.hook_event_name // empty' 2>/dev/null || true)
 MATCHER=$(echo "$INPUT" | jq -r '.matcher // empty' 2>/dev/null || true)
 HOOK_CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
 
-. "$(dirname "$(readlink -f "$0")")/common.sh" 2>/dev/null || true
-CHAT_ID="${TELEGRAM_CHAT_ID:-}"
+. "$(dirname "$(readlink -f "$0")")/wos-hook-target.sh"
+wos_hook_target
+CHAT_ID="$TELEGRAM_CHAT_ID"
+THREAD_SUFFIX=""
+[ -n "$WOS_HOOK_THREAD_ID" ] && THREAD_SUFFIX="&message_thread_id=${WOS_HOOK_THREAD_ID}"
 
 [ -z "$BOTTOKEN" ] && exit 0
 [ -z "$CHAT_ID" ] && exit 0
@@ -22,10 +25,10 @@ CHAT_ID="${TELEGRAM_CHAT_ID:-}"
 if [[ "$EVENT" == *"PreCompact"* ]] || [[ "$MATCHER" == *"manual"* && -z "$EVENT" ]]; then
   # Could be PreCompact
   curl -s -4 --connect-timeout 2 --max-time 4 -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
-    -d "chat_id=${CHAT_ID}&text=🗜 Compacting context...&disable_notification=true" \
+    -d "chat_id=${CHAT_ID}&text=🗜 Compacting context...&disable_notification=true${THREAD_SUFFIX}" \
     > /dev/null 2>&1 || true
 elif [[ "$EVENT" == *"PostCompact"* ]]; then
   curl -s -4 --connect-timeout 2 --max-time 4 -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
-    -d "chat_id=${CHAT_ID}&text=✅ Context compacted.&disable_notification=true" \
+    -d "chat_id=${CHAT_ID}&text=✅ Context compacted.&disable_notification=true${THREAD_SUFFIX}" \
     > /dev/null 2>&1 || true
 fi

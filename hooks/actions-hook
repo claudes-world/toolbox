@@ -7,13 +7,11 @@ set -euo pipefail
 INPUT=$(cat)
 CONTENT=$(echo "$INPUT" | jq -r '.prompt // .message.content // ""' 2>/dev/null || true)
 
-# Load bot token
-BOTTOKEN=$(grep TELEGRAM_BOT_TOKEN /home/claude/.claude/channels/telegram/.env 2>/dev/null | cut -d= -f2)
-[ -z "$BOTTOKEN" ] && exit 0
-
 HOOK_CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
-. "$(dirname "$(readlink -f "$0")")/common.sh"
+. "$(dirname "$(readlink -f "$0")")/wos-hook-target.sh"
 . "$(dirname "$(readlink -f "$0")")/lib/launcher-keyboard.sh"
+wos_hook_target
+[ -z "$BOTTOKEN" ] && exit 0
 CHAT_ID="$TELEGRAM_CHAT_ID"
 
 send_msg() {
@@ -29,6 +27,9 @@ send_msg() {
   fi
   if [ -n "$parse_mode" ]; then
     data=$(echo "$data" | jq --arg pm "$parse_mode" '. + {parse_mode: $pm}')
+  fi
+  if [ -n "$WOS_HOOK_THREAD_ID" ]; then
+    data=$(echo "$data" | jq --arg tid "$WOS_HOOK_THREAD_ID" '. + {message_thread_id: ($tid | tonumber)}')
   fi
   curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
     -H "Content-Type: application/json" -d "$data" > /dev/null 2>&1 || true

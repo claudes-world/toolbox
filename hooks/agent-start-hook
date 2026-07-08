@@ -14,6 +14,13 @@ echo "=== agent-start $(date) ===" >> /tmp/agent-hooks.log
 echo "$INPUT" | head -c 1000 >> /tmp/agent-hooks.log
 echo "" >> /tmp/agent-hooks.log
 
+# Telegram notifications DISABLED 2026-07-06 per Liam (voice msg 26585): the
+# per-subagent start/stop messages cluttered the chat and buried real conversation.
+# The debug log line above is kept; the Telegram send below is skipped.
+# Re-enable by removing this exit 0 (the SubagentStart hook was also removed from
+# claudes-world/.claude/settings.json — re-add it there too).
+exit 0
+
 # Fields available: agent_id, agent_type, session_id, cwd, hook_event_name
 AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null || true)
 AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // "agent"' 2>/dev/null || true)
@@ -21,7 +28,8 @@ AGENT_SHORT="${AGENT_ID:0:8}"
 TIMESTAMP=$(TZ=America/New_York date '+%-I:%M %p ET')
 
 HOOK_CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
-. "$(dirname "$(readlink -f "$0")")/common.sh"
+. "$(dirname "$(readlink -f "$0")")/wos-hook-target.sh"
+wos_hook_target
 CHAT_ID="$TELEGRAM_CHAT_ID"
 [ -z "$BOTTOKEN" ] && exit 0
 require_chat_id || exit 0
