@@ -82,8 +82,9 @@ _cleanup_telegram_orphans() {
 }
 _cleanup_telegram_orphans
 
-. "$(dirname "$(readlink -f "$0")")/common.sh"
+. "$(dirname "$(readlink -f "$0")")/wos-hook-target.sh"
 . "$(dirname "$(readlink -f "$0")")/lib/launcher-keyboard.sh"
+wos_hook_target
 
 [ -z "$BOTTOKEN" ] && exit 0
 [ -z "$TELEGRAM_CHAT_ID" ] && exit 0
@@ -109,11 +110,15 @@ LAUNCHER_REPLY_MARKUP=$(build_launcher_reply_markup "$CHAT_ID" "$BOTTOKEN")
 # the only option is to switch from a reply-keyboard button to a chat menu
 # button (MenuButtonWebApp via setChatMenuButton API), which is a different
 # UX surface entirely.
+SEND_DATA=$(jq -n \
+  --arg chat_id "$CHAT_ID" \
+  --arg text "Session started." \
+  --argjson reply_markup "$LAUNCHER_REPLY_MARKUP" \
+  '{chat_id: $chat_id, text: $text, reply_markup: $reply_markup}'
+)
+if [ -n "$WOS_HOOK_THREAD_ID" ]; then
+  SEND_DATA=$(echo "$SEND_DATA" | jq --arg tid "$WOS_HOOK_THREAD_ID" '. + {message_thread_id: ($tid | tonumber)}')
+fi
 curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/sendMessage" \
   -H "Content-Type: application/json" \
-  -d "$(jq -n \
-    --arg chat_id "$CHAT_ID" \
-    --arg text "Session started." \
-    --argjson reply_markup "$LAUNCHER_REPLY_MARKUP" \
-    '{chat_id: $chat_id, text: $text, reply_markup: $reply_markup}'
-  )"
+  -d "$SEND_DATA"
