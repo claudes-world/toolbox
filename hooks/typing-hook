@@ -30,8 +30,8 @@ if [ -n "$CWD" ] && [ -d "${CWD}/.claude" ]; then
   echo "$CHAT_ID" > "${CWD}/.claude/.active-chat"
 fi
 
-# Load bot token
-BOTTOKEN=$(grep TELEGRAM_BOT_TOKEN /home/claude/.claude/channels/telegram/.env 2>/dev/null | cut -d= -f2)
+. "$(dirname "$(readlink -f "$0")")/wos-hook-target.sh"
+BOTTOKEN="$(wos_hook_bot_token)"
 if [ -z "$BOTTOKEN" ]; then
   exit 0
 fi
