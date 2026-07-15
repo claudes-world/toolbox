@@ -4,17 +4,63 @@
 #
 # Input: markdown content via stdin (first line = title)
 # Output: file path on stdout
+#
+# Destination is fully flag-driven (no hardcoded bot/chat) — see --help below.
+# Backward compat: invoked with no flags at all == Liam's DM via @claude_dobot,
+# which is the current correct default. Prior to 2026-07-07 this was hardwired
+# to the legacy @claude_do_bot via common.sh; that coupling has been removed.
 
 set -euo pipefail
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: <markdown on stdin> | share-doc [options]
+
+Options:
+  --chat-id ID        Telegram chat_id to send the deep-link message to.
+                      Default: 1676859445 (Liam's DM), or $TELEGRAM_CHAT_ID if set.
+  --thread-id ID      Forum topic message_thread_id (optional). Required when
+                      targeting a specific topic in a forum supergroup — without
+                      it the message lands in General. Falls back to
+                      $TELEGRAM_THREAD_ID if set, else unset (no topic).
+  --bot-env PATH      Path to an env file holding TELEGRAM_BOT_TOKEN.
+                      Default: /srv/world/secrets/agents/claude-dobot/.env (@claude_dobot).
+  --bot-username NAME Skip the getMe lookup and use this bot username directly
+                      (informational only — the CPC deep link itself is bot-
+                      agnostic; see NOTE below).
+  --no-audio          Skip TTS generation; send text-only deep-link message.
+
+NOTE on the deep link: the CPC mini-app (cpc.claude.do) validates Telegram
+WebApp initData against a list of bot tokens server-side (TELEGRAM_BOT_TOKENS
+in ~/.secrets/cpc.env), so the same https://cpc.claude.do/#file=... URL opens
+correctly regardless of which bot's message carried the button. There is no
+t.me/<bot>/app-style per-bot link to construct. The bot username is still
+resolved (via getMe, cached) for logging/diagnostics and forward-compat.
+EOF
+}
 
 TMPDIR="/home/claude/claudes-world/tmp"
 mkdir -p "$TMPDIR"
 
 NO_AUDIO=0
-for arg in "$@"; do
-  if [ "$arg" = "--no-audio" ]; then
-    NO_AUDIO=1
-  fi
+CHAT_ID_ARG=""
+THREAD_ID_ARG=""
+BOT_ENV_ARG=""
+BOT_USERNAME_ARG=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-audio) NO_AUDIO=1; shift ;;
+    --chat-id) CHAT_ID_ARG="${2:-}"; shift 2 ;;
+    --thread-id) THREAD_ID_ARG="${2:-}"; shift 2 ;;
+    --bot-env) BOT_ENV_ARG="${2:-}"; shift 2 ;;
+    --bot-username) BOT_USERNAME_ARG="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      echo "error: unknown argument: $1 (see --help)" >&2
+      exit 2
+      ;;
+  esac
 done
 
 INPUT=$(cat)
@@ -79,22 +125,65 @@ else
   fi
 fi
 
-# Send to Telegram: audio + deep link button
-# Source common.sh if it exists (legacy path that may set BOTTOKEN). If absent,
-# fall back to TELEGRAM_BOT_TOKEN from the env (the canonical name).
-. "$(dirname "$(readlink -f "$0")")/common.sh" 2>/dev/null || true
-BOTTOKEN="${BOTTOKEN:-${TELEGRAM_BOT_TOKEN:-}}"
-CHAT_ID="${TELEGRAM_CHAT_ID:-}"
+# --- Destination resolution (flag > env var > new correct default) ---
+# Default bot is @claude_dobot (the orchestrator's live bot); default chat is
+# Liam's DM. Both are overridable so this generalizes to any chat/thread
+# instead of being hardwired to one destination.
+BOT_ENV="${BOT_ENV_ARG:-${SHARE_DOC_BOT_ENV:-/srv/world/secrets/agents/claude-dobot/.env}}"
+CHAT_ID="${CHAT_ID_ARG:-${TELEGRAM_CHAT_ID:-1676859445}}"
+THREAD_ID="${THREAD_ID_ARG:-${TELEGRAM_THREAD_ID:-}}"
 
-# If the helper has no auth, fail loudly so the caller knows the deep-link
-# was never sent — silent no-ops mask the problem.
+BOTTOKEN=""
+if [ -f "$BOT_ENV" ]; then
+  BOTTOKEN=$(grep -E '^TELEGRAM_BOT_TOKEN=' "$BOT_ENV" 2>/dev/null | head -1 | cut -d= -f2-)
+fi
+BOTTOKEN="${BOTTOKEN:-${TELEGRAM_BOT_TOKEN:-}}"
+
+# Fail loudly so the caller knows the deep-link was never sent — silent
+# no-ops mask the problem.
 if [ -z "$BOTTOKEN" ]; then
-  echo "error: no bot token (set TELEGRAM_BOT_TOKEN or BOTTOKEN; common.sh missing)" >&2
+  echo "error: no bot token found (checked $BOT_ENV, then \$TELEGRAM_BOT_TOKEN; pass --bot-env or --help)" >&2
   exit 3
 fi
 if [ -z "$CHAT_ID" ]; then
-  echo "error: no chat_id (set TELEGRAM_CHAT_ID)" >&2
+  echo "error: no chat_id (pass --chat-id or set TELEGRAM_CHAT_ID)" >&2
   exit 3
+fi
+
+# Resolve the bot's @username via getMe, cached per bot-env path so routine
+# sends don't pay for an extra API round-trip. Informational only (see NOTE
+# in --help) — the deep link itself doesn't need it — but derived from the
+# token rather than ever hardcoded, per the fix requested.
+resolve_bot_username() {
+  local token="$1" env_path="$2"
+  local cache_dir="/home/claude/.cache/share-doc"
+  mkdir -p "$cache_dir" 2>/dev/null || true
+  local key cache_file
+  key=$(printf '%s' "$env_path" | md5sum | cut -d' ' -f1)
+  cache_file="${cache_dir}/${key}.username"
+  if [ -s "$cache_file" ]; then
+    cat "$cache_file"
+    return 0
+  fi
+  local uname
+  uname=$(curl -s --max-time 5 "https://api.telegram.org/bot${token}/getMe" 2>/dev/null | jq -r '.result.username // empty' 2>/dev/null || true)
+  if [ -n "$uname" ]; then
+    printf '%s' "$uname" > "$cache_file" 2>/dev/null || true
+    printf '%s' "$uname"
+  fi
+}
+
+BOT_USERNAME="${BOT_USERNAME_ARG:-$(resolve_bot_username "$BOTTOKEN" "$BOT_ENV")}"
+if [ -n "$BOT_USERNAME" ]; then
+  echo "info: share-doc sending as @${BOT_USERNAME} → chat=${CHAT_ID}${THREAD_ID:+ thread=$THREAD_ID} (bot-env: $BOT_ENV)" >&2
+else
+  echo "warning: could not resolve bot username via getMe (bot-env: $BOT_ENV) — sending anyway" >&2
+fi
+
+# Extra curl -F args for forum-topic targeting; empty (no-op) when unset.
+THREAD_FORM_ARGS=()
+if [ -n "$THREAD_ID" ]; then
+  THREAD_FORM_ARGS=(-F "message_thread_id=${THREAD_ID}")
 fi
 
 if [ -n "$BOTTOKEN" ] && [ -n "$CHAT_ID" ]; then
@@ -135,7 +224,9 @@ if [ -n "$BOTTOKEN" ] && [ -n "$CHAT_ID" ]; then
           --arg cid "$CHAT_ID" \
           --arg title "📄 ${TITLE} (audio chop failed — text only)" \
           --arg url "$DEEP_URL" \
-          '{chat_id: $cid, text: $title, reply_markup: {inline_keyboard: [[{text: "Read in Pocket Console", web_app: {url: $url}}]]}}'
+          --arg tid "$THREAD_ID" \
+          '{chat_id: $cid, text: $title, reply_markup: {inline_keyboard: [[{text: "Read in Pocket Console", web_app: {url: $url}}]]}}
+           + (if $tid != "" then {message_thread_id: ($tid|tonumber)} else {} end)'
         )" > "$TMPDIR/.last-send-response.json" 2>&1 || true
       MSG_ID=$(jq -r '.result.message_id // empty' "$TMPDIR/.last-send-response.json" 2>/dev/null || true)
     else
@@ -152,6 +243,7 @@ if [ -n "$BOTTOKEN" ] && [ -n "$CHAT_ID" ]; then
             -F "caption=📄 ${PART_TITLE}" \
             -F "reply_markup={\"inline_keyboard\":[[{\"text\":\"Read in Pocket Console\",\"web_app\":{\"url\":\"${DEEP_URL}\"}}]]}" \
             -F "disable_notification=true" \
+            "${THREAD_FORM_ARGS[@]}" \
             > "$TMPDIR/.last-send-response.json" 2>&1 || true
           MSG_ID=$(jq -r '.result.message_id // empty' "$TMPDIR/.last-send-response.json" 2>/dev/null || true)
         else
@@ -162,6 +254,7 @@ if [ -n "$BOTTOKEN" ] && [ -n "$CHAT_ID" ]; then
             -F "title=${PART_TITLE}" \
             -F "caption=📄 ${PART_TITLE}" \
             -F "disable_notification=true" \
+            "${THREAD_FORM_ARGS[@]}" \
             > /dev/null 2>&1 || true
         fi
       done
@@ -175,6 +268,7 @@ if [ -n "$BOTTOKEN" ] && [ -n "$CHAT_ID" ]; then
       -F "caption=📄 ${TITLE}" \
       -F "reply_markup={\"inline_keyboard\":[[{\"text\":\"Read in Pocket Console\",\"web_app\":{\"url\":\"${DEEP_URL}\"}}]]}" \
       -F "disable_notification=true" \
+      "${THREAD_FORM_ARGS[@]}" \
       > "$TMPDIR/.last-send-response.json" 2>&1 || true
     MSG_ID=$(jq -r '.result.message_id // empty' "$TMPDIR/.last-send-response.json" 2>/dev/null || true)
   else
@@ -185,6 +279,7 @@ if [ -n "$BOTTOKEN" ] && [ -n "$CHAT_ID" ]; then
         --arg cid "$CHAT_ID" \
         --arg title "📄 ${TITLE}" \
         --arg url "$DEEP_URL" \
+        --arg tid "$THREAD_ID" \
         '{
           chat_id: $cid,
           text: $title,
@@ -194,16 +289,30 @@ if [ -n "$BOTTOKEN" ] && [ -n "$CHAT_ID" ]; then
               web_app: {url: $url}
             }]]
           }
-        }'
+        } + (if $tid != "" then {message_thread_id: ($tid|tonumber)} else {} end)'
       )" > "$TMPDIR/.last-send-response.json" 2>&1 || true
     MSG_ID=$(jq -r '.result.message_id // empty' "$TMPDIR/.last-send-response.json" 2>/dev/null || true)
   fi
 
-  # Auto-pin the shared document message
-  if [ -n "$MSG_ID" ]; then
-    curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/pinChatMessage" \
-      -d "chat_id=${CHAT_ID}&message_id=${MSG_ID}&disable_notification=true" \
-      > /dev/null 2>&1 || true
+  # Fail LOUDLY if the send didn't land (2026-07-14: two group-topic sends
+  # failed silently with BUTTON_TYPE_INVALID — Telegram rejects web_app
+  # inline buttons in group/supergroup chats; they only work in private
+  # chats, which is why the default DM target has always worked).
+  if [ -z "$MSG_ID" ]; then
+    SEND_ERR=$(jq -r '.description // "unknown error"' "$TMPDIR/.last-send-response.json" 2>/dev/null || echo "unknown error")
+    echo "error: telegram send FAILED (${SEND_ERR}) — chat=${CHAT_ID}${THREAD_ID:+ thread=$THREAD_ID}" >&2
+    if [ "${SEND_ERR}" = "Bad Request: BUTTON_TYPE_INVALID" ]; then
+      echo "hint: web_app buttons are rejected in group chats. Omit --chat-id to send to the DM (default), where the mini-app button works." >&2
+    fi
+    rm -f "$TMPDIR/.last-send-response.json"
+    exit 1
+  fi
+
+  # Auto-pin the shared document message (warn on failure, don't abort)
+  PIN_RESP=$(curl -s -X POST "https://api.telegram.org/bot${BOTTOKEN}/pinChatMessage" \
+    -d "chat_id=${CHAT_ID}&message_id=${MSG_ID}&disable_notification=true" 2>/dev/null || true)
+  if [ "$(printf '%s' "$PIN_RESP" | jq -r '.ok // false' 2>/dev/null)" != "true" ]; then
+    echo "warning: auto-pin failed: $(printf '%s' "$PIN_RESP" | jq -r '.description // "no response"' 2>/dev/null)" >&2
   fi
   rm -f "$TMPDIR/.last-send-response.json"
 fi
