@@ -224,12 +224,38 @@ Standalone tools that don't have their own README section yet.
 | Tool | Description | Docs |
 |------|-------------|------|
 | claude-cost | Estimate Claude API-equivalent cost from local session logs (cache-aware, per-model); human table or `--json` for CPC/agents | `claude-cost/` |
+| codex-cost | Estimate OpenAI API-equivalent cost from local Codex rollout logs (cache-aware, per-model/project); human table or `--json` | `codex-cost/` |
 | gen-image | Generate images via Google Gemini/Imagen API | `gen-image/` |
 | morning-brief | Gather system health, PR staleness, weather, and dependency alerts in parallel; output JSON or human-readable text | `morning-brief/` |
 | openai-usage | Query OpenAI costs and usage; optionally send summary to Telegram | `openai-usage/` |
 | ports | Dynamic port map of all listening TCP services on the VPS (port, process, PID, tunnel hostname, systemd status) | `ports/` |
 | tag-mp3 | Tag an mp3 file with ID3 metadata and optional album art | `tag-mp3/` |
 | tg-sanitize | Telegram MarkdownV2 sanitizer — escapes special characters for safe bot messages | `tg-sanitize/` |
+
+### codex-cost
+
+Estimates the metered OpenAI API equivalent of local Codex usage. It reads
+`~/.codex/sessions/**/*.jsonl`, uses each turn's input, cached-input, and output
+token counts, and groups results by model. These are list-price estimates, not
+the amount billed for a ChatGPT or Codex subscription. Human output includes
+aggregate input/output token totals and cache percentage; JSON includes the
+exact integer totals.
+
+Setup: no credentials or third-party packages are required. The executable is
+`codex-cost/codex-cost`, symlinked as `~/bin/codex-cost`.
+
+```bash
+codex-cost                     # last 3 days
+codex-cost --days 7
+codex-cost --since 2026-07-01
+codex-cost --by-project
+codex-cost --model gpt-5.6-sol
+codex-cost --json
+```
+
+The tool itself makes no API calls and therefore costs nothing to run. Its
+embedded per-token prices were checked against official OpenAI pricing on
+2026-07-10 and should be reviewed when model pricing changes.
 
 ## Hooks
 

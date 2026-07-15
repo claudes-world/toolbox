@@ -1,0 +1,186 @@
+#!/home/claude/venvs/transcribe/bin/python3
+"""Estimate Codex API-equivalent cost from local rollout logs."""
+
+import argparse
+import glob
+import json
+import os
+import sys
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+
+# Per-million-token prices: uncached input, cached input, output.
+# Checked against official OpenAI pricing on 2026-07-10.
+PRICING = [
+    ("gpt-5.6-sol", (5.00, 0.50, 30.00)),
+    ("gpt-5.6-terra", (2.50, 0.25, 15.00)),
+    ("gpt-5.6-luna", (1.00, 0.10, 6.00)),
+    ("gpt-5.5", (5.00, 0.50, 30.00)),
+    ("gpt-5.4-mini", (0.75, 0.075, 4.50)),
+    ("gpt-5.4", (2.50, 0.25, 15.00)),
+    ("gpt-5", (1.25, 0.125, 10.00)),
+]
+
+
+def price_for(model):
+    for key, prices in PRICING:
+        if key in model:
+            return key, prices
+    return "other", (2.50, 0.25, 15.00)
+
+
+def blank():
+    return dict(calls=0, fresh_in=0, cache_read=0, out=0, cost=0.0, naive=0.0)
+
+
+def parse_timestamp(value):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return None
+        return parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse(sessions_dir, cutoff, model_filter):
+    by_model, by_project = defaultdict(blank), defaultdict(blank)
+    files = glob.glob(os.path.join(sessions_dir, "**", "*.jsonl"), recursive=True)
+    for fp in files:
+        model, project = "", "unknown"
+        try:
+            with open(fp, errors="ignore") as handle:
+                for line in handle:
+                    try:
+                        obj = json.loads(line)
+                    except (TypeError, ValueError):
+                        continue
+                    payload = obj.get("payload") or {}
+                    if obj.get("type") == "session_meta":
+                        project = payload.get("cwd") or project
+                        continue
+                    if obj.get("type") == "turn_context":
+                        model = (payload.get("model") or model).lower()
+                        project = payload.get("cwd") or project
+                        continue
+                    if obj.get("type") != "event_msg" or payload.get("type") != "token_count":
+                        continue
+                    timestamp = parse_timestamp(obj.get("timestamp"))
+                    if cutoff is not None and (timestamp is None or timestamp < cutoff):
+                        continue
+                    if not model or (model_filter and model_filter not in model):
+                        continue
+                    usage = ((payload.get("info") or {}).get("last_token_usage") or {})
+                    if not usage:
+                        continue
+                    total_in = usage.get("input_tokens", 0) or 0
+                    cached = usage.get("cached_input_tokens", 0) or 0
+                    fresh = max(total_in - cached, 0)
+                    output = usage.get("output_tokens", 0) or 0
+                    key, (pin, pcache, pout) = price_for(model)
+                    cost = (fresh * pin + cached * pcache + output * pout) / 1e6
+                    naive = (total_in * pin + output * pout) / 1e6
+                    for agg in (by_model[key], by_project[project]):
+                        agg["calls"] += 1
+                        agg["fresh_in"] += fresh
+                        agg["cache_read"] += cached
+                        agg["out"] += output
+                        agg["cost"] += cost
+                        agg["naive"] += naive
+        except OSError as exc:
+            print(f"warning: could not read {fp}: {exc}", file=sys.stderr)
+    return by_model, by_project
+
+
+def totals(groups):
+    total = blank()
+    for agg in groups.values():
+        for key in total:
+            total[key] += agg[key]
+    return total
+
+
+def human(by_model, by_project, label, show_projects):
+    print(f"Codex API-equivalent cost — {label}")
+    print(f"{'model':15} {'calls':>7} {'fresh':>9} {'cached':>9} {'output':>9} {'cost$':>10}")
+    print("-" * 65)
+    for key, agg in sorted(by_model.items(), key=lambda item: -item[1]["cost"]):
+        print(f"{key:15} {agg['calls']:>7} {agg['fresh_in']/1e6:>8.1f}M "
+              f"{agg['cache_read']/1e6:>8.1f}M {agg['out']/1e6:>8.1f}M {agg['cost']:>10.2f}")
+    total = totals(by_model)
+    print("-" * 65)
+    total_input = total["fresh_in"] + total["cache_read"]
+    cache_pct = 100 * total["cache_read"] / max(total_input, 1)
+    print(f"input-side tokens: {total_input/1e6:.1f}M  |  cache-served: {cache_pct:.0f}%  |  "
+          f"output tokens: {total['out']/1e6:.1f}M")
+    print(f"TOTAL (list): ${total['cost']:,.2f}   |   naive without caching: ${total['naive']:,.2f}")
+    print(f"Caching saved ~${total['naive'] - total['cost']:,.2f}")
+    if show_projects:
+        print("\nby project (top 12 by cost):")
+        for project, agg in sorted(by_project.items(), key=lambda item: -item[1]["cost"])[:12]:
+            print(f"  {agg['cost']:>8.2f}  {project}")
+
+
+def output_json(by_model, by_project, label, since_iso, show_projects):
+    total = totals(by_model)
+    total_input = total["fresh_in"] + total["cache_read"]
+    result = {
+        "window": label, "since_utc": since_iso,
+        "total_input_tokens": total_input,
+        "fresh_input_tokens": total["fresh_in"],
+        "cached_input_tokens": total["cache_read"],
+        "output_tokens": total["out"],
+        "total_tokens": total_input + total["out"],
+        "cache_read_pct": round(100 * total["cache_read"] / max(total_input, 1), 1),
+        "total_cost_usd": round(total["cost"], 2),
+        "naive_cost_usd": round(total["naive"], 2),
+        "cache_saved_usd": round(total["naive"] - total["cost"], 2),
+        "by_model": {key: {**{k: v for k, v in agg.items() if k not in ("cost", "naive")},
+                           "cost_usd": round(agg["cost"], 2)}
+                     for key, agg in sorted(by_model.items(), key=lambda item: -item[1]["cost"])},
+    }
+    if show_projects:
+        result["by_project"] = {key: round(agg["cost"], 2) for key, agg in
+                                sorted(by_project.items(), key=lambda item: -item[1]["cost"])}
+    print(json.dumps(result, indent=2))
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Estimate Codex API-equivalent cost from session logs.")
+    parser.add_argument("--days", type=int, default=3, help="look back N days (default 3)")
+    parser.add_argument("--since", help="explicit start date YYYY-MM-DD (UTC); overrides --days")
+    parser.add_argument("--all", action="store_true", help="no time filter")
+    parser.add_argument("--by-project", action="store_true")
+    parser.add_argument("--model", help="only model IDs containing this substring")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--sessions-dir", default=os.path.expanduser("~/.codex/sessions"))
+    args = parser.parse_args()
+    if args.days < 0:
+        parser.error("--days must be zero or greater")
+    try:
+        if args.all:
+            cutoff, since_iso, label = None, None, "all sessions on disk"
+        elif args.since:
+            cutoff = datetime.strptime(args.since, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            since_iso, label = cutoff.isoformat(), f"since {args.since}"
+        else:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=args.days)
+            since_iso, label = cutoff.isoformat(), f"last {args.days} days"
+    except ValueError:
+        parser.error("--since must be a valid date in YYYY-MM-DD format")
+    if not os.path.isdir(args.sessions_dir):
+        parser.error(f"sessions dir not found: {args.sessions_dir}")
+    by_model, by_project = parse(args.sessions_dir, cutoff, (args.model or "").lower())
+    if not by_model:
+        print("no usage found in window", file=sys.stderr)
+        return
+    if args.json:
+        output_json(by_model, by_project, label, since_iso, args.by_project)
+    else:
+        human(by_model, by_project, label, args.by_project)
+
+
+if __name__ == "__main__":
+    main()
