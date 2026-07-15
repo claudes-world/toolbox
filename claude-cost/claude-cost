@@ -77,6 +77,21 @@ def blank():
                 cost=0.0, cost_intro=0.0, naive=0.0)
 
 
+def in_window(timestamp, cutoff):
+    """Return False when a bounded-window record has no valid UTC timestamp."""
+    if cutoff is None:
+        return True
+    if not timestamp:
+        return False
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return False
+        return parsed.astimezone(timezone.utc) >= cutoff
+    except (TypeError, ValueError):
+        return False
+
+
 def parse(projects_dir, cutoff, model_filter):
     by_model = defaultdict(blank)
     by_project = defaultdict(blank)
@@ -95,14 +110,8 @@ def parse(projects_dir, cutoff, model_filter):
                         o = json.loads(line)
                     except Exception:
                         continue
-                    ts = o.get("timestamp")
-                    if ts and cutoff:
-                        try:
-                            t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                            if t < cutoff:
-                                continue
-                        except Exception:
-                            pass
+                    if not in_window(o.get("timestamp"), cutoff):
+                        continue
                     msg = o.get("message") or {}
                     usage = msg.get("usage") or o.get("usage")
                     if not usage:

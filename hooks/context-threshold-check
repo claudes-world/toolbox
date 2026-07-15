@@ -131,11 +131,25 @@ CONTEXT_WINDOW="$DEFAULT_CONTEXT_WINDOW"
 # with 4-[1-9][0-9] so 4.10+ stays on 1M without silent regression —
 # bash char-class globs don't span 10+ without the second alternative.
 case "$MODEL" in
-  *opus-4-[6-9]*|*opus-4-[1-9][0-9]*|*sonnet-4-[6-9]*|*sonnet-4-[1-9][0-9]*|*fable-[5-9]*|*fable-[1-9][0-9]*|*\[1m\]*|*-1m|*-1m-*)
+  *opus-4-[6-9]*|*opus-4-[1-9][0-9]*|*sonnet-4-[6-9]*|*sonnet-4-[1-9][0-9]*|*opus-[5-9]*|*opus-[1-9][0-9]*|*sonnet-[5-9]*|*sonnet-[1-9][0-9]*|*fable-[5-9]*|*fable-[1-9][0-9]*|*\[1m\]*|*-1m|*-1m-*)
     # fable-[5-9] added 2026-06-10 (Liam msg 21817): the transcript usage
     # object records the bare model id "claude-fable-5" — the harness's
     # displayed "[1m]" suffix never appears there, so the [1m] pattern
     # missed it and an "86%" advisory fired at ~17% real utilization.
+    #
+    # opus-[5-9]/sonnet-[5-9]/etc added 2026-07-15 (do-box--lpf session,
+    # Liam flagged the discrepancy live): "claude-sonnet-5" doesn't match
+    # any 4.x pattern above (no "sonnet-4-" substring), so a Sonnet 5
+    # session fell through to the 200k default window and fired false
+    # pre-compact panic advisories at ~19% real utilization (191k/1M) —
+    # same failure shape as the fable-5 bug, just the next model
+    # generation not yet added to the pattern. No trailing "-" (unlike
+    # the 4.x patterns) because the bare id is literally "sonnet-5" with
+    # nothing after it — a trailing-dash requirement was tried first and
+    # verified (via manual `case` test) to NOT match "claude-sonnet-5" at
+    # all, which would have shipped the exact bug this is fixing.
+    # Verified this pattern still correctly excludes
+    # "claude-haiku-4-5-20251001" (no opus-/sonnet- prefix) before commit.
     CONTEXT_WINDOW="$EXTENDED_CONTEXT_WINDOW"
     ;;
 esac

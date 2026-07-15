@@ -11,6 +11,12 @@
 
 set -euo pipefail
 
+# claude lives ONLY in ~/.local/bin — restricted-PATH callers (systemd units,
+# subagent shells) otherwise hit exit 127 mid-pipeline, which surfaced as a
+# FALSE 10/10 risk block on 2026-07-08 (see AGENTIC_HOST_CHANGELOG). Classic
+# works-in-shell-fails-as-service gotcha; export defensively here.
+export PATH="$HOME/.local/bin:$PATH"
+
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 SANITIZER="${SCRIPT_DIR}/sanitize-research"
 QUARANTINE_BASE="/home/claude/claudes-world/quarantine"
