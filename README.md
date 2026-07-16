@@ -14,6 +14,7 @@ All tools use a shared Python venv at `~/venvs/transcribe/` and are symlinked in
 | [voice-hook](#voice-hook) | Claude Code hook: auto-transcribe Telegram voice notes |
 | [pulse](pulse/README.md) | GitHub org activity snapshots — open PRs, issues, releases, Dependabot |
 | [repair-telegram-mcp](#repair-telegram-mcp) | Repair Telegram MCP partial disconnects in a live Claude Code tmux session |
+| [claude-was-wrong](#claude-was-wrong) | Tally Claude Code correction phrases and daily mistake frequency |
 
 ---
 
@@ -194,6 +195,44 @@ agent-health-mcp-check SESSION  # MCP_OK, MCP_MISSING:<reason>, or MCP_UNKNOWN:<
 - `~/.world/repair-telegram-mcp.<session>.lock` — per-session flock lock
 
 **Cost:** No paid API calls.
+
+---
+
+### claude-was-wrong
+
+Scans local Claude Code session transcripts for assistant-authored correction and
+admission phrases such as "I was wrong," "you're/you are/you were right," "my
+mistake," "sorry/I'm sorry/I am sorry," and "good catch." It prints a phrase
+tally plus a daily table in Eastern Time. Daily
+admissions count matching assistant messages, so a message containing multiple
+tracked phrases is counted only once in the daily trend.
+
+**Setup:** No credentials or third-party packages are required. Symlink the
+repository-owned executable into `~/bin`:
+
+```bash
+ln -sf ~/code/toolbox/claude-was-wrong/claude-was-wrong ~/bin/claude-was-wrong
+```
+
+**Usage:**
+
+```bash
+claude-was-wrong                  # last 30 ET calendar days
+claude-was-wrong --days 7         # today and the previous 6 ET days
+claude-was-wrong --all            # entire transcript archive
+claude-was-wrong --days 90 --json # machine-readable output
+```
+
+Set `CLAUDE_TRANSCRIPTS_DIR` or pass `--transcripts-dir PATH` to scan a different
+archive root.
+
+**Files:**
+
+- `claude-was-wrong/claude-was-wrong` — standalone transcript scanner
+- `tests/test_claude_was_wrong.py` — focused scanner and filtering tests
+- `~/.claude/projects/**/*.jsonl` — read-only input transcripts
+
+**Cost:** No paid API calls; it only reads local files.
 
 ---
 

@@ -1,0 +1,352 @@
+#!/home/claude/venvs/transcribe/bin/python3
+"""Tally Claude Code's on-record admissions from local session transcripts."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from collections import Counter, defaultdict
+from datetime import date, datetime, time, timedelta, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+
+ET = ZoneInfo("America/New_York")
+DEFAULT_DAYS = 30
+
+# Keep these literal and auditable. Matching is case-insensitive, tolerates curly
+# apostrophes, and requires word boundaries so (for example) "mistakenly" does
+# not count as "mistaken".
+PHRASES = (
+    "i was wrong",
+    "you were right",
+    "you're right",
+    "you are right",
+    "you're absolutely right",
+    "you are absolutely right",
+    "you're correct",
+    "you are correct",
+    "you were correct",
+    "my mistake",
+    "my error",
+    "i stand corrected",
+    "i was mistaken",
+    "i was incorrect",
+    "i made a mistake",
+    "i made an error",
+    "i got that wrong",
+    "i got it wrong",
+    "i need to correct myself",
+    "i take that back",
+    "i retract that",
+    "i misread",
+    "i misunderstood",
+    "i overlooked",
+    "i missed that",
+    "good catch",
+    "thanks for catching that",
+    "that's on me",
+    "that was incorrect",
+    "you're right to flag that",
+    "you're right to call that out",
+    "sorry",
+    "i'm sorry",
+    "i am sorry",
+    "i apologize",
+)
+
+
+def phrase_pattern(phrase: str) -> re.Pattern[str]:
+    escaped = re.escape(phrase).replace(r"\ ", r"\s+")
+    return re.compile(r"(?<!\w)" + escaped + r"(?!\w)", re.IGNORECASE)
+
+
+PATTERNS = tuple((phrase, phrase_pattern(phrase)) for phrase in PHRASES)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="claude-was-wrong",
+        description=(
+            "Count correction/admission phrases in Claude Code assistant messages "
+            "and show their daily frequency."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  claude-was-wrong\n"
+            "  claude-was-wrong --days 7\n"
+            "  claude-was-wrong --all\n"
+            "  claude-was-wrong --days 90 --json"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    window = parser.add_mutually_exclusive_group()
+    window.add_argument(
+        "--days",
+        "--day",
+        type=positive_int,
+        default=DEFAULT_DAYS,
+        metavar="N",
+        help=f"scan the last N Eastern Time calendar days (default: {DEFAULT_DAYS})",
+    )
+    window.add_argument(
+        "--all",
+        action="store_true",
+        help="scan the entire transcript archive",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit machine-readable JSON instead of tables",
+    )
+    parser.add_argument(
+        "--transcripts-dir",
+        type=Path,
+        default=Path(os.environ.get("CLAUDE_TRANSCRIPTS_DIR", "~/.claude/projects")).expanduser(),
+        metavar="PATH",
+        help="transcript root (default: ~/.claude/projects)",
+    )
+    return parser.parse_args()
+
+
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
+def normalize(text: str) -> str:
+    return text.translate(str.maketrans({"’": "'", "‘": "'", "\u00a0": " "}))
+
+
+def parse_timestamp(raw: object) -> datetime | None:
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(ET)
+
+
+def assistant_text(record: object) -> str:
+    if not isinstance(record, dict) or record.get("type") != "assistant":
+        return ""
+    message = record.get("message")
+    if not isinstance(message, dict) or message.get("role") not in (None, "assistant"):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    # Intentionally exclude thinking and tool-use blocks. This counts only words
+    # Claude actually presented as assistant prose.
+    return "\n".join(
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+    )
+
+
+def iter_files(root: Path, cutoff: datetime | None):
+    cutoff_epoch = cutoff.timestamp() if cutoff else None
+    for path in root.rglob("*.jsonl"):
+        if not path.is_file():
+            continue
+        if cutoff_epoch is not None:
+            try:
+                if path.stat().st_mtime < cutoff_epoch:
+                    continue
+            except OSError:
+                continue
+        yield path
+
+
+def scan(root: Path, cutoff: datetime | None) -> dict[str, object]:
+    phrase_counts: Counter[str] = Counter()
+    daily_admissions: Counter[str] = Counter()
+    daily_sessions: dict[str, set[str]] = defaultdict(set)
+    files_scanned = assistant_messages = admission_messages = malformed_lines = 0
+
+    for path in iter_files(root, cutoff):
+        files_scanned += 1
+        try:
+            stream = path.open("r", encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with stream:
+            for line in stream:
+                try:
+                    record = json.loads(line)
+                except (json.JSONDecodeError, TypeError):
+                    malformed_lines += 1
+                    continue
+                text = assistant_text(record)
+                if not text:
+                    continue
+                timestamp = parse_timestamp(record.get("timestamp"))
+                if timestamp is None or (cutoff is not None and timestamp < cutoff):
+                    continue
+                assistant_messages += 1
+                normalized = normalize(text)
+                matched = False
+                for phrase, pattern in PATTERNS:
+                    count = len(pattern.findall(normalized))
+                    if count:
+                        phrase_counts[phrase] += count
+                        matched = True
+                if matched:
+                    admission_messages += 1
+                    day = timestamp.date().isoformat()
+                    daily_admissions[day] += 1
+                    session = record.get("sessionId") or record.get("session_id") or str(path)
+                    daily_sessions[day].add(str(session))
+
+    return {
+        "phrase_counts": phrase_counts,
+        "daily_admissions": daily_admissions,
+        "daily_sessions": daily_sessions,
+        "files_scanned": files_scanned,
+        "assistant_messages": assistant_messages,
+        "admission_messages": admission_messages,
+        "malformed_lines": malformed_lines,
+    }
+
+
+def date_range(first: date, last: date):
+    current = first
+    while current <= last:
+        yield current
+        current += timedelta(days=1)
+
+
+def render_table(headers: tuple[str, ...], rows: list[tuple[str, ...]], right: set[int]) -> str:
+    widths = [len(value) for value in headers]
+    for row in rows:
+        for index, value in enumerate(row):
+            widths[index] = max(widths[index], len(value))
+
+    def render(row: tuple[str, ...]) -> str:
+        cells = []
+        for index, value in enumerate(row):
+            cells.append(value.rjust(widths[index]) if index in right else value.ljust(widths[index]))
+        return "  ".join(cells)
+
+    divider = tuple("-" * width for width in widths)
+    return "\n".join((render(headers), render(divider), *(render(row) for row in rows)))
+
+
+def json_output(args: argparse.Namespace, cutoff: datetime | None, result: dict[str, object]) -> None:
+    today = datetime.now(ET).date()
+    daily = result["daily_admissions"]
+    sessions = result["daily_sessions"]
+    if cutoff:
+        days = date_range(cutoff.date(), today)
+    else:
+        parsed_days = [date.fromisoformat(day) for day in daily]
+        days = date_range(min(parsed_days), today) if parsed_days else []
+    payload = {
+        "timezone": "America/New_York",
+        "window": "all" if args.all else {"days": args.days, "since": cutoff.isoformat()},
+        "files_scanned": result["files_scanned"],
+        "assistant_messages_scanned": result["assistant_messages"],
+        "admission_messages": result["admission_messages"],
+        "phrase_occurrences": {phrase: result["phrase_counts"][phrase] for phrase in PHRASES},
+        "daily": [
+            {
+                "date": day.isoformat(),
+                "admission_messages": daily[day.isoformat()],
+                "sessions": len(sessions[day.isoformat()]),
+            }
+            for day in days
+        ],
+        "malformed_lines_skipped": result["malformed_lines"],
+    }
+    print(json.dumps(payload, indent=2))
+
+
+def text_output(args: argparse.Namespace, cutoff: datetime | None, result: dict[str, object]) -> None:
+    today = datetime.now(ET).date()
+    if cutoff:
+        window = f"{cutoff.date().isoformat()} through {today.isoformat()} ({args.days} ET calendar days)"
+    else:
+        window = "entire archive"
+
+    print("Claude Was Wrong — the receipts")
+    print(f"Window: {window}")
+    print(
+        f"Scanned: {result['files_scanned']:,} transcripts, "
+        f"{result['assistant_messages']:,} assistant text messages"
+    )
+    print()
+
+    counts = result["phrase_counts"]
+    phrase_rows = [
+        (phrase, f"{counts[phrase]:,}")
+        for phrase in sorted(PHRASES, key=lambda item: (-counts[item], PHRASES.index(item)))
+    ]
+    print(render_table(("Phrase", "Occurrences"), phrase_rows, {1}))
+    print()
+    print(
+        f"Total admission messages: {result['admission_messages']:,} "
+        "(one message counts once here even if it matches multiple phrases)"
+    )
+    print()
+
+    daily = result["daily_admissions"]
+    sessions = result["daily_sessions"]
+    if cutoff:
+        days = list(date_range(cutoff.date(), today))
+    else:
+        parsed_days = [date.fromisoformat(day) for day in daily]
+        days = list(date_range(min(parsed_days), today)) if parsed_days else []
+    daily_rows = [
+        (
+            day.isoformat(),
+            day.strftime("%a"),
+            f"{daily[day.isoformat()]:,}",
+            f"{len(sessions[day.isoformat()]):,}",
+        )
+        for day in days
+    ]
+    print(render_table(("Date (ET)", "Day", "Admissions", "Sessions"), daily_rows, {2, 3}))
+
+    if result["malformed_lines"]:
+        print(f"\nNote: skipped {result['malformed_lines']:,} malformed transcript lines.", file=sys.stderr)
+
+
+def main() -> int:
+    args = parse_args()
+    root = args.transcripts_dir
+    if not root.is_dir():
+        print(f"claude-was-wrong: transcript directory not found: {root}", file=sys.stderr)
+        return 2
+
+    now = datetime.now(ET)
+    cutoff = None
+    if not args.all:
+        first_day = now.date() - timedelta(days=args.days - 1)
+        cutoff = datetime.combine(first_day, time.min, tzinfo=ET)
+
+    result = scan(root, cutoff)
+    if args.json:
+        json_output(args, cutoff, result)
+    else:
+        text_output(args, cutoff, result)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
