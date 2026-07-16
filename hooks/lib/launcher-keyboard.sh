@@ -12,7 +12,11 @@ build_cpc_auth_token() {
 
   now=$(date +%s)
   jwt_header=$(printf '%s' '{"alg":"HS256","typ":"JWT"}' | base64 -w0 | tr '+/' '-_' | tr -d '=')
-  jwt_payload=$(jq -cn --arg sub "$chat_id" --arg iat "$now" --arg exp "$((now + 7 * 24 * 60 * 60))" '{sub: $sub, iat: ($iat|tonumber), exp: ($exp|tonumber)}' | base64 -w0 | tr '+/' '-_' | tr -d '=')
+  # 24h TTL (Liam, 2026-07-16): these tokens ride in a keyboard button URL that
+  # persists in chat history, so a long TTL leaves live credentials sitting in
+  # old messages. Trade-off: tapping a keyboard message older than the TTL now
+  # fails auth ("disconnected") until a new SessionStart re-sends the keyboard.
+  jwt_payload=$(jq -cn --arg sub "$chat_id" --arg iat "$now" --arg exp "$((now + 24 * 60 * 60))" '{sub: $sub, iat: ($iat|tonumber), exp: ($exp|tonumber)}' | base64 -w0 | tr '+/' '-_' | tr -d '=')
   jwt_signature=$(printf '%s' "${jwt_header}.${jwt_payload}" | openssl dgst -sha256 -hmac "${bot_token}" -binary | base64 -w0 | tr '+/' '-_' | tr -d '=')
 
   printf '%s' "${jwt_header}.${jwt_payload}.${jwt_signature}"
