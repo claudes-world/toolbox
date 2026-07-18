@@ -21,6 +21,26 @@ Claude Code event-driven scripts. Each hook fires on a specific Claude Code life
 | `worktree-add-port-init` | `PostToolUse` (Bash) | On `git worktree add`, run `port-for --init` for new worktree | Active |
 | `worktree-remove-port-release` | `PostToolUse` (Bash) | On `git worktree remove`, run `port-for --release-worktree` | Active |
 
+## `share-doc` routing
+
+`share-doc` has no default bot, chat, person, or topic. A destination must be supplied before the tool reads Markdown or generates audio.
+
+For a WorldOS-routed turn, use:
+
+```bash
+share-doc --to current < briefing.md
+```
+
+`--to current` requires turn-scoped `WORLDOS_CURRENT_BOT_ENV` plus `WORLDOS_CURRENT_CHAT_ID`. `WORLDOS_CURRENT_THREAD_ID` carries the forum topic when present. Alternatively, `WORLDOS_CURRENT_ENVELOPE_PATH` can supply chat and thread metadata, but the bot credential reference is still required. Missing or conflicting metadata fails closed; the tool never consults a personal alias, `CODEX_THREAD_ID`, generic `TELEGRAM_*` variables, or a most-recent-message file.
+
+For an explicitly configured destination, provide both bot identity and chat:
+
+```bash
+share-doc --bot-env /path/to/bot.env --chat-id -100123 --thread-id 42 < briefing.md
+```
+
+Use `--dry-run` to print the resolved bot credential path, chat, and topic without reading input, generating audio, or sending a Telegram message.
+
 ## Shared utilities
 
 ### `hooks/common.sh`
