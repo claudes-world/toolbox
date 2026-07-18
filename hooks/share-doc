@@ -5,10 +5,8 @@
 # Input: markdown content via stdin (first line = title)
 # Output: file path on stdout
 #
-# Destination is fully flag-driven (no hardcoded bot/chat) — see --help below.
-# Backward compat: invoked with no flags at all == Liam's DM via @claude_dobot,
-# which is the current correct default. Prior to 2026-07-07 this was hardwired
-# to the legacy @claude_do_bot via common.sh; that coupling has been removed.
+# Destination is mandatory and fail-closed. There is no person-specific or
+# hardcoded chat fallback. See --help below.
 
 set -euo pipefail
 
@@ -17,18 +15,25 @@ usage() {
 Usage: <markdown on stdin> | share-doc [options]
 
 Options:
+  --to current       Send to the authoritative current WorldOS conversation.
+                     Requires WORLDOS_CURRENT_BOT_ENV and
+                     WORLDOS_CURRENT_CHAT_ID, or chat metadata from an inbound
+                     envelope at WORLDOS_CURRENT_ENVELOPE_PATH. Fails closed.
   --chat-id ID        Telegram chat_id to send the deep-link message to.
-                      Default: 1676859445 (Liam's DM), or $TELEGRAM_CHAT_ID if set.
   --thread-id ID      Forum topic message_thread_id (optional). Required when
-                      targeting a specific topic in a forum supergroup — without
-                      it the message lands in General. Falls back to
-                      $TELEGRAM_THREAD_ID if set, else unset (no topic).
+                      explicitly targeting a forum topic with --chat-id.
   --bot-env PATH      Path to an env file holding TELEGRAM_BOT_TOKEN.
-                      Default: /srv/world/secrets/agents/claude-dobot/.env (@claude_dobot).
+                      Required with --chat-id unless SHARE_DOC_BOT_ENV is set.
   --bot-username NAME Skip the getMe lookup and use this bot username directly
                       (informational only — the CPC deep link itself is bot-
                       agnostic; see NOTE below).
   --no-audio          Skip TTS generation; send text-only deep-link message.
+  --dry-run           Resolve and print the destination, then exit without
+                      reading input, generating audio, or sending anything.
+
+Routing is the bot identity plus chat ID plus optional thread ID. None is
+inferred from a personal default, the most recent Telegram message, or
+CODEX_THREAD_ID. Pass exactly one of --to current or --chat-id.
 
 NOTE on the deep link: the CPC mini-app (cpc.claude.do) validates Telegram
 WebApp initData against a list of bot tokens server-side (TELEGRAM_BOT_TOKENS
@@ -43,6 +48,8 @@ TMPDIR="/home/claude/claudes-world/tmp"
 mkdir -p "$TMPDIR"
 
 NO_AUDIO=0
+DRY_RUN=0
+TO_ARG=""
 CHAT_ID_ARG=""
 THREAD_ID_ARG=""
 BOT_ENV_ARG=""
@@ -51,6 +58,8 @@ BOT_USERNAME_ARG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-audio) NO_AUDIO=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --to) TO_ARG="${2:-}"; shift 2 ;;
     --chat-id) CHAT_ID_ARG="${2:-}"; shift 2 ;;
     --thread-id) THREAD_ID_ARG="${2:-}"; shift 2 ;;
     --bot-env) BOT_ENV_ARG="${2:-}"; shift 2 ;;
@@ -62,6 +71,86 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+
+# Resolve and validate routing before reading Markdown or generating audio.
+# `--to current` accepts only turn-scoped WorldOS metadata. It deliberately
+# ignores generic TELEGRAM_* variables and any "most recent message" state,
+# either of which can silently cross conversation boundaries.
+if [ -n "$TO_ARG" ] && [ -n "$CHAT_ID_ARG" ]; then
+  echo "error: pass exactly one destination: --to current or --chat-id ID" >&2
+  exit 2
+fi
+
+if [ -n "$TO_ARG" ]; then
+  if [ "$TO_ARG" != "current" ]; then
+    echo "error: unsupported --to destination: $TO_ARG (only 'current' is valid)" >&2
+    exit 2
+  fi
+  if [ -n "$THREAD_ID_ARG" ]; then
+    echo "error: --thread-id cannot override authoritative --to current routing" >&2
+    exit 2
+  fi
+  if [ -n "$BOT_ENV_ARG" ]; then
+    echo "error: --bot-env cannot override authoritative --to current routing" >&2
+    exit 2
+  fi
+
+  CONTEXT_BOT_ENV="${WORLDOS_CURRENT_BOT_ENV:-}"
+  CONTEXT_CHAT_ID="${WORLDOS_CURRENT_CHAT_ID:-}"
+  CONTEXT_THREAD_ID="${WORLDOS_CURRENT_THREAD_ID:-}"
+  CONTEXT_ENVELOPE="${WORLDOS_CURRENT_ENVELOPE_PATH:-}"
+
+  if [ -n "$CONTEXT_ENVELOPE" ]; then
+    if [ ! -r "$CONTEXT_ENVELOPE" ]; then
+      echo "error: WORLDOS_CURRENT_ENVELOPE_PATH is not readable: $CONTEXT_ENVELOPE" >&2
+      exit 3
+    fi
+    ENVELOPE_CHAT_ID=$(jq -r '.conversation.chat_id // .chat_id // empty' "$CONTEXT_ENVELOPE" 2>/dev/null || true)
+    ENVELOPE_THREAD_ID=$(jq -r '.conversation.thread_id // .thread_id // .raw.message_thread_id // empty' "$CONTEXT_ENVELOPE" 2>/dev/null || true)
+    if [ -n "$CONTEXT_CHAT_ID" ] && [ -n "$ENVELOPE_CHAT_ID" ] && [ "$CONTEXT_CHAT_ID" != "$ENVELOPE_CHAT_ID" ]; then
+      echo "error: WorldOS current chat metadata conflicts with the inbound envelope" >&2
+      exit 3
+    fi
+    if [ -n "$CONTEXT_THREAD_ID" ] && [ -n "$ENVELOPE_THREAD_ID" ] && [ "$CONTEXT_THREAD_ID" != "$ENVELOPE_THREAD_ID" ]; then
+      echo "error: WorldOS current thread metadata conflicts with the inbound envelope" >&2
+      exit 3
+    fi
+    CONTEXT_CHAT_ID="${CONTEXT_CHAT_ID:-$ENVELOPE_CHAT_ID}"
+    CONTEXT_THREAD_ID="${CONTEXT_THREAD_ID:-$ENVELOPE_THREAD_ID}"
+  fi
+
+  if [ -z "$CONTEXT_CHAT_ID" ]; then
+    echo "error: --to current has no authoritative WorldOS chat context" >&2
+    echo "       inject WORLDOS_CURRENT_CHAT_ID (and WORLDOS_CURRENT_THREAD_ID when applicable)," >&2
+    echo "       or WORLDOS_CURRENT_ENVELOPE_PATH; otherwise pass --chat-id explicitly" >&2
+    exit 3
+  fi
+  if [ -z "$CONTEXT_BOT_ENV" ]; then
+    echo "error: --to current has no authoritative WorldOS bot identity" >&2
+    echo "       inject WORLDOS_CURRENT_BOT_ENV for the bot that received this turn" >&2
+    exit 3
+  fi
+  BOT_ENV="$CONTEXT_BOT_ENV"
+  CHAT_ID="$CONTEXT_CHAT_ID"
+  THREAD_ID="$CONTEXT_THREAD_ID"
+elif [ -n "$CHAT_ID_ARG" ]; then
+  BOT_ENV="${BOT_ENV_ARG:-${SHARE_DOC_BOT_ENV:-}}"
+  if [ -z "$BOT_ENV" ]; then
+    echo "error: explicit chat routing also requires --bot-env PATH or SHARE_DOC_BOT_ENV" >&2
+    exit 3
+  fi
+  CHAT_ID="$CHAT_ID_ARG"
+  THREAD_ID="$THREAD_ID_ARG"
+else
+  echo "error: no destination; pass --to current or --chat-id ID" >&2
+  echo "       share-doc has no default sending route" >&2
+  exit 3
+fi
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  echo "destination: bot-env=${BOT_ENV} chat=${CHAT_ID}${THREAD_ID:+ thread=$THREAD_ID}"
+  exit 0
+fi
 
 INPUT=$(cat)
 
@@ -125,13 +214,9 @@ else
   fi
 fi
 
-# --- Destination resolution (flag > env var > new correct default) ---
-# Default bot is @claude_dobot (the orchestrator's live bot); default chat is
-# Liam's DM. Both are overridable so this generalizes to any chat/thread
-# instead of being hardwired to one destination.
-BOT_ENV="${BOT_ENV_ARG:-${SHARE_DOC_BOT_ENV:-/srv/world/secrets/agents/claude-dobot/.env}}"
-CHAT_ID="${CHAT_ID_ARG:-${TELEGRAM_CHAT_ID:-1676859445}}"
-THREAD_ID="${THREAD_ID_ARG:-${TELEGRAM_THREAD_ID:-}}"
+# --- Sender credential resolution ---
+# Bot identity and conversation routing were already resolved and validated
+# before any expensive work.
 
 BOTTOKEN=""
 if [ -f "$BOT_ENV" ]; then
@@ -146,7 +231,7 @@ if [ -z "$BOTTOKEN" ]; then
   exit 3
 fi
 if [ -z "$CHAT_ID" ]; then
-  echo "error: no chat_id (pass --chat-id or set TELEGRAM_CHAT_ID)" >&2
+  echo "error: no chat_id after explicit destination resolution" >&2
   exit 3
 fi
 
