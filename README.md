@@ -14,7 +14,39 @@ All tools use a shared Python venv at `~/venvs/transcribe/` and are symlinked in
 | [voice-hook](#voice-hook) | Claude Code hook: auto-transcribe Telegram voice notes |
 | [pulse](pulse/README.md) | GitHub org activity snapshots — open PRs, issues, releases, Dependabot |
 | [repair-telegram-mcp](#repair-telegram-mcp) | Repair Telegram MCP partial disconnects in a live Claude Code tmux session |
+| [share-doc](#share-doc) | Compatibility CLI for authoritative WorldOS document sharing |
 | [claude-was-wrong](#claude-was-wrong) | Tally Claude Code correction phrases and daily mistake frequency |
+
+---
+
+### share-doc
+
+Thin compatibility entry point for the `worldos-communications` plugin. It
+passes Markdown and explicit destination options to the current lane's
+credential-free communications broker. WorldOS owns publication, PostgreSQL
+custody, optional audio rendering, and Telegram delivery.
+
+Unlike the retired implementation, this command does not create files in a
+shared temporary directory, read Telegram bot-token files, or infer a current
+conversation. With multiple eligible routes, list them first and pass the
+selected conversation explicitly.
+
+**Setup:** run inside a managed WorldOS lane with the
+`worldos-communications` plugin loaded.
+
+**Usage:**
+
+```bash
+share-doc --list-conversations
+share-doc --conversation-id 'chat:-1001/thread:77' report.md
+share-doc --conversation-id 'chat:-1001/thread:77' --no-audio report.md
+```
+
+**Files:** `hooks/share-doc` — wrapper that delegates to the selected WorldOS
+release.
+
+**Cost:** provider-dependent TTS cost when audio is enabled; document-only
+delivery has no audio cost.
 
 ---
 
