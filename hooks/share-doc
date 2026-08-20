@@ -181,14 +181,23 @@ if [ "$(echo "$TRIMMED" | wc -l)" -eq 1 ] && echo "$TRIMMED" | grep -qE '^/.+\.m
   esac
 
   # WORLD-363: group-chat sends resolve the doc via its timestamp filename
-  # prefix (startapp token). Reject a non-conforming name BEFORE paying for
+  # prefix (startapp token). Reject an unresolvable file BEFORE paying for
   # TTS below — the send-time button construction would fail on it anyway.
-  # The charset mirrors CPC's resolver exactly (SAFE_BASENAME_RE in
-  # apps/cpc/web/src/lib/start-param.ts: [A-Za-z0-9._-] slug, 255-char name
-  # cap) — a name that passes a looser guard here would send fine but produce
-  # a dead button when CPC refuses the basename.
+  # Two conditions, both mirroring CPC's resolver (start-param.ts):
+  #   1. Depth-1 only: CPC lists only $TMPDIR's ROOT, so a file in a nested
+  #      subdirectory (which the Mode-2 membership check above allows) can
+  #      NEVER resolve via the startapp token. (The DM web_app deep link
+  #      carries the full path and is unaffected.)
+  #   2. Charset: SAFE_BASENAME_RE ([A-Za-z0-9._-] slug, 255-char name cap)
+  #      — a name that passes a looser guard here would send fine but
+  #      produce a dead button when CPC refuses the basename.
   case "$CHAT_ID" in
     -*)
+      if [ "$(dirname "$FILEPATH")" != "$TMPDIR" ]; then
+        echo "error: group-chat share requires the file DIRECTLY in $TMPDIR — CPC's startapp resolver only lists that directory's root, so nested paths can never resolve" >&2
+        echo "       got: $FILEPATH — move it (e.g. mv \"$FILEPATH\" \"$TMPDIR/\") and retry" >&2
+        exit 2
+      fi
       if ! basename "$FILEPATH" | grep -qE "$GROUP_SHARE_BASENAME_RE"; then
         echo "error: group-chat share needs a CPC-resolvable filename (YYYYMMDD-HHMMSS-<slug>.md, slug charset [A-Za-z0-9._-], name <= 255 chars)" >&2
         echo "       got: $(basename "$FILEPATH") — rename it under $TMPDIR (e.g. \$(TZ=America/New_York date +%Y%m%d-%H%M%S)-name.md) and retry" >&2
@@ -307,20 +316,38 @@ if [ -n "$BOTTOKEN" ] && [ -n "$CHAT_ID" ]; then
   # button unchanged.
   case "$CHAT_ID" in
     -*)
+      # Depth-1 only: CPC's startapp resolver lists only $TMPDIR's root, so
+      # a nested Mode-2 path can never resolve — and worse, the token count
+      # below would never see it, letting a same-prefix ROOT file ship as
+      # the button target (the wrong document). Refuse loudly instead.
+      if [ "$(dirname "$FILEPATH")" != "$TMPDIR" ]; then
+        echo "error: group-chat share requires the file DIRECTLY in $TMPDIR — CPC's startapp resolver only lists that directory's root, so nested paths can never resolve" >&2
+        echo "       got: $FILEPATH — move it (e.g. mv \"$FILEPATH\" \"$TMPDIR/\") and retry" >&2
+        exit 2
+      fi
       if ! basename "$FILEPATH" | grep -qE "$GROUP_SHARE_BASENAME_RE"; then
         echo "error: group-chat share needs a CPC-resolvable filename (YYYYMMDD-HHMMSS-<slug>.md, slug charset [A-Za-z0-9._-], name <= 255 chars)" >&2
         echo "       got: $(basename "$FILEPATH") — rename it under $TMPDIR (e.g. \$(TZ=America/New_York date +%Y%m%d-%H%M%S)-name.md) and retry" >&2
         exit 2
       fi
       TS_PREFIX=$(basename "$FILEPATH" | sed -nE 's/^([0-9]{8}-[0-9]{6})-.*\.md$/\1/p')
-      # The token is timestamp-only, so it must identify EXACTLY ONE doc.
-      # CPC's resolver fails closed on an ambiguous prefix (unique-match-or-
-      # nothing) — sending an ambiguous token would just yield a dead button,
-      # so refuse loudly here instead, where it can still be fixed.
-      TS_MATCH_COUNT=$(find "$TMPDIR" -maxdepth 1 -name "${TS_PREFIX}-*.md" 2>/dev/null | wc -l)
+      # The token is timestamp-only, so it must identify EXACTLY ONE doc —
+      # and that doc must be THIS one. CPC's resolver fails closed on an
+      # ambiguous prefix (unique-match-or-nothing), and a unique match that
+      # isn't $FILEPATH would ship a button to the WRONG document — refuse
+      # loudly in both cases, here where it can still be fixed. -type f
+      # keeps directories/symlinks from inflating the count into a false
+      # refusal (regular files only, matching what share-doc creates).
+      TS_MATCHES=$(find "$TMPDIR" -maxdepth 1 -type f -name "${TS_PREFIX}-*.md" 2>/dev/null)
+      TS_MATCH_COUNT=$(printf '%s' "$TS_MATCHES" | grep -c . || true)
       if [ "$TS_MATCH_COUNT" -ne 1 ]; then
         echo "error: startapp token f_${TS_PREFIX} is ambiguous — ${TS_MATCH_COUNT} files in $TMPDIR share that timestamp prefix" >&2
         echo "       CPC opens nothing on an ambiguous token; rename or remove the collision (${TS_PREFIX}-*.md) and retry" >&2
+        exit 2
+      fi
+      if [ "$TS_MATCHES" != "$TMPDIR/$(basename "$FILEPATH")" ]; then
+        echo "error: startapp token f_${TS_PREFIX} resolves to $(basename "$TS_MATCHES"), not the file being shared ($(basename "$FILEPATH")) — the group button would open the wrong document" >&2
+        echo "       rename or remove the conflicting file and retry" >&2
         exit 2
       fi
       # `claude_dobot` is intentional and NOT derived from the sending bot:
