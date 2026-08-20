@@ -47,6 +47,11 @@ EOF
 TMPDIR="/home/claude/claudes-world/tmp"
 mkdir -p "$TMPDIR"
 
+# WORLD-363: filenames a group-chat startapp token can resolve. Must mirror
+# CPC's resolver (start-param.ts): timestamp prefix, [A-Za-z0-9._-] slug,
+# total basename <= 255 chars (19 fixed chars + slug <= 236).
+GROUP_SHARE_BASENAME_RE='^[0-9]{8}-[0-9]{6}-[A-Za-z0-9._-]{0,236}\.md$'
+
 NO_AUDIO=0
 DRY_RUN=0
 TO_ARG=""
@@ -178,10 +183,14 @@ if [ "$(echo "$TRIMMED" | wc -l)" -eq 1 ] && echo "$TRIMMED" | grep -qE '^/.+\.m
   # WORLD-363: group-chat sends resolve the doc via its timestamp filename
   # prefix (startapp token). Reject a non-conforming name BEFORE paying for
   # TTS below — the send-time button construction would fail on it anyway.
+  # The charset mirrors CPC's resolver exactly (SAFE_BASENAME_RE in
+  # apps/cpc/web/src/lib/start-param.ts: [A-Za-z0-9._-] slug, 255-char name
+  # cap) — a name that passes a looser guard here would send fine but produce
+  # a dead button when CPC refuses the basename.
   case "$CHAT_ID" in
     -*)
-      if ! basename "$FILEPATH" | grep -qE '^[0-9]{8}-[0-9]{6}-.*\.md$'; then
-        echo "error: group-chat share needs a timestamp-prefixed filename (YYYYMMDD-HHMMSS-<slug>.md) so CPC can resolve the startapp token" >&2
+      if ! basename "$FILEPATH" | grep -qE "$GROUP_SHARE_BASENAME_RE"; then
+        echo "error: group-chat share needs a CPC-resolvable filename (YYYYMMDD-HHMMSS-<slug>.md, slug charset [A-Za-z0-9._-], name <= 255 chars)" >&2
         echo "       got: $(basename "$FILEPATH") — rename it under $TMPDIR (e.g. \$(TZ=America/New_York date +%Y%m%d-%H%M%S)-name.md) and retry" >&2
         exit 2
       fi
@@ -298,12 +307,27 @@ if [ -n "$BOTTOKEN" ] && [ -n "$CHAT_ID" ]; then
   # button unchanged.
   case "$CHAT_ID" in
     -*)
-      TS_PREFIX=$(basename "$FILEPATH" | sed -nE 's/^([0-9]{8}-[0-9]{6})-.*\.md$/\1/p')
-      if [ -z "$TS_PREFIX" ]; then
-        echo "error: group-chat share needs a timestamp-prefixed filename (YYYYMMDD-HHMMSS-<slug>.md) so CPC can resolve the startapp token" >&2
+      if ! basename "$FILEPATH" | grep -qE "$GROUP_SHARE_BASENAME_RE"; then
+        echo "error: group-chat share needs a CPC-resolvable filename (YYYYMMDD-HHMMSS-<slug>.md, slug charset [A-Za-z0-9._-], name <= 255 chars)" >&2
         echo "       got: $(basename "$FILEPATH") — rename it under $TMPDIR (e.g. \$(TZ=America/New_York date +%Y%m%d-%H%M%S)-name.md) and retry" >&2
         exit 2
       fi
+      TS_PREFIX=$(basename "$FILEPATH" | sed -nE 's/^([0-9]{8}-[0-9]{6})-.*\.md$/\1/p')
+      # The token is timestamp-only, so it must identify EXACTLY ONE doc.
+      # CPC's resolver fails closed on an ambiguous prefix (unique-match-or-
+      # nothing) — sending an ambiguous token would just yield a dead button,
+      # so refuse loudly here instead, where it can still be fixed.
+      TS_MATCH_COUNT=$(find "$TMPDIR" -maxdepth 1 -name "${TS_PREFIX}-*.md" 2>/dev/null | wc -l)
+      if [ "$TS_MATCH_COUNT" -ne 1 ]; then
+        echo "error: startapp token f_${TS_PREFIX} is ambiguous — ${TS_MATCH_COUNT} files in $TMPDIR share that timestamp prefix" >&2
+        echo "       CPC opens nothing on an ambiguous token; rename or remove the collision (${TS_PREFIX}-*.md) and retry" >&2
+        exit 2
+      fi
+      # `claude_dobot` is intentional and NOT derived from the sending bot:
+      # the `files` Mini App short name is registered only on @claude_dobot.
+      # This does not contradict the bot-agnostic NOTE in --help — that NOTE
+      # is about the cpc.claude.do #file= deep link (DM web_app button),
+      # which any bot's message can carry; t.me short-name links are per-bot.
       REPLY_MARKUP=$(jq -nc \
         --arg url "https://t.me/claude_dobot/files?startapp=f_${TS_PREFIX}" \
         '{inline_keyboard: [[{text: "Read in Pocket Console", url: $url}]]}')
