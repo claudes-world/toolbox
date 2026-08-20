@@ -175,6 +175,19 @@ if [ "$(echo "$TRIMMED" | wc -l)" -eq 1 ] && echo "$TRIMMED" | grep -qE '^/.+\.m
       ;;
   esac
 
+  # WORLD-363: group-chat sends resolve the doc via its timestamp filename
+  # prefix (startapp token). Reject a non-conforming name BEFORE paying for
+  # TTS below — the send-time button construction would fail on it anyway.
+  case "$CHAT_ID" in
+    -*)
+      if ! basename "$FILEPATH" | grep -qE '^[0-9]{8}-[0-9]{6}-.*\.md$'; then
+        echo "error: group-chat share needs a timestamp-prefixed filename (YYYYMMDD-HHMMSS-<slug>.md) so CPC can resolve the startapp token" >&2
+        echo "       got: $(basename "$FILEPATH") — rename it under $TMPDIR (e.g. \$(TZ=America/New_York date +%Y%m%d-%H%M%S)-name.md) and retry" >&2
+        exit 2
+      fi
+      ;;
+  esac
+
   TITLE=$(head -1 "$FILEPATH" | sed 's/^#* *//')
 
   if [ "$NO_AUDIO" -eq 0 ]; then
@@ -275,6 +288,33 @@ if [ -n "$BOTTOKEN" ] && [ -n "$CHAT_ID" ]; then
   ENCODED_PATH=$(python3 -c "from urllib.parse import quote; print(quote('${FILEPATH}'))")
   DEEP_URL="https://cpc.claude.do/#file=${ENCODED_PATH}"
 
+  # WORLD-363: Telegram rejects web_app inline buttons in group/supergroup
+  # chats (BUTTON_TYPE_INVALID) — they only work in private chats. Negative
+  # chat ids (groups/supergroups/channels) therefore get a plain url button
+  # that opens the CPC mini-app via the `files` short name registered on
+  # @claude_dobot, carrying the file's timestamp prefix as the startapp
+  # token; CPC's bootstrap rewrites `f_<ts>` back to the same #file= route
+  # client-side (fail-closed, jailed to $TMPDIR). DMs keep the web_app
+  # button unchanged.
+  case "$CHAT_ID" in
+    -*)
+      TS_PREFIX=$(basename "$FILEPATH" | sed -nE 's/^([0-9]{8}-[0-9]{6})-.*\.md$/\1/p')
+      if [ -z "$TS_PREFIX" ]; then
+        echo "error: group-chat share needs a timestamp-prefixed filename (YYYYMMDD-HHMMSS-<slug>.md) so CPC can resolve the startapp token" >&2
+        echo "       got: $(basename "$FILEPATH") — rename it under $TMPDIR (e.g. \$(TZ=America/New_York date +%Y%m%d-%H%M%S)-name.md) and retry" >&2
+        exit 2
+      fi
+      REPLY_MARKUP=$(jq -nc \
+        --arg url "https://t.me/claude_dobot/files?startapp=f_${TS_PREFIX}" \
+        '{inline_keyboard: [[{text: "Read in Pocket Console", url: $url}]]}')
+      ;;
+    *)
+      REPLY_MARKUP=$(jq -nc \
+        --arg url "$DEEP_URL" \
+        '{inline_keyboard: [[{text: "Read in Pocket Console", web_app: {url: $url}}]]}')
+      ;;
+  esac
+
   # Telegram bot sendAudio caps uploads at ~50MB. Long docs (1000+ lines)
   # can produce mp3s well above that — chop into ~25min segments via ffmpeg
   # so each part lands under the cap. Deep-link button only on the final
@@ -308,9 +348,9 @@ if [ -n "$BOTTOKEN" ] && [ -n "$CHAT_ID" ]; then
         -d "$(jq -n \
           --arg cid "$CHAT_ID" \
           --arg title "📄 ${TITLE} (audio chop failed — text only)" \
-          --arg url "$DEEP_URL" \
+          --argjson rm "$REPLY_MARKUP" \
           --arg tid "$THREAD_ID" \
-          '{chat_id: $cid, text: $title, reply_markup: {inline_keyboard: [[{text: "Read in Pocket Console", web_app: {url: $url}}]]}}
+          '{chat_id: $cid, text: $title, reply_markup: $rm}
            + (if $tid != "" then {message_thread_id: ($tid|tonumber)} else {} end)'
         )" > "$TMPDIR/.last-send-response.json" 2>&1 || true
       MSG_ID=$(jq -r '.result.message_id // empty' "$TMPDIR/.last-send-response.json" 2>/dev/null || true)
@@ -326,7 +366,7 @@ if [ -n "$BOTTOKEN" ] && [ -n "$CHAT_ID" ]; then
             -F "audio=@${PART}" \
             -F "title=${PART_TITLE}" \
             -F "caption=📄 ${PART_TITLE}" \
-            -F "reply_markup={\"inline_keyboard\":[[{\"text\":\"Read in Pocket Console\",\"web_app\":{\"url\":\"${DEEP_URL}\"}}]]}" \
+            -F "reply_markup=${REPLY_MARKUP}" \
             -F "disable_notification=true" \
             "${THREAD_FORM_ARGS[@]}" \
             > "$TMPDIR/.last-send-response.json" 2>&1 || true
@@ -351,7 +391,7 @@ if [ -n "$BOTTOKEN" ] && [ -n "$CHAT_ID" ]; then
       -F "audio=@${AUDIOPATH}" \
       -F "title=${TITLE}" \
       -F "caption=📄 ${TITLE}" \
-      -F "reply_markup={\"inline_keyboard\":[[{\"text\":\"Read in Pocket Console\",\"web_app\":{\"url\":\"${DEEP_URL}\"}}]]}" \
+      -F "reply_markup=${REPLY_MARKUP}" \
       -F "disable_notification=true" \
       "${THREAD_FORM_ARGS[@]}" \
       > "$TMPDIR/.last-send-response.json" 2>&1 || true
@@ -363,17 +403,12 @@ if [ -n "$BOTTOKEN" ] && [ -n "$CHAT_ID" ]; then
       -d "$(jq -n \
         --arg cid "$CHAT_ID" \
         --arg title "📄 ${TITLE}" \
-        --arg url "$DEEP_URL" \
+        --argjson rm "$REPLY_MARKUP" \
         --arg tid "$THREAD_ID" \
         '{
           chat_id: $cid,
           text: $title,
-          reply_markup: {
-            inline_keyboard: [[{
-              text: "Read in Pocket Console",
-              web_app: {url: $url}
-            }]]
-          }
+          reply_markup: $rm
         } + (if $tid != "" then {message_thread_id: ($tid|tonumber)} else {} end)'
       )" > "$TMPDIR/.last-send-response.json" 2>&1 || true
     MSG_ID=$(jq -r '.result.message_id // empty' "$TMPDIR/.last-send-response.json" 2>/dev/null || true)
@@ -387,7 +422,7 @@ if [ -n "$BOTTOKEN" ] && [ -n "$CHAT_ID" ]; then
     SEND_ERR=$(jq -r '.description // "unknown error"' "$TMPDIR/.last-send-response.json" 2>/dev/null || echo "unknown error")
     echo "error: telegram send FAILED (${SEND_ERR}) — chat=${CHAT_ID}${THREAD_ID:+ thread=$THREAD_ID}" >&2
     if [ "${SEND_ERR}" = "Bad Request: BUTTON_TYPE_INVALID" ]; then
-      echo "hint: web_app buttons are rejected in group chats. Omit --chat-id to send to the DM (default), where the mini-app button works." >&2
+      echo "hint: web_app buttons are rejected in group chats. Group chat ids (-100…) should have taken the url-button path (WORLD-363) — if you see this, that switch misfired; report it." >&2
     fi
     rm -f "$TMPDIR/.last-send-response.json"
     exit 1
