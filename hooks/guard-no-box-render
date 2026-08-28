@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""PreToolUse guard (Liam directive, wos-vid lane voice 39602, 2026-08-27 04:41 ET):
+BLANKET BAN on video rendering on do-box. "I don't even care about small stuff.
+We just need a blanket ban here. This keeps happening."
+
+do-box is the shared control plane (comms gateway, Plane, every lane's session,
+the reviewers). A single 1080x1920@60 encode pushed load past 20 and killed the
+lane that started it. Renders go to dev-mac (tailnet, `ssh dev-mac`, ffmpeg-full
+at /opt/homebrew/opt/ffmpeg-full/bin) — see memory
+feedback-never-render-video-on-do-box-use-dev-mac.
+
+What is blocked (bare tokens in the Bash command, after shlex):
+  - `ffmpeg` producing any output that is not pure analysis. Analysis-only calls
+    stay allowed: `-f null` (measurement), `-frames:v N`/`-vframes N` (a frame
+    grab), `-vn` (audio-only work).
+  - `remotion render` / `remotion still`, and the video-lab wrappers
+    render.sh / compose.sh / capture.mjs / ship-video.sh.
+Commands run THROUGH ssh are not seen as bare tokens (the remote command is a
+single quoted argument), so `ssh dev-mac '... ffmpeg ...'` passes — by design.
+Exit 2 blocks the call and feeds stderr back to the model as guidance.
+"""
+import json
+import shlex
+import sys
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)  # malformed input: never break unrelated tooling
+
+if data.get("tool_name") != "Bash":
+    sys.exit(0)
+
+cmd = (data.get("tool_input") or {}).get("command", "") or ""
+# Heredoc bodies are data, not commands (docs and scripts that merely MENTION
+# ffmpeg): only inspect the command text before the first heredoc marker.
+if "<<" in cmd:
+    cmd = cmd.split("<<", 1)[0]
+try:
+    toks = shlex.split(cmd, comments=False, posix=True)
+except ValueError:
+    toks = cmd.split()
+
+base = [t.split("/")[-1] for t in toks]
+
+ANALYSIS_FLAGS = {"-f", "-frames:v", "-vframes", "-vn"}
+reason = None
+
+if "ffmpeg" in base:
+    i = base.index("ffmpeg")
+    rest = toks[i + 1:]
+    analysis = False
+    for k, t in enumerate(rest):
+        if t in ("-frames:v", "-vframes", "-vn"):
+            analysis = True
+        if t == "-f" and k + 1 < len(rest) and rest[k + 1] == "null":
+            analysis = True
+    if not analysis:
+        reason = "`ffmpeg` encode"
+
+if reason is None and "remotion" in base:
+    i = base.index("remotion")
+    if any(t in ("render", "still") for t in toks[i + 1:i + 3]):
+        reason = "`remotion render`"
+
+if reason is None:
+    for w in ("render.sh", "compose.sh", "capture.mjs", "ship-video.sh"):
+        if w in base:
+            reason = f"video-lab `{w}`"
+            break
+
+if reason:
+    sys.stderr.write(
+        f"BLOCKED by guard-no-box-render: {reason} on do-box. Liam's blanket ban "
+        "(2026-08-27, wos-vid 39602): NO video rendering on this box, however small — "
+        "it is the shared control plane and one encode has already killed a lane. "
+        "Run it on dev-mac instead: rsync inputs to dev-mac:~/video-work/<project>/, "
+        "then `ssh dev-mac 'export PATH=/opt/homebrew/opt/ffmpeg-full/bin:$PATH; "
+        "cd ~/video-work/<project> && nohup <cmd> > render.log 2>&1 &'`, rsync the "
+        "result back, publish-shared. Analysis-only ffmpeg (-f null, -frames:v 1, -vn) "
+        "and ffprobe are still allowed here.\n"
+    )
+    sys.exit(2)
+
+sys.exit(0)
