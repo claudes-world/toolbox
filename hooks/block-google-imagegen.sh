@@ -131,11 +131,35 @@ session_id="$(printf '%s' "$input" \
 [ -n "$session_id" ] || session_id="no-session"
 
 if ! command -v jq >/dev/null 2>&1; then
-  # Degraded mode: no field scoping available, so scan the raw payload. The
-  # patterns are specific enough that hook metadata (cwd, transcript path)
-  # does not match them.
+  # Degraded mode: no field scoping available, so scan the raw payload with the
+  # hook's own metadata removed first. A working directory named after the
+  # incident is not an API call, and it used to brick every call made inside it
+  # (PL-B3).
   echo "WARNING: block-google-imagegen: jq missing; scanning the raw payload" >&2
-  if match_banned "$input"; then
+  # Bash only: this branch runs precisely when no external binary is
+  # resolvable, so sed and grep are not available to do the stripping.
+  degraded_input="$input"
+  for meta_key in cwd transcript_path session_id permission_mode hook_event_name; do
+    meta_rest="$degraded_input"
+    meta_done=""
+    while [[ "$meta_rest" == *"\"$meta_key\""*":"*"\""* ]]; do
+      meta_head="${meta_rest%%\"$meta_key\"*}"
+      meta_tail="${meta_rest#*\"$meta_key\"}"
+      # Only a string value is stripped; anything else is left untouched.
+      meta_value="${meta_tail#*:}"
+      meta_value="${meta_value#"${meta_value%%[![:space:]]*}"}"
+      if [[ "$meta_value" != '"'* ]]; then
+        meta_done="${meta_done}${meta_head}\"$meta_key\""
+        meta_rest="$meta_tail"
+        continue
+      fi
+      meta_value="${meta_value#\"}"
+      meta_rest="${meta_value#*\"}"
+      meta_done="${meta_done}${meta_head}\"$meta_key\":\"\""
+    done
+    degraded_input="${meta_done}${meta_rest}"
+  done
+  if match_banned "$degraded_input"; then
     block degraded "$matched_pattern"
   fi
   exit 0
@@ -216,6 +240,12 @@ case "$tool_name" in
     ' 2>/dev/null)" || allow "NotebookEdit tool_input has no new_source string"
     ;;
   Read)
+    haystack=""
+    ;;
+  Task)
+    # PL-B2. A dispatch brief that names the pattern is text about the rule,
+    # not a call that spends money. The subagent's own Bash calls pass through
+    # this same hook, so coverage is not lost by leaving the prompt alone.
     haystack=""
     ;;
   *)
