@@ -95,6 +95,81 @@ EOF
   exit 2
 }
 
+# WOS2-909: Bash commands are matched on their INVOCATION shape, not on
+# whatever text they happen to contain. A heredoc report that mentions the
+# Imagen spend, or an echo of a postmortem line, is prose — not a call to any
+# API. Three passes reduce a command to only the parts that could actually
+# invoke something, before the PATTERNS list ever sees it:
+#   1. drop the body of any heredoc whose delimiter is QUOTED (<<'EOF' /
+#      <<"EOF") — quoting means no expansion, which in this codebase always
+#      means literal text being written somewhere (a report, a doc), never
+#      code being executed. An unquoted heredoc (<<EOF) is left alone.
+#   2. drop shell comments (# to end of line).
+#   3. drop any ; / && / || / | separated segment whose leading command is a
+#      pure text sink (echo, printf, cat, tee, ...) rather than a network
+#      client, CLI, or interpreter — that is the "file-writing context whose
+#      content is prose" case (`cat <<... > file`, `tee file <<<"..."`,
+#      `echo "..." >> file`).
+# A real invocation — curl/wget hitting the host, an agy/gemini CLI call, a
+# python/node one-liner importing the genai client — keeps its leading
+# command (curl, wget, agy, gemini, python, python3, node, ...) and is
+# matched exactly as before.
+PROSE_SINK_CMDS='^(echo|printf|cat|tee|true|:|read|yes)$'
+
+strip_quoted_heredocs() {
+  local cmd="$1" out="" line delim="" in_heredoc=0 strip_leading=0 check_line
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$in_heredoc" = 1 ]; then
+      check_line="$line"
+      if [ "$strip_leading" = 1 ]; then
+        check_line="${check_line#"${check_line%%[![:space:]]*}"}"
+      fi
+      if [ "$check_line" = "$delim" ]; then
+        in_heredoc=0
+      fi
+      continue
+    fi
+    if [[ "$line" =~ \<\<(-)?[[:space:]]*\'([A-Za-z_][A-Za-z0-9_]*)\' ]] \
+      || [[ "$line" =~ \<\<(-)?[[:space:]]*\"([A-Za-z_][A-Za-z0-9_]*)\" ]]; then
+      delim="${BASH_REMATCH[2]}"
+      if [ "${BASH_REMATCH[1]}" = "-" ]; then strip_leading=1; else strip_leading=0; fi
+      in_heredoc=1
+    fi
+    out="${out}${line}"$'\n'
+  done <<<"$cmd"
+  printf '%s' "$out"
+}
+
+strip_line_comments() {
+  # A '#' preceded by start-of-line or whitespace starts a shell comment; our
+  # patterns never contain '#', so this cannot eat a real match.
+  sed -E 's/(^|[[:space:]])#.*$//'
+}
+
+bash_invocation_haystack() {
+  local cmd="$1" stripped seg rest leading kept=""
+  stripped="$(strip_quoted_heredocs "$cmd" | strip_line_comments)"
+  stripped="${stripped//;/$'\n'}"
+  stripped="${stripped//&&/$'\n'}"
+  stripped="${stripped//||/$'\n'}"
+  stripped="${stripped//|/$'\n'}"
+  while IFS= read -r seg || [ -n "$seg" ]; do
+    rest="${seg#"${seg%%[![:space:]]*}"}"
+    while [[ "$rest" =~ ^([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*)[[:space:]]+(.*)$ ]] \
+      || [[ "$rest" =~ ^(sudo|env|time|nohup|nice|!)[[:space:]]+(.*)$ ]]; do
+      rest="${BASH_REMATCH[2]}"
+      rest="${rest#"${rest%%[![:space:]]*}"}"
+    done
+    leading="${rest%%[[:space:]]*}"
+    leading="$(printf '%s' "$leading" | tr 'A-Z' 'a-z')"
+    if [[ "$leading" =~ $PROSE_SINK_CMDS ]]; then
+      continue
+    fi
+    kept="${kept}${seg}"$'\n'
+  done <<<"$stripped"
+  printf '%s' "$kept"
+}
+
 # Returns 0 and sets $matched_pattern when $1 contains a banned pattern.
 matched_pattern=""
 GREP_BIN="$(command -v grep 2>/dev/null || true)"
@@ -212,6 +287,7 @@ case "$tool_name" in
       if (.tool_input.command | type) == "string"
       then .tool_input.command else error("missing command") end
     ' 2>/dev/null)" || allow "Bash tool_input has no command string"
+    haystack="$(bash_invocation_haystack "$haystack")"
     ;;
   Edit)
     haystack="$(printf '%s' "$parsed" | jq -er '
