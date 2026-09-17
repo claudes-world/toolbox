@@ -18,6 +18,8 @@ fail=0
 STATE_ROOT="$(mktemp -d)"
 trap 'rm -rf "$STATE_ROOT"' EXIT
 export WORLDOS_GUARD_STATE_DIR="$STATE_ROOT/state"
+# Keep denial logs out of the operator's real home during tests.
+export HOME="$STATE_ROOT/home"
 
 reset_cooldown() { rm -rf "$WORLDOS_GUARD_STATE_DIR"; }
 
@@ -71,7 +73,7 @@ benign_multiedit="$(payload MultiEdit '{"file_path": "/tmp/x.py", "edits": [{"ol
 # --- positive detection still blocks -------------------------------------
 check "banned host in a Bash command is blocked"   2 run_hook        "$banned_bash"
 check "banned host over a socket is blocked"       2 run_hook_socket "$banned_bash"
-check "banned key in Write content is blocked"     2 run_hook        "$banned_write"
+check "banned key in Write content is allowed"     0 run_hook        "$banned_write"
 
 # --- benign traffic is allowed -------------------------------------------
 check "benign Bash over a pipe is allowed"         0 run_hook        "$benign_bash"
@@ -118,11 +120,11 @@ fi
 reset_cooldown
 jqless_block_rc=0
 PATH=/nonexistent "$HOOK" <<<"$banned_bash" >/dev/null 2>&1 || jqless_block_rc=$?
-if [[ "$jqless_block_rc" == 2 ]]; then
+if [[ "$jqless_block_rc" == 0 ]]; then
   pass=$((pass + 1))
 else
   fail=$((fail + 1))
-  echo "FAIL: banned call with jq off PATH — got exit $jqless_block_rc, want 2"
+  echo "FAIL: banned call with jq off PATH fails open — got exit $jqless_block_rc, want 0"
 fi
 
 
@@ -220,12 +222,29 @@ multi_doc="$(python3 -c 'import json,sys; print(json.dumps({"file_path": "/repo/
 rc=0; run_sess "$(sess_payload sess-d MultiEdit "$multi_doc")" || rc=$?
 expect "a MultiEdit of a document is allowed" 0 "$rc"
 
-# ...but a non-document write still gets its first denial.
+# Source-file writes are also always allowed (PL-B1).
 reset_cooldown
 rc=0; run_sess "$(sess_payload sess-e Write "$(jobj \
   file_path /repo/src/client.py \
   content "URL = 'https://$BANNED_HOST/v1beta'")")" || rc=$?
-expect "a source-file write is still denied once" 2 "$rc"
+expect "a source-file write is allowed" 0 "$rc"
+
+# PL-B1: every non-Bash tool bypasses scanning, even for source code or
+# unknown schemas. Use the same host as the Bash deny/rerun cases above.
+for tool in Write Edit MultiEdit NotebookEdit Read Task FutureTool bash; do
+  data="$(sess_payload sess-plb1 "$tool" "$(python3 -c '
+import json, sys
+pattern = sys.argv[1]
+print(json.dumps({"file_path": "/repo/src/client.py", "content": pattern,
+                  "old_string": pattern, "new_string": pattern,
+                  "edits": [{"old_string": pattern, "new_string": pattern}],
+                  "new_source": pattern, "command": "curl " + pattern}))
+' "$BANNED_URL")")"
+  check "$tool with a banned host is allowed" 0 run_hook "$data"
+  expect "$tool does not record a denial" 1 "$(test -d "$WORLDOS_GUARD_STATE_DIR"; echo $?)"
+  rc=0; PATH=/nonexistent "$HOOK" <<<"$data" >/dev/null 2>&1 || rc=$?
+  expect "$tool with jq missing is allowed" 0 "$rc"
+done
 
 # --- WOS2-909: Bash is matched on invocation shape, not on prose ---------
 #

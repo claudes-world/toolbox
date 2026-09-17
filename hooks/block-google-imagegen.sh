@@ -25,11 +25,10 @@
 # pair is then allowed through for thirty minutes, so an agent that has read the
 # reason can rerun and proceed. See hooks/lib/guard-cooldown.sh.
 #
-# DOCUMENTATION CARVE-OUT (same ruling): Write/Edit/MultiEdit/NotebookEdit of a
-# document — a path under docs/, any *.md, or a lane workspace — is never
-# denied. Writing a postmortem that names the incident is not the act the hook
-# exists to stop, and 36 of the 123 denials logged on do-box between 2026-09-02
-# and 2026-09-16 were exactly that.
+# BASH-ONLY CONTRACT (Liam, TapBack 2026-09-17, PL-B1): only Bash
+# invocations are scanned. Every other tool is allowed, regardless of its
+# content or destination; mentioning a pattern in a file is not an invocation.
+# Without a JSON parser we cannot establish tool identity, so fail open.
 #
 # Exit 2 + stderr = PreToolUse block (per Claude Code hook contract).
 # Exit 0 = allow (default, for everything that doesn't positively match).
@@ -197,48 +196,7 @@ input=""
 IFS= read -r -d '' input || true
 [ -n "$input" ] || allow "empty or unreadable PreToolUse payload on stdin"
 
-# The cooldown key needs a session. Read it without jq so the degraded path
-# below gets one too; an absent session falls back to a per-process key, which
-# simply means the cooldown does not apply.
-session_id="$(printf '%s' "$input" \
-  | "${GREP_BIN:-grep}" -o '"session_id"[[:space:]]*:[[:space:]]*"[^"]*"' 2>/dev/null \
-  | head -1 | sed -E 's/.*"([^"]*)"$/\1/')"
-[ -n "$session_id" ] || session_id="no-session"
-
-if ! command -v jq >/dev/null 2>&1; then
-  # Degraded mode: no field scoping available, so scan the raw payload with the
-  # hook's own metadata removed first. A working directory named after the
-  # incident is not an API call, and it used to brick every call made inside it
-  # (PL-B3).
-  echo "WARNING: block-google-imagegen: jq missing; scanning the raw payload" >&2
-  # Bash only: this branch runs precisely when no external binary is
-  # resolvable, so sed and grep are not available to do the stripping.
-  degraded_input="$input"
-  for meta_key in cwd transcript_path session_id permission_mode hook_event_name; do
-    meta_rest="$degraded_input"
-    meta_done=""
-    while [[ "$meta_rest" == *"\"$meta_key\""*":"*"\""* ]]; do
-      meta_head="${meta_rest%%\"$meta_key\"*}"
-      meta_tail="${meta_rest#*\"$meta_key\"}"
-      # Only a string value is stripped; anything else is left untouched.
-      meta_value="${meta_tail#*:}"
-      meta_value="${meta_value#"${meta_value%%[![:space:]]*}"}"
-      if [[ "$meta_value" != '"'* ]]; then
-        meta_done="${meta_done}${meta_head}\"$meta_key\""
-        meta_rest="$meta_tail"
-        continue
-      fi
-      meta_value="${meta_value#\"}"
-      meta_rest="${meta_value#*\"}"
-      meta_done="${meta_done}${meta_head}\"$meta_key\":\"\""
-    done
-    degraded_input="${meta_done}${meta_rest}"
-  done
-  if match_banned "$degraded_input"; then
-    block degraded "$matched_pattern"
-  fi
-  exit 0
-fi
+command -v jq >/dev/null 2>&1 || allow "jq missing; cannot identify the tool"
 
 parsed="$(printf '%s' "$input" | jq -ce '
   if type != "object"
@@ -253,92 +211,18 @@ parsed="$(printf '%s' "$input" | jq -ce '
 tool_name="$(printf '%s' "$parsed" | jq -r '.tool_name' 2>/dev/null)" \
   || allow "could not read tool_name"
 
-# Extract only the content-bearing fields for tools with known schemas. Read
-# cannot cause an API call, so it has no searchable content. Unknown tools
-# retain coverage by scanning tool_input, never hook metadata.
-# Documentation carve-out. A document that names a banned pattern is prose
-# about the rule, not an API call: postmortems, tickets, ADRs, test fixtures
-# written as markdown, and the lane workspaces those land in. Bash keeps its
-# denials, because a Bash command naming the pattern can actually spend money.
-is_documentation_write() {
-  local path
-  path="$(printf '%s' "$parsed" | jq -r '.tool_input.file_path // .tool_input.notebook_path // ""' 2>/dev/null)"
-  [ -n "$path" ] || return 1
-  case "$path" in
-    *.md|*.mdx|*.markdown|*.txt|*.rst) return 0 ;;
-    */docs/*|docs/*) return 0 ;;
-    */.world/*/workspace/*|"${HOME:-/nonexistent}"/.world/*) return 0 ;;
-  esac
-  return 1
-}
+# Exit before inspecting tool_input or touching cooldown state for other tools.
+[ "$tool_name" = "Bash" ] || exit 0
 
-case "$tool_name" in
-  Write|Edit|MultiEdit|NotebookEdit)
-    if is_documentation_write; then
-      echo "NOTE: $GUARD_NAME: documentation write; the pattern list is data here, not an API call" >&2
-      exit 0
-    fi
-    ;;
-esac
+session_id="$(printf '%s' "$parsed" | jq -r '.session_id // "no-session"' 2>/dev/null)" \
+  || allow "could not read session_id"
+[ -n "$session_id" ] || session_id="no-session"
 
-case "$tool_name" in
-  Bash)
-    haystack="$(printf '%s' "$parsed" | jq -er '
-      if (.tool_input.command | type) == "string"
-      then .tool_input.command else error("missing command") end
-    ' 2>/dev/null)" || allow "Bash tool_input has no command string"
-    haystack="$(bash_invocation_haystack "$haystack")"
-    ;;
-  Edit)
-    haystack="$(printf '%s' "$parsed" | jq -er '
-      [.tool_input.old_string?, .tool_input.new_string?]
-      | map(select(type == "string")) | join("\n")
-    ' 2>/dev/null)" || allow "Edit tool_input has no edit strings"
-    if [ -z "$haystack" ]; then
-      echo "WARNING: block-google-imagegen: Edit tool_input has an unrecognised shape (no old_string/new_string); scanning the raw tool_input" >&2
-      haystack="$(printf '%s' "$parsed" | jq -c '.tool_input' 2>/dev/null)" \
-        || allow "could not serialise tool_input for Edit fallback"
-    fi
-    ;;
-  Write)
-    haystack="$(printf '%s' "$parsed" | jq -er '
-      if (.tool_input.content | type) == "string"
-      then .tool_input.content else error("missing content") end
-    ' 2>/dev/null)" || allow "Write tool_input has no content string"
-    ;;
-  MultiEdit)
-    haystack="$(printf '%s' "$parsed" | jq -er '
-      if (.tool_input.edits | type) == "array"
-      then [.tool_input.edits[]? | (.old_string?, .new_string?)]
-           | map(select(type == "string")) | join("\n")
-      else error("missing edits") end
-    ' 2>/dev/null)" || allow "MultiEdit tool_input has no edits array"
-    if [ -z "$haystack" ]; then
-      echo "WARNING: block-google-imagegen: MultiEdit tool_input has an unrecognised shape (no edits[].old_string/new_string); scanning the raw tool_input" >&2
-      haystack="$(printf '%s' "$parsed" | jq -c '.tool_input' 2>/dev/null)" \
-        || allow "could not serialise tool_input for MultiEdit fallback"
-    fi
-    ;;
-  NotebookEdit)
-    haystack="$(printf '%s' "$parsed" | jq -er '
-      if (.tool_input.new_source | type) == "string"
-      then .tool_input.new_source else error("missing new_source") end
-    ' 2>/dev/null)" || allow "NotebookEdit tool_input has no new_source string"
-    ;;
-  Read)
-    haystack=""
-    ;;
-  Task)
-    # PL-B2. A dispatch brief that names the pattern is text about the rule,
-    # not a call that spends money. The subagent's own Bash calls pass through
-    # this same hook, so coverage is not lost by leaving the prompt alone.
-    haystack=""
-    ;;
-  *)
-    haystack="$(printf '%s' "$parsed" | jq -c '.tool_input' 2>/dev/null)" \
-      || allow "could not serialise tool_input for $tool_name"
-    ;;
-esac
+haystack="$(printf '%s' "$parsed" | jq -er '
+  if (.tool_input.command | type) == "string"
+  then .tool_input.command else error("missing command") end
+' 2>/dev/null)" || allow "Bash tool_input has no command string"
+haystack="$(bash_invocation_haystack "$haystack")"
 
 if match_banned "$haystack"; then
   block "$tool_name" "$matched_pattern"

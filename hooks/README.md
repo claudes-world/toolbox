@@ -15,6 +15,7 @@ Claude Code event-driven scripts. Each hook fires on a specific Claude Code life
 | `quarantine-research` | manual / Bash | Isolated Claude subprocess research pipeline with sanitizer + Haiku review + risk-gated release | Active |
 | `safe-research` | manual / Bash | Sandboxed web research via restricted `claude -p`; pipes through sanitizer | Active |
 | `sanitize-research` | called by quarantine-research | Scan research output for prompt injection patterns; prepend warnings | Active |
+| `block-google-imagegen.sh` | PreToolUse / Bash only | Deny matching Google image API invocations once per session/pattern, then allow retries for 30 minutes; all other tools bypass scanning | Active |
 | `share-doc` | manual / Bash | Write markdown to timestamped file in `~/claudes-world/tmp/` and send Telegram deep-link button | Active |
 | `typing-hook` | `UserPromptSubmit` | Send typing indicator on every inbound Telegram message; write `.active-chat` | Active |
 | `voice-hook` | `UserPromptSubmit` | Auto-transcribe Telegram voice notes; reply with transcription; inject into context | Active |
