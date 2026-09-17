@@ -168,7 +168,7 @@ expect "identical rerun inside the window is allowed" 0 "$rc"
 rc=0; run_sess "$banned_b" || rc=$?
 expect "a different session is denied on its own first run" 2 "$rc"
 
-rc=0; run_sess "$(sess_payload sess-a Bash "$(jobj command "echo $BANNED_FRUIT")")" || rc=$?
+rc=0; run_sess "$(sess_payload sess-a Bash "$(jobj command "curl -s https://api.example.com/generate?model=$BANNED_FRUIT")")" || rc=$?
 expect "a different pattern in the same session is denied once" 2 "$rc"
 
 # The reason tells the agent what to do and that the rerun will proceed.
@@ -226,6 +226,43 @@ rc=0; run_sess "$(sess_payload sess-e Write "$(jobj \
   file_path /repo/src/client.py \
   content "URL = 'https://$BANNED_HOST/v1beta'")")" || rc=$?
 expect "a source-file write is still denied once" 2 "$rc"
+
+# --- WOS2-909: Bash is matched on invocation shape, not on prose ---------
+#
+# Founder incident 2026-09-16: a heredoc writing a report that merely
+# mentioned the August Imagen spend was blocked three times in one
+# night, and the "rerun to proceed" cooldown escape did not help because each
+# rerun built the report text slightly differently. The fix is not to weaken
+# the ban -- it is to stop treating a document body as a command.
+
+reset_cooldown
+report_heredoc="cat <<'REPORT' > /tmp/imagen-spend.md
+August spend review:
+- Imagen 4 via $BANNED_URL cost \$21.52 this month.
+- $BANNED_FRUIT was the working codename before that.
+REPORT"
+rc=0; run_sess "$(sess_payload sess-f Bash "$(jobj command "$report_heredoc")")" || rc=$?
+expect "a heredoc report naming the incident is allowed (WOS2-909)" 0 "$rc"
+
+reset_cooldown
+rc=0; run_sess "$(sess_payload sess-f Bash "$(jobj command 'echo "Imagen 4 = \$21.52"')")" || rc=$?
+expect "an echoed report line is allowed (WOS2-909)" 0 "$rc"
+
+reset_cooldown
+real_curl="curl -s https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate:predict -H 'Content-Type: application/json'"
+rc=0; run_sess "$(sess_payload sess-g Bash "$(jobj command "$real_curl")")" || rc=$?
+expect "a real curl call to the imagen predict endpoint is still blocked (WOS2-909)" 2 "$rc"
+
+reset_cooldown
+agy_call="agy --model gemini-2.5-flash-image generate --prompt a-cat"
+rc=0; run_sess "$(sess_payload sess-h Bash "$(jobj command "$agy_call")")" || rc=$?
+expect "an agy invocation with an image model is still blocked (WOS2-909)" 2 "$rc"
+
+reset_cooldown
+rc=0; run_sess "$(sess_payload sess-i Bash "$(jobj command "$real_curl")")" || rc=$?
+expect "cooldown: first call to the predict endpoint is denied" 2 "$rc"
+rc=0; run_sess "$(sess_payload sess-i Bash "$(jobj command "$real_curl")")" || rc=$?
+expect "cooldown: identical rerun within the window proceeds (WOS2-909)" 0 "$rc"
 
 echo "block-google-imagegen: $pass passed, $fail failed"
 [[ "$fail" == 0 ]]
