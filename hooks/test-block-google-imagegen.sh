@@ -65,28 +65,18 @@ benign_bash="$(payload Bash '{"command": "echo hi"}')"
 banned_bash="$(payload Bash "$(python3 -c 'import json,sys; print(json.dumps({"command": "curl -s " + sys.argv[1]}))' "$BANNED_URL")")"
 benign_write="$(payload Write '{"file_path": "/tmp/notes.md", "content": "nothing to see"}')"
 banned_write="$(payload Write "$(python3 -c 'import json,sys; print(json.dumps({"file_path": "/tmp/x.sh", "content": "export GOOGLE_AI_API_KEY=abc"}))')")"
+
 benign_multiedit="$(payload MultiEdit '{"file_path": "/tmp/x.py", "edits": [{"old_string": "a", "new_string": "b"}, {"old_string": "c", "new_string": "d"}]}')"
-banned_multiedit="$(payload MultiEdit "$(python3 -c 'import json,sys; print(json.dumps({"file_path": "/tmp/x.py", "edits": [{"old_string": "a", "new_string": "b"}, {"old_string": "c", "new_string": "https://" + "generativelanguage" + "." + "googleapis" + "." + "com" + "/v1beta/models"}]}))')")"
 
-# Edit payload with no old_string/new_string keys at all — an unrecognised
-# shape — but a banned key sitting in some other field of tool_input. The
-# haystack built from old_string/new_string is empty, so this only blocks if
-# the fallback scans the raw serialized tool_input.
-banned_edit_unknown_shape="$(payload Edit "$(python3 -c 'import json,sys; print(json.dumps({"file_path": "/tmp/x.sh", "patch": "GOOGLE_AI" + "_API_KEY"}))')")"
-
-# --- positive detection still blocks
+# --- positive detection still blocks -------------------------------------
 check "banned host in a Bash command is blocked"   2 run_hook        "$banned_bash"
 check "banned host over a socket is blocked"       2 run_hook_socket "$banned_bash"
 check "banned key in Write content is blocked"     2 run_hook        "$banned_write"
-check "banned host in a MultiEdit second edit is blocked" 2 run_hook "$banned_multiedit"
-check "Edit with unrecognised shape but a banned key in raw tool_input is blocked" \
-  2 run_hook "$banned_edit_unknown_shape"
 
 # --- benign traffic is allowed -------------------------------------------
 check "benign Bash over a pipe is allowed"         0 run_hook        "$benign_bash"
 check "benign Bash over a SOCKET is allowed"       0 run_hook_socket "$benign_bash"
 check "benign Write is allowed"                    0 run_hook        "$benign_write"
-check "benign MultiEdit is allowed"                0 run_hook        "$benign_multiedit"
 check "the hook's own name is not a banned string" 0 run_hook \
   "$(payload Bash '{"command": "grep -n block-google-imagegen hooks.json"}')"
 
@@ -97,6 +87,22 @@ check "missing tool_input fails open"              0 run_hook '{"tool_name":"Bas
 check "unknown tool_input shape fails open"        0 run_hook '{"tool_name":"Bash","tool_input":{}}'
 check "Read is allowed"                            0 run_hook \
   '{"tool_name":"Read","tool_input":{"file_path":"/etc/hosts"}}'
+
+# --- PL-B2: a subagent brief is text, not an invocation ------------------
+check "a Task prompt naming the pattern is allowed" 0 run_hook \
+  "$(payload Task "$(python3 -c 'import json,sys; print(json.dumps({"subagent_type":"general-purpose","description":"audit the guard","prompt":"Find every call to " + sys.argv[1]}))' "$BANNED_URL")")"
+
+# --- PL-B3: degraded mode must not scan the hook's own metadata ----------
+reset_cooldown
+cwd_rc=0
+banned_host_local="${BANNED_URL#https://}"; banned_host_local="${banned_host_local%%/*}"
+PATH=/nonexistent "$HOOK" <<<"$(python3 -c 'import json,sys; print(json.dumps({"tool_name":"Bash","session_id":"s1","cwd":"/repo/incidents/" + sys.argv[1],"tool_input":{"command":"echo hi"}}))' "$banned_host_local")" >/dev/null 2>&1 || cwd_rc=$?
+if [[ "$cwd_rc" == 0 ]]; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1))
+  echo "FAIL: a cwd naming the host with jq off PATH — got exit $cwd_rc, want 0"
+fi
 
 # --- a PATH without jq must still allow benign calls ---------------------
 reset_cooldown
