@@ -8,7 +8,7 @@
 
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HOOK="${HOOK:-$HERE/block-google-imagegen.sh}"
+HOOK_TARGET="${HOOK:-$HERE/block-google-imagegen.sh}"
 
 pass=0
 fail=0
@@ -20,6 +20,17 @@ trap 'rm -rf "$STATE_ROOT"' EXIT
 export WORLDOS_GUARD_STATE_DIR="$STATE_ROOT/state"
 # Keep denial logs out of the operator's real home during tests.
 export HOME="$STATE_ROOT/home"
+export XDG_STATE_HOME="$STATE_ROOT/xdg"
+
+# Exercise the deployment shape: a bin symlink with no adjacent lib directory.
+# HOOK overrides stay literal so operators can prove the actual live path.
+if [[ -n "${HOOK:-}" ]]; then
+  HOOK="$HOOK_TARGET"
+else
+  mkdir -p "$STATE_ROOT/bin"
+  ln -s "$HOOK_TARGET" "$STATE_ROOT/bin/block-google-imagegen.sh"
+  HOOK="$STATE_ROOT/bin/block-google-imagegen.sh"
+fi
 
 reset_cooldown() { rm -rf "$WORLDOS_GUARD_STATE_DIR"; }
 
