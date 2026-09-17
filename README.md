@@ -341,7 +341,11 @@ All other tools, including `Write`, `Edit`, and `MultiEdit`, pass without patter
 scanning. A matching Bash invocation is denied once per session/pattern, then
 retries are allowed for 30 minutes through the shared cooldown state. If `jq`
 is unavailable, the hook fails open because it cannot identify the tool safely.
-Run its regression suite with `bash hooks/test-block-google-imagegen.sh`.
+Run its 60-case regression suite through a temporary bin symlink with
+`bash hooks/test-block-google-imagegen.sh`. To test the deployed entry point, run
+`HOOK=/home/claude/bin/block-google-imagegen.sh bash hooks/test-block-google-imagegen.sh`.
+The loader resolves the script symlink before finding the cooldown library,
+including on systems whose `readlink` lacks `-f`.
 
 ### voice-hook
 

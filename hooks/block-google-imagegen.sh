@@ -38,7 +38,31 @@ set -u
 LOG_FILE="${HOME:-/tmp}/.claude/hook-blocks.log"
 GUARD_NAME="block-google-imagegen"
 
-HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || HOOK_DIR=""
+# Resolve ~/bin links before looking for the adjacent cooldown library.
+# BSD readlink may lack -f; follow relative/absolute link targets there.
+resolve_hook_path() {
+  local script="${BASH_SOURCE[0]}" target dir hops=0
+  if target="$(readlink -f "$script" 2>/dev/null)" && [ -n "$target" ]; then
+    printf '%s\n' "$target"
+    return 0
+  fi
+  while [ -L "$script" ]; do
+    hops=$((hops + 1))
+    [ "$hops" -le 40 ] || return 1
+    dir="$(cd -P "$(dirname "$script")" 2>/dev/null && pwd)" || return 1
+    target="$(readlink "$script" 2>/dev/null)" || return 1
+    case "$target" in
+      /*) script="$target" ;;
+      *) script="$dir/$target" ;;
+    esac
+  done
+  printf '%s\n' "$script"
+}
+
+HOOK_DIR=""
+if HOOK_PATH="$(resolve_hook_path)"; then
+  HOOK_DIR="$(cd -P "$(dirname "$HOOK_PATH")" 2>/dev/null && pwd)" || HOOK_DIR=""
+fi
 if [ -n "$HOOK_DIR" ] && [ -r "$HOOK_DIR/lib/guard-cooldown.sh" ]; then
   # shellcheck source=lib/guard-cooldown.sh
   . "$HOOK_DIR/lib/guard-cooldown.sh"
