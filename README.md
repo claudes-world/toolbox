@@ -334,6 +334,15 @@ Claude Code hooks that run automatically during sessions. Full hook registry and
 
 These live in `hooks/` and are wired up via `.claude/settings.local.json`.
 
+### block-google-imagegen.sh
+
+The PreToolUse Google image-generation guard scans only `Bash` invocations.
+All other tools, including `Write`, `Edit`, and `MultiEdit`, pass without pattern
+scanning. A matching Bash invocation is denied once per session/pattern, then
+retries are allowed for 30 minutes through the shared cooldown state. If `jq`
+is unavailable, the hook fails open because it cannot identify the tool safely.
+Run its regression suite with `bash hooks/test-block-google-imagegen.sh`.
+
 ### voice-hook
 
 Auto-transcribes Telegram voice notes. Fires on `UserPromptSubmit` — when a message arrives with an `audio/ogg` attachment, it:
