@@ -66,6 +66,8 @@ banned_bash="$(payload Bash "$(python3 -c 'import json,sys; print(json.dumps({"c
 benign_write="$(payload Write '{"file_path": "/tmp/notes.md", "content": "nothing to see"}')"
 banned_write="$(payload Write "$(python3 -c 'import json,sys; print(json.dumps({"file_path": "/tmp/x.sh", "content": "export GOOGLE_AI_API_KEY=abc"}))')")"
 
+benign_multiedit="$(payload MultiEdit '{"file_path": "/tmp/x.py", "edits": [{"old_string": "a", "new_string": "b"}, {"old_string": "c", "new_string": "d"}]}')"
+
 # --- positive detection still blocks -------------------------------------
 check "banned host in a Bash command is blocked"   2 run_hook        "$banned_bash"
 check "banned host over a socket is blocked"       2 run_hook_socket "$banned_bash"

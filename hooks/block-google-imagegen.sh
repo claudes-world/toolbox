@@ -218,6 +218,11 @@ case "$tool_name" in
       [.tool_input.old_string?, .tool_input.new_string?]
       | map(select(type == "string")) | join("\n")
     ' 2>/dev/null)" || allow "Edit tool_input has no edit strings"
+    if [ -z "$haystack" ]; then
+      echo "WARNING: block-google-imagegen: Edit tool_input has an unrecognised shape (no old_string/new_string); scanning the raw tool_input" >&2
+      haystack="$(printf '%s' "$parsed" | jq -c '.tool_input' 2>/dev/null)" \
+        || allow "could not serialise tool_input for Edit fallback"
+    fi
     ;;
   Write)
     haystack="$(printf '%s' "$parsed" | jq -er '
@@ -232,6 +237,11 @@ case "$tool_name" in
            | map(select(type == "string")) | join("\n")
       else error("missing edits") end
     ' 2>/dev/null)" || allow "MultiEdit tool_input has no edits array"
+    if [ -z "$haystack" ]; then
+      echo "WARNING: block-google-imagegen: MultiEdit tool_input has an unrecognised shape (no edits[].old_string/new_string); scanning the raw tool_input" >&2
+      haystack="$(printf '%s' "$parsed" | jq -c '.tool_input' 2>/dev/null)" \
+        || allow "could not serialise tool_input for MultiEdit fallback"
+    fi
     ;;
   NotebookEdit)
     haystack="$(printf '%s' "$parsed" | jq -er '
