@@ -114,6 +114,25 @@ for m in "${EXPECTED_200K[@]}"; do
   check "$m" "200k"
 done
 
+# ----- firing points with an auto-compact window of 533000 (trigger 500000) -----
+fire_check() {
+  local used="$1" want="$2" tmp out
+  tmp="$(mktemp -d)"
+  printf '{"type":"assistant","message":{"model":"claude-sonnet-5","usage":{"input_tokens":%s}}}\n' "$used" > "$tmp/t.jsonl"
+  out="$(printf '{"hook_event_name":"UserPromptSubmit","session_id":"s","transcript_path":"%s/t.jsonl"}' "$tmp" |
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW=533000 CONTEXT_THRESHOLD_STATE_DIR="$tmp/state" CONTEXT_THRESHOLD_MESSAGE_DIR="$tmp/none" \
+    CONTEXT_THRESHOLD_JQ_TIMEOUT_SECONDS=5 "$(dirname "$0")/context-threshold-check")"
+  find "$tmp" -depth -delete
+  total=$((total + 1))
+  case "$out" in
+    *"threshold ${want}%"*) pass=$((pass + 1)) ;;
+    *) if [ "$want" = none ] && [ "$out" = "{}" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL fire used=${used} want=${want} got=${out}"; fi ;;
+  esac
+}
+fire_check 399999 none
+fire_check 400000 80
+fire_check 450000 90
+
 # ----- report -----
 # Column widths: pad model to the longest model string in either array.
 max_model_len=5
