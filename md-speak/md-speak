@@ -595,6 +595,7 @@ def segments_to_ssml_batches(segments: list[Segment]) -> list[tuple[str, str]]:
 
 def get_tts_client():
     """Get or create a Google Cloud TTS client."""
+    raise RuntimeError("Google Cloud TTS is disabled for v1 speech (Liam, 2026-10-06 msg 28: the bill exceeded the free tier).")
     os.environ.setdefault(
         "GOOGLE_APPLICATION_CREDENTIALS",
         str(Path.home() / ".secrets" / "gcp-tts-sa.json"),
