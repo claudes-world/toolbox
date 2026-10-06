@@ -6,16 +6,16 @@ Usage:
     md-speak --out output.ogg document.md
     md-speak --no-describe document.md    # skip AI descriptions of code/images
 
-Voice roles (Google Cloud TTS, overridable via env):
-    MD_VOICE_HEADING:    Headings (default: en-US-Wavenet-B, deep male)
-    MD_VOICE_BODY:       Body text (default: en-US-Wavenet-J, male)
-    MD_VOICE_SPECIAL:    Links, figures, code descriptions (default: en-US-Neural2-C, female)
-    MD_VOICE_TABLE_KEY:  Table col 0 / headers (default: en-US-Neural2-H, female — row labels)
-    MD_VOICE_TABLE_VAL:  Table col 1+ (default: en-US-Neural2-F, female — values)
-    MD_VOICE_QUOTE:      Blockquotes (default: en-US-Wavenet-D, male)
+Voice roles (Kokoro-82M on dev-mac via ~/bin/kokoro-tts, overridable via env):
+    MD_KOKORO_HEADING:    Headings (default: am_adam)
+    MD_KOKORO_BODY:       Body text (default: am_liam)
+    MD_KOKORO_SPECIAL:    Links, figures, code descriptions (default: af_heart)
+    MD_KOKORO_TABLE_KEY:  Table col 0 / headers (default: af_bella)
+    MD_KOKORO_TABLE_VAL:  Table col 1+ (default: af_nicole)
+    MD_KOKORO_QUOTE:      Blockquotes (default: am_michael)
 
 Requires:
-    - GCP service account at ~/.secrets/gcp-tts-sa.json
+    - SSH access to dev-mac and its ~/speech-lab Kokoro install
     - ANTHROPIC_API_KEY for AI descriptions (or claude CLI on Max plan)
     - ffmpeg for audio stitching
 """
@@ -593,31 +593,51 @@ def segments_to_ssml_batches(segments: list[Segment]) -> list[tuple[str, str]]:
 
 # --- Audio generation ---
 
-def get_tts_client():
-    """Get or create a Google Cloud TTS client."""
-    raise RuntimeError("Google Cloud TTS is disabled for v1 speech (Liam, 2026-10-06 msg 28: the bill exceeded the free tier).")
-    os.environ.setdefault(
-        "GOOGLE_APPLICATION_CREDENTIALS",
-        str(Path.home() / ".secrets" / "gcp-tts-sa.json"),
-    )
-    from google.cloud import texttospeech
-    return texttospeech.TextToSpeechClient(), texttospeech
+# Google Cloud TTS was removed 2026-10-06 (Liam, msg 28: the bill exceeded the
+# free tier). Each voice role now renders with Kokoro-82M on dev-mac through
+# ~/bin/kokoro-tts. VOICES above still names the role of each segment.
+KOKORO_TTS_BIN = Path.home() / "bin" / "kokoro-tts"
+KOKORO_VOICES = {
+    "heading": os.environ.get("MD_KOKORO_HEADING", "am_adam"),
+    "body": os.environ.get("MD_KOKORO_BODY", "am_liam"),
+    "special": os.environ.get("MD_KOKORO_SPECIAL", "af_heart"),
+    "table_key": os.environ.get("MD_KOKORO_TABLE_KEY", "af_bella"),
+    "table_val": os.environ.get("MD_KOKORO_TABLE_VAL", "af_nicole"),
+    "quote": os.environ.get("MD_KOKORO_QUOTE", "am_michael"),
+}
+
+
+def ssml_to_text(ssml: str) -> str:
+    """Flatten a batch's SSML to plain text, one paragraph per block.
+
+    Kokoro has no SSML, so explicit <break> durations are dropped; a blank
+    line between paragraphs gives Kokoro its own paragraph pause instead.
+    """
+    paragraphs = re.findall(r"<p>(.*?)</p>", ssml, flags=re.S)
+    text = "\n\n".join(p.strip() for p in paragraphs if p.strip())
+    return (text.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"')
+            .replace("&apos;", "'").replace("&amp;", "&"))
 
 
 def generate_ssml_audio(ssml: str, voice: str, output_path: str, rate: float = 1.045):
-    """Generate audio from SSML via Google Cloud TTS."""
-    client, tts = get_tts_client()
-    lang_code = "-".join(voice.split("-")[:2])
-
-    response = client.synthesize_speech(
-        input=tts.SynthesisInput(ssml=ssml),
-        voice=tts.VoiceSelectionParams(language_code=lang_code, name=voice),
-        audio_config=tts.AudioConfig(
-            audio_encoding=tts.AudioEncoding.MP3,
-            speaking_rate=rate,
-        ),
+    """Render one batch with the Kokoro voice mapped to this segment's role."""
+    role = next((r for r, v in VOICES.items() if v == voice), "body")
+    text = ssml_to_text(ssml)
+    if not text:
+        # Silence-only batch: keep its place in the stitch as a short gap.
+        subprocess.run(
+            ["ffmpeg", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono", "-t", "0.6",
+             "-c:a", "libmp3lame", "-y", "-loglevel", "error", output_path],
+            check=True,
+        )
+        return
+    # Google rates were relative to a slower base pace; Kokoro's 1.0 is natural.
+    speed = 1.1 if role == "body" else 1.0
+    subprocess.run(
+        [str(KOKORO_TTS_BIN), "--out", output_path, "--voice", KOKORO_VOICES[role],
+         "--speed", str(speed)],
+        input=text.encode(), check=True,
     )
-    Path(output_path).write_bytes(response.audio_content)
 
 
 def add_mp3_metadata(
