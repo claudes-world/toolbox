@@ -26,7 +26,7 @@ from pathlib import Path
 HOST = os.environ.get("KOKORO_HOST", "dev-mac")
 REMOTE_PYTHON = "~/speech-lab/.venv/bin/python"
 MODEL = "mlx-community/Kokoro-82M-bf16"
-DEFAULT_VOICE = os.environ.get("KOKORO_VOICE", "am_liam")
+DEFAULT_VOICE = os.environ.get("KOKORO_VOICE", "am_onyx")
 TIMEOUT_S = int(os.environ.get("KOKORO_TIMEOUT", "300"))
 
 # Runs on dev-mac: text on stdin, one joined WAV on stdout.
