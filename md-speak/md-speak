@@ -8,9 +8,9 @@ Usage:
 
 Voice roles (Kokoro-82M on dev-mac via ~/bin/kokoro-tts, overridable via env):
     MD_KOKORO_HEADING:    Headings (default: am_adam)
-    MD_KOKORO_BODY:       Body text (default: am_liam)
-    MD_KOKORO_SPECIAL:    Links, figures, code descriptions (default: af_heart)
-    MD_KOKORO_TABLE_KEY:  Table col 0 / headers (default: af_bella)
+    MD_KOKORO_BODY:       Body text (default: am_onyx)
+    MD_KOKORO_SPECIAL:    Code blocks and the closing line (default: af_bella)
+    MD_KOKORO_TABLE_KEY:  Table col 0 / headers (default: af_heart)
     MD_KOKORO_TABLE_VAL:  Table col 1+ (default: af_nicole)
     MD_KOKORO_QUOTE:      Blockquotes (default: am_michael)
 
@@ -599,9 +599,9 @@ def segments_to_ssml_batches(segments: list[Segment]) -> list[tuple[str, str]]:
 KOKORO_TTS_BIN = Path.home() / "bin" / "kokoro-tts"
 KOKORO_VOICES = {
     "heading": os.environ.get("MD_KOKORO_HEADING", "am_adam"),
-    "body": os.environ.get("MD_KOKORO_BODY", "am_liam"),
-    "special": os.environ.get("MD_KOKORO_SPECIAL", "af_heart"),
-    "table_key": os.environ.get("MD_KOKORO_TABLE_KEY", "af_bella"),
+    "body": os.environ.get("MD_KOKORO_BODY", "am_onyx"),
+    "special": os.environ.get("MD_KOKORO_SPECIAL", "af_bella"),
+    "table_key": os.environ.get("MD_KOKORO_TABLE_KEY", "af_heart"),
     "table_val": os.environ.get("MD_KOKORO_TABLE_VAL", "af_nicole"),
     "quote": os.environ.get("MD_KOKORO_QUOTE", "am_michael"),
 }
