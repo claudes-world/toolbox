@@ -5,17 +5,31 @@ Usage:
     md-speak document.md
     md-speak --out output.ogg document.md
     md-speak --no-describe document.md    # skip AI descriptions of code/images
+    md-speak --backend google document.md # Google Cloud TTS (Chirp 3 HD) instead of Kokoro
+    md-speak --list-voices [--backend google]
 
-Voice roles (Kokoro-82M on dev-mac via ~/bin/kokoro-tts, overridable via env):
-    MD_KOKORO_HEADING:    Headings (default: am_adam)
-    MD_KOKORO_BODY:       Body text (default: am_onyx)
-    MD_KOKORO_SPECIAL:    Code blocks and the closing line (default: af_bella)
-    MD_KOKORO_TABLE_KEY:  Table col 0 / headers (default: af_heart)
-    MD_KOKORO_TABLE_VAL:  Table col 1+ (default: af_nicole)
-    MD_KOKORO_QUOTE:      Blockquotes (default: am_michael)
+Backends (env MD_TTS_BACKEND, overridden by --backend):
+    kokoro (default): Kokoro-82M on dev-mac via ~/bin/kokoro-tts
+    google:           Google Cloud Text-to-Speech, Chirp 3 HD voices by default.
+                      Credentials: GOOGLE_APPLICATION_CREDENTIALS if set, else
+                      ~/.secrets/gcp-tts-sa.json.
+
+Voice roles (six document parts; each backend has its own env per role):
+    role        document part                        kokoro env / default             google env / default
+    heading     Headings                             MD_KOKORO_HEADING   am_adam      MD_GOOGLE_HEADING   en-US-Chirp3-HD-Charon
+    body        Paragraphs and list items            MD_KOKORO_BODY      am_onyx      MD_GOOGLE_BODY      en-US-Chirp3-HD-Enceladus
+    special     Code blocks and the closing line     MD_KOKORO_SPECIAL   af_bella     MD_GOOGLE_SPECIAL   en-US-Chirp3-HD-Aoede
+    table_key   Table col 0 and the header row       MD_KOKORO_TABLE_KEY af_heart     MD_GOOGLE_TABLE_KEY en-US-Chirp3-HD-Kore
+    table_val   Table cols 1+                        MD_KOKORO_TABLE_VAL af_nicole    MD_GOOGLE_TABLE_VAL en-US-Chirp3-HD-Leda
+    quote       Blockquotes                          MD_KOKORO_QUOTE     am_michael   MD_GOOGLE_QUOTE     en-US-Chirp3-HD-Orus
+
+    Chirp 3 HD voices take plain text only, so md-speak sends each paragraph as
+    text and renders the pauses as silence. Other Google voices (Wavenet,
+    Neural2) get the full SSML with <break> tags.
 
 Requires:
-    - SSH access to dev-mac and its ~/speech-lab Kokoro install
+    - kokoro: SSH access to dev-mac and its ~/speech-lab Kokoro install
+    - google: google-cloud-texttospeech and a service account with TTS access
     - ANTHROPIC_API_KEY for AI descriptions (or claude CLI on Max plan)
     - ffmpeg for audio stitching
 """
@@ -26,6 +40,8 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -40,16 +56,11 @@ except Exception:
     otel_cli = None  # type: ignore[assignment]
     _tracer = None
 
-# --- Voice configuration (env-overridable) ---
+# --- Voice roles ---
 
-VOICES = {
-    "heading": os.environ.get("MD_VOICE_HEADING", "en-US-Wavenet-B"),
-    "body": os.environ.get("MD_VOICE_BODY", "en-US-Wavenet-J"),
-    "special": os.environ.get("MD_VOICE_SPECIAL", "en-US-Neural2-C"),
-    "table_key": os.environ.get("MD_VOICE_TABLE_KEY", "en-US-Neural2-H"),    # col 0 — row labels
-    "table_val": os.environ.get("MD_VOICE_TABLE_VAL", "en-US-Wavenet-F"),    # col 1+ — values (Neural2-F was unclear per Liam 2026-05-21)
-    "quote": os.environ.get("MD_VOICE_QUOTE", "en-US-Wavenet-D"),
-}
+# Segment.voice holds one of these role names. The backend maps each role to a
+# concrete voice at render time (KOKORO_VOICES / GOOGLE_VOICES below).
+ROLES = ("heading", "body", "special", "table_key", "table_val", "quote")
 
 # --- Pauses (seconds) ---
 
@@ -271,7 +282,7 @@ def process_markdown(md_text: str, use_ai: bool = True) -> list[Segment]:
             pause_key = f"h{min(level, 3)}_before"
             segments.append(Segment(
                 text=text,
-                voice=VOICES["heading"],
+                voice="heading",
                 pause_before=PAUSE.get(pause_key, 0.5),
                 pause_after=PAUSE["after_heading"],
             ))
@@ -284,7 +295,7 @@ def process_markdown(md_text: str, use_ai: bool = True) -> list[Segment]:
             text = humanize_text(text)
             segments.append(Segment(
                 text=text,
-                voice=VOICES["body"],
+                voice="body",
                 pause_after=PAUSE["between_paragraphs"],
             ))
 
@@ -300,14 +311,14 @@ def process_markdown(md_text: str, use_ai: bool = True) -> list[Segment]:
                 )
                 segments.append(Segment(
                     text=f"Code block: {desc}",
-                    voice=VOICES["special"],
+                    voice="special",
                     pause_after=PAUSE["after_code"],
                 ))
             else:
                 lang_label = f"{lang} code" if lang else "code"
                 segments.append(Segment(
                     text=f"{lang_label} block omitted",
-                    voice=VOICES["special"],
+                    voice="special",
                     pause_after=PAUSE["after_code"],
                 ))
 
@@ -320,7 +331,7 @@ def process_markdown(md_text: str, use_ai: bool = True) -> list[Segment]:
                     if text:
                         segments.append(Segment(
                             text=text,
-                            voice=VOICES["body"],
+                            voice="body",
                             pause_after=PAUSE["between_list_items"],
                         ))
 
@@ -381,7 +392,7 @@ def process_markdown(md_text: str, use_ai: bool = True) -> list[Segment]:
                     for j, val in enumerate(row):
                         if not val:
                             continue
-                        voice = VOICES["table_key"] if j == 0 else VOICES["table_val"]
+                        voice = "table_key" if j == 0 else "table_val"
                         text = f"{header_texts[j]}, {val}" if j < len(header_texts) and header_texts[j] else val
                         segments.append(Segment(
                             text=text,
@@ -398,7 +409,7 @@ def process_markdown(md_text: str, use_ai: bool = True) -> list[Segment]:
                     if h:
                         segments.append(Segment(
                             text=h,
-                            voice=VOICES["table_key"],
+                            voice="table_key",
                             pause_after=PAUSE["between_table_cells"],
                         ))
                 if len(segments) > header_start_len:
@@ -408,7 +419,7 @@ def process_markdown(md_text: str, use_ai: bool = True) -> list[Segment]:
                 for row in all_rows:
                     row_start_len = len(segments)
                     for j, val in enumerate(row):
-                        voice = VOICES["table_key"] if j == 0 else VOICES["table_val"]
+                        voice = "table_key" if j == 0 else "table_val"
                         if val:
                             segments.append(Segment(
                                 text=val,
@@ -419,19 +430,19 @@ def process_markdown(md_text: str, use_ai: bool = True) -> list[Segment]:
                     if len(segments) > row_start_len and segments[-1].pause_after < PAUSE["between_table_rows"]:
                         segments[-1].pause_after = PAUSE["between_table_rows"]
 
-            segments.append(Segment(text="", voice=VOICES["body"], pause_before=PAUSE["after_table"]))
+            segments.append(Segment(text="", voice="body", pause_before=PAUSE["after_table"]))
 
         elif t == "block_quote":
             text = extract_text(children) if children else raw
             if text:
                 segments.append(Segment(
                     text=text,
-                    voice=VOICES["quote"],
+                    voice="quote",
                     pause_after=PAUSE["after_quote"],
                 ))
 
         elif t == "thematic_break":
-            segments.append(Segment(text="", voice=VOICES["body"], pause_before=PAUSE["hr"]))
+            segments.append(Segment(text="", voice="body", pause_before=PAUSE["hr"]))
 
     # Filter empty segments (pause-only are kept)
     return [s for s in segments if s.text or s.pause_before > 0 or s.pause_after > 0]
@@ -593,9 +604,15 @@ def segments_to_ssml_batches(segments: list[Segment]) -> list[tuple[str, str]]:
 
 # --- Audio generation ---
 
-# Google Cloud TTS was removed 2026-10-06 (Liam, msg 28: the bill exceeded the
-# free tier). Each voice role now renders with Kokoro-82M on dev-mac through
-# ~/bin/kokoro-tts. VOICES above still names the role of each segment.
+# Two backends render the six voice roles (ROLES above):
+#   kokoro (default): Kokoro-82M on dev-mac through ~/bin/kokoro-tts. Google
+#     Cloud TTS was dropped as the default 2026-10-06 (Liam, msg 28: the bill
+#     exceeded the free tier).
+#   google: Google Cloud TTS, back 2026-10-11 as an opt-in backend for the Folio
+#     blog narration with Chirp 3 HD voices.
+BACKENDS = ("kokoro", "google")
+DEFAULT_BACKEND = "kokoro"
+
 KOKORO_TTS_BIN = Path.home() / "bin" / "kokoro-tts"
 KOKORO_VOICES = {
     "heading": os.environ.get("MD_KOKORO_HEADING", "am_adam"),
@@ -605,6 +622,63 @@ KOKORO_VOICES = {
     "table_val": os.environ.get("MD_KOKORO_TABLE_VAL", "af_nicole"),
     "quote": os.environ.get("MD_KOKORO_QUOTE", "am_michael"),
 }
+# Kokoro-82M v1.0 English voices (a* = American, b* = British; *f = female, *m = male).
+KOKORO_KNOWN_VOICES = (
+    "af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica", "af_kore",
+    "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky",
+    "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael",
+    "am_onyx", "am_puck", "am_santa",
+    "bf_alice", "bf_emma", "bf_isabella", "bf_lily",
+    "bm_daniel", "bm_fable", "bm_george", "bm_lewis",
+)
+
+GOOGLE_VOICES = {
+    "heading": os.environ.get("MD_GOOGLE_HEADING", "en-US-Chirp3-HD-Charon"),
+    "body": os.environ.get("MD_GOOGLE_BODY", "en-US-Chirp3-HD-Enceladus"),
+    "special": os.environ.get("MD_GOOGLE_SPECIAL", "en-US-Chirp3-HD-Aoede"),
+    "table_key": os.environ.get("MD_GOOGLE_TABLE_KEY", "en-US-Chirp3-HD-Kore"),
+    "table_val": os.environ.get("MD_GOOGLE_TABLE_VAL", "en-US-Chirp3-HD-Leda"),
+    "quote": os.environ.get("MD_GOOGLE_QUOTE", "en-US-Chirp3-HD-Orus"),
+}
+GOOGLE_DEFAULT_CREDENTIALS = Path.home() / ".secrets" / "gcp-tts-sa.json"
+CHIRP3_HD_PREFIX = "en-US-Chirp3-HD-"
+GOOGLE_SAMPLE_RATE = 24000
+GOOGLE_RATE_RANGE = (0.25, 2.0)
+GOOGLE_RETRIES = 3
+GOOGLE_WORKERS = 4  # parallel text requests within one Chirp batch
+
+
+def resolve_backend(cli_value: str | None) -> str:
+    """--backend wins, then MD_TTS_BACKEND, then kokoro."""
+    backend = (cli_value or os.environ.get("MD_TTS_BACKEND") or DEFAULT_BACKEND).strip().lower()
+    if backend not in BACKENDS:
+        print(f"error: unknown TTS backend {backend!r} (MD_TTS_BACKEND / --backend: "
+              f"{' | '.join(BACKENDS)})", file=sys.stderr)
+        sys.exit(2)
+    return backend
+
+
+def voice_name(role: str, backend: str) -> str:
+    """Concrete voice the backend uses for a role (unknown roles read as body)."""
+    table = GOOGLE_VOICES if backend == "google" else KOKORO_VOICES
+    return table.get(role, table["body"])
+
+
+def speaking_rate(role: str, backend: str) -> float:
+    """Per-role rate passed to generate_ssml_audio.
+
+    kokoro ignores it (generate_ssml_audio sets Kokoro's own speed). For google,
+    Chirp 3 HD's 1.0 is already a natural pace, so body runs slightly faster
+    and every other role at 1.0.
+    """
+    if backend == "google":
+        return 1.05 if role == "body" else 1.0
+    return 1.155 if role == "body" else 1.045  # +10% from prior 1.05/0.95
+
+
+def _unescape_ssml(text: str) -> str:
+    return (text.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"')
+            .replace("&apos;", "'").replace("&amp;", "&"))
 
 
 def ssml_to_text(ssml: str) -> str:
@@ -615,21 +689,139 @@ def ssml_to_text(ssml: str) -> str:
     """
     paragraphs = re.findall(r"<p>(.*?)</p>", ssml, flags=re.S)
     text = "\n\n".join(p.strip() for p in paragraphs if p.strip())
-    return (text.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"')
-            .replace("&apos;", "'").replace("&amp;", "&"))
+    return _unescape_ssml(text)
 
 
-def generate_ssml_audio(ssml: str, voice: str, output_path: str, rate: float = 1.045):
-    """Render one batch with the Kokoro voice mapped to this segment's role."""
-    role = next((r for r, v in VOICES.items() if v == voice), "body")
+def ssml_to_plan(ssml: str) -> list[tuple[str, object]]:
+    """Split a batch's SSML into ordered ("text", str) and ("pause", seconds) steps.
+
+    Used for voices that take plain text only (Chirp 3 HD): each <p> becomes a
+    text request and each <break time="Nms"/> becomes silence. Adjacent texts
+    (split_large_segment pieces with no pause between them) are joined into one
+    request; adjacent pauses are summed. The batch already fits SSML_BYTE_LIMIT,
+    so any joined text stays under Google's 5000-byte request limit.
+    """
+    plan: list[tuple[str, object]] = []
+    for m in re.finditer(r'<break time="(\d+)ms"\s*/>|<p>(.*?)</p>', ssml, flags=re.S):
+        if m.group(1) is not None:
+            secs = int(m.group(1)) / 1000
+            if plan and plan[-1][0] == "pause":
+                plan[-1] = ("pause", plan[-1][1] + secs)
+            else:
+                plan.append(("pause", secs))
+        else:
+            text = _unescape_ssml(m.group(2).strip())
+            if not text:
+                continue
+            if plan and plan[-1][0] == "text":
+                plan[-1] = ("text", f"{plan[-1][1]}\n\n{text}")
+            else:
+                plan.append(("text", text))
+    return plan
+
+
+def make_silence(output_path: str, seconds: float):
+    """Write an mp3 of silence, 24 kHz mono to match both backends' speech."""
+    subprocess.run(
+        ["ffmpeg", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono", "-t", f"{seconds:.3f}",
+         "-c:a", "libmp3lame", "-y", "-loglevel", "error", output_path],
+        check=True,
+    )
+
+
+_google_client = None
+
+
+def google_client():
+    """TextToSpeechClient: GOOGLE_APPLICATION_CREDENTIALS if set, else the
+    md-speak service account at ~/.secrets/gcp-tts-sa.json, else ADC."""
+    global _google_client
+    if _google_client is None:
+        from google.cloud import texttospeech
+        if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+            _google_client = texttospeech.TextToSpeechClient()
+        elif GOOGLE_DEFAULT_CREDENTIALS.exists():
+            _google_client = texttospeech.TextToSpeechClient.from_service_account_file(
+                str(GOOGLE_DEFAULT_CREDENTIALS))
+        else:
+            _google_client = texttospeech.TextToSpeechClient()
+    return _google_client
+
+
+def google_synthesize(name: str, rate: float, *, text: str | None = None,
+                      ssml: str | None = None) -> bytes:
+    """One synthesize_speech call (MP3, 24 kHz), retrying transient errors."""
+    from google.api_core import exceptions as gexc
+    from google.cloud import texttospeech
+
+    transient = (gexc.ServiceUnavailable, gexc.DeadlineExceeded, gexc.InternalServerError,
+                 gexc.ResourceExhausted, gexc.TooManyRequests, gexc.Aborted)
+    synth_input = (texttospeech.SynthesisInput(text=text) if text is not None
+                   else texttospeech.SynthesisInput(ssml=ssml))
+    voice = texttospeech.VoiceSelectionParams(
+        language_code="-".join(name.split("-")[:2]), name=name)
+    lo, hi = GOOGLE_RATE_RANGE
+    audio_config = texttospeech.AudioConfig(
+        audio_encoding=texttospeech.AudioEncoding.MP3,
+        sample_rate_hertz=GOOGLE_SAMPLE_RATE,
+        speaking_rate=min(max(rate, lo), hi),
+    )
+    for attempt in range(1, GOOGLE_RETRIES + 1):
+        try:
+            response = google_client().synthesize_speech(
+                input=synth_input, voice=voice, audio_config=audio_config, timeout=60)
+            return response.audio_content
+        except transient as e:
+            if attempt == GOOGLE_RETRIES:
+                raise
+            wait = 2 ** attempt  # 2s, 4s
+            print(f"warning: Google TTS {type(e).__name__} (try {attempt}/{GOOGLE_RETRIES}), "
+                  f"retrying in {wait}s", file=sys.stderr)
+            time.sleep(wait)
+    raise RuntimeError("unreachable")
+
+
+def generate_google_audio(ssml: str, role: str, output_path: str, rate: float):
+    """Render one batch with the Google voice mapped to this role."""
+    name = voice_name(role, "google")
+    plan = ssml_to_plan(ssml)
+    texts = [v for k, v in plan if k == "text"]
+    if not texts:
+        # Silence-only batch (hr, end of table): the pause it carried, or a short gap.
+        make_silence(output_path, sum(v for _, v in plan) or 0.6)
+        return
+
+    if not name.startswith(CHIRP3_HD_PREFIX):
+        # Wavenet / Neural2 / Studio accept SSML, so the <break>s render server-side.
+        Path(output_path).write_bytes(google_synthesize(name, rate, ssml=ssml))
+        return
+
+    # Chirp 3 HD: plain text only. One request per paragraph run, silence between.
+    with tempfile.TemporaryDirectory(prefix="md-speak-google-") as td:
+        with ThreadPoolExecutor(max_workers=min(GOOGLE_WORKERS, len(texts))) as pool:
+            audios = iter(list(pool.map(lambda t: google_synthesize(name, rate, text=t), texts)))
+        files: list[str] = []
+        for i, (kind, value) in enumerate(plan):
+            path = f"{td}/{i:04d}.mp3"
+            if kind == "text":
+                Path(path).write_bytes(next(audios))
+            else:
+                make_silence(path, value)
+            files.append(path)
+        stitch_audio(files, output_path)
+
+
+def generate_ssml_audio(ssml: str, voice: str, output_path: str, rate: float = 1.045,
+                        backend: str = DEFAULT_BACKEND):
+    """Render one batch; `voice` is the segment's role (see ROLES)."""
+    role = voice if voice in ROLES else "body"
+    if backend == "google":
+        generate_google_audio(ssml, role, output_path, rate)
+        return
     text = ssml_to_text(ssml)
     if not text:
         # Silence-only batch: keep its place in the stitch as a short gap.
-        subprocess.run(
-            ["ffmpeg", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono", "-t", "0.6",
-             "-c:a", "libmp3lame", "-y", "-loglevel", "error", output_path],
-            check=True,
-        )
+        make_silence(output_path, 0.6)
         return
     # Google rates were relative to a slower base pace; Kokoro's 1.0 is natural.
     speed = 1.1 if role == "body" else 1.0
@@ -638,6 +830,32 @@ def generate_ssml_audio(ssml: str, voice: str, output_path: str, rate: float = 1
          "--speed", str(speed)],
         input=text.encode(), check=True,
     )
+
+
+def list_voices(backend: str):
+    """Print the voices a backend offers, tab-separated: name, gender, roles using it."""
+    table = GOOGLE_VOICES if backend == "google" else KOKORO_VOICES
+    used: dict[str, list[str]] = {}
+    for role in ROLES:
+        used.setdefault(table[role], []).append(role)
+
+    if backend == "google":
+        from google.cloud import texttospeech
+        response = google_client().list_voices(language_code="en-US")
+        rows = sorted(
+            (v.name, texttospeech.SsmlVoiceGender(v.ssml_gender).name.lower())
+            for v in response.voices if v.name.startswith(CHIRP3_HD_PREFIX)
+        )
+        print(f"# Google Chirp 3 HD en-US voices ({len(rows)})", file=sys.stderr)
+    else:
+        rows = [(n, "female" if n[1] == "f" else "male") for n in KOKORO_KNOWN_VOICES]
+        print(f"# Kokoro-82M English voices ({len(rows)})", file=sys.stderr)
+    for name, gender in rows:
+        print(f"{name}\t{gender}\t{','.join(used.get(name, []))}".rstrip("\t"))
+    listed = {n for n, _ in rows}
+    for name, roles in used.items():
+        if name not in listed:
+            print(f"# note: {','.join(roles)} -> {name} (not in the list above)", file=sys.stderr)
 
 
 def add_mp3_metadata(
@@ -712,12 +930,27 @@ def main():
     _span_ctx = _tracer.start_as_current_span('md-speak.run') if _tracer else None
     _span = _span_ctx.__enter__() if _span_ctx else None
     try:
-        parser = argparse.ArgumentParser(description="Read markdown aloud with multiple voices")
-        parser.add_argument("file", help="Markdown file to read")
+        parser = argparse.ArgumentParser(
+            description="Read markdown aloud with multiple voices",
+            epilog=__doc__[__doc__.index("Backends"):],
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+        )
+        parser.add_argument("file", nargs="?", help="Markdown file to read")
         parser.add_argument("--out", "-o", type=Path, default=None, help="Output file (default: <input>.mp3)")
         parser.add_argument("--no-describe", action="store_true", help="Skip AI descriptions of code/images")
         parser.add_argument("--no-outro", action="store_true", help="Skip the spoken 'This is the end of: <file>' closing line (use for video narration / clips)")
+        parser.add_argument("--backend", choices=BACKENDS, default=None,
+                            help=f"TTS backend (default: $MD_TTS_BACKEND or {DEFAULT_BACKEND})")
+        parser.add_argument("--list-voices", action="store_true",
+                            help="Print the backend's voices (google: Chirp 3 HD en-US) and exit")
         args = parser.parse_args()
+        backend = resolve_backend(args.backend)
+
+        if args.list_voices:
+            list_voices(backend)
+            return
+        if not args.file:
+            parser.error("the following arguments are required: file")
 
         md_path = Path(args.file)
         if not md_path.exists():
@@ -727,7 +960,7 @@ def main():
         output = args.out or md_path.with_suffix(".mp3")
         md_text = md_path.read_text()
 
-        print(f"Parsing {md_path.name}...", file=sys.stderr)
+        print(f"Parsing {md_path.name}... (backend: {backend})", file=sys.stderr)
         segments = process_markdown(md_text, use_ai=not args.no_describe)
         print(f"Generated {len(segments)} segments", file=sys.stderr)
 
@@ -749,9 +982,9 @@ def main():
             text_chars = len(re.sub(r'<[^>]+>', '', ssml))
             char_count += text_chars
             preview = re.sub(r'<[^>]+>', '', ssml).strip()[:60]
-            print(f"  [{i+1}/{len(batches)}] {voice}: {preview}{'...' if len(preview) >= 60 else ''}", file=sys.stderr)
-            rate = 1.155 if voice == VOICES["body"] else 1.045  # +10% from prior 1.05/0.95
-            generate_ssml_audio(ssml, voice, audio_path, rate=rate)
+            print(f"  [{i+1}/{len(batches)}] {voice_name(voice, backend)}: {preview}{'...' if len(preview) >= 60 else ''}", file=sys.stderr)
+            rate = speaking_rate(voice, backend)
+            generate_ssml_audio(ssml, voice, audio_path, rate=rate, backend=backend)
             parts.append(audio_path)
 
         if not parts:
@@ -763,8 +996,9 @@ def main():
             doc_name = md_path.stem.replace("-", " ").replace("_", " ").title()
             end_ssml = f'<speak><break time="800ms"/><p>{escape_ssml("This is the end of: " + doc_name)}</p></speak>'
             end_audio_path = f"{tmpdir}/end-segment.mp3"
-            print(f"  [END] {VOICES['special']}: This is the end of: {doc_name}", file=sys.stderr)
-            generate_ssml_audio(end_ssml, VOICES["special"], end_audio_path)
+            print(f"  [END] {voice_name('special', backend)}: This is the end of: {doc_name}", file=sys.stderr)
+            generate_ssml_audio(end_ssml, "special", end_audio_path,
+                                rate=speaking_rate("special", backend), backend=backend)
             parts.append(end_audio_path)
 
         print(f"Stitching {len(parts)} audio parts...", file=sys.stderr)
