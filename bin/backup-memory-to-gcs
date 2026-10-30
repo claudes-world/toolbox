@@ -13,6 +13,12 @@
 
 set -euo pipefail
 
+# Pin the gcloud identity. The global "active account" is shared state that other
+# tools (TTS, interactive logins) switch out from under us — that is how this backup
+# silently died on an expired user credential (2026-07-25). A service-account key,
+# named explicitly, does not expire and cannot be reassigned by another tool.
+export CLOUDSDK_CORE_ACCOUNT="${CLOUDSDK_CORE_ACCOUNT:-worldos-secrets@claudes-world.iam.gserviceaccount.com}"
+
 BUCKET="do-box1"
 PREFIX="memory-backups/$(hostname)"
 SOURCE="${HOME}/.claude/projects/"
@@ -56,6 +62,27 @@ if ! gcloud storage rsync \
   exit 2
 fi
 
+# WorldOS memory corpus (Liam decision 7A, TapBack form 2026-07-09 19:37 ET,
+# memory-wiring lane thread 38): the corpus git repo INCLUDING .oplog/ (the
+# write audit trail, partially untracked) lives outside ~/.claude/projects and
+# had zero backup coverage. Mirror it under its own prefix. The index/ sibling
+# is a derived cache (rebuildable, ~$0.006) and is deliberately NOT backed up.
+CORPUS_SOURCE="${HOME}/worldos-memory/corpus/"
+CORPUS_PREFIX="memory-backups/$(hostname)-worldos-corpus"
+if [ -d "$CORPUS_SOURCE" ]; then
+  if ! gcloud storage rsync \
+    "$CORPUS_SOURCE" \
+    "gs://${BUCKET}/${CORPUS_PREFIX}/" \
+    --recursive \
+    --delete-unmatched-destination-objects \
+    2>>"$LOG"; then
+    alert_failure "gcloud storage rsync failed for worldos-memory corpus (see $LOG)"
+    exit 3
+  fi
+else
+  log "WARN: ${CORPUS_SOURCE} missing — corpus backup skipped"
+fi
+
 # Write a per-run timestamp marker (also synced) so we know when last backup ran
 echo "$TIMESTAMP" > "/tmp/backup-memory-marker.txt"
 gcloud storage cp "/tmp/backup-memory-marker.txt" \
@@ -65,6 +92,9 @@ rm -f "/tmp/backup-memory-marker.txt"
 # Count synced objects for log
 OBJ_COUNT=$(find "$SOURCE" -type f 2>/dev/null | wc -l)
 SIZE_HUMAN=$(du -sh "$SOURCE" 2>/dev/null | awk '{print $1}')
-log "completed: ${OBJ_COUNT} files, ${SIZE_HUMAN}"
+# `|| true`: the corpus dir may be absent (archived 2026-10-24); under pipefail a failing
+# find on a missing dir aborted the script after the backup, firing the failure alert daily.
+CORPUS_COUNT=$(find "$CORPUS_SOURCE" -type f 2>/dev/null | wc -l || true)
+log "completed: ${OBJ_COUNT} files, ${SIZE_HUMAN} (+ corpus: ${CORPUS_COUNT} files)"
 
 exit 0
