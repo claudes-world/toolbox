@@ -36,6 +36,7 @@ share-doc --list-conversations            # share_doc.py arguments pass through
 
 `--to current` uses `WORLDOS_CURRENT_CHAT_ID`/`WORLDOS_CURRENT_THREAD_ID` or
 `WORLDOS_CURRENT_ENVELOPE_PATH` when present, otherwise the lane's single
+conversation; no destination flag at all also means the lane's single
 conversation. `--chat-id`/`--thread-id` map to `chat:<id>/thread:<id|root>`;
 the lane's bound bot sends, so `--bot-env`/`--bot-username` only matter on the
 fallback path.

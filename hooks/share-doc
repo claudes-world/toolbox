@@ -89,8 +89,14 @@ def canonical(chat: object, thread: object) -> str | object:
 def destination(options: dict[str, str | bool]) -> str | None | object:
     """WorldOS conversation id, None for the lane default, or UNRESOLVED."""
     to, chat, thread = options.get("--to"), options.get("--chat-id"), options.get("--thread-id")
+    if to is None and chat is None:
+        # No routing flags: the lane's single conversation, as share_doc.py
+        # does; a stray --thread-id/--bot-env keeps legacy's refusal.
+        if thread is None and "--bot-env" not in options and "--bot-username" not in options:
+            return None
+        return UNRESOLVED
     if to is None:
-        return UNRESOLVED if chat is None else canonical(chat, thread)
+        return canonical(chat, thread)
     if to != "current" or chat is not None or thread is not None or "--bot-env" in options:
         return UNRESOLVED
     chat = os.environ.get("WORLDOS_CURRENT_CHAT_ID") or None
@@ -181,12 +187,17 @@ def main(argv: list[str]) -> int:
         return 0
     if isinstance(response, dict) and response.get("ok") is False:
         return legacy(argv, f"broker refused: {response.get('code', 'error')}", text)
-    if "uncertain" in result.stderr:
+    # Judge only the exception line: traceback source lines mention
+    # "uncertain" even when connect failed. CommunicationsTransportError says
+    # "... unavailable" when nothing was written; any other transport error
+    # means the request may have been accepted.
+    lines = result.stderr.strip().splitlines()
+    final = lines[-1] if lines else ""
+    if "CommunicationsTransportError" in final and "unavailable" not in final:
         print("share-doc: WorldOS response is uncertain; the document may already be "
               "delivered, so it is not resent", file=sys.stderr)
         return 75
-    error = (result.stderr.strip().splitlines() or ["client failed"])[-1]
-    return legacy(argv, error[:200], text)
+    return legacy(argv, (final or "client failed")[:200], text)
 
 
 if __name__ == "__main__":
