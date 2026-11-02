@@ -18,7 +18,7 @@
 #   say-voice <chat_id> < text.txt
 #   cat text.txt | SPEAK_TIMEOUT=30 say-voice 1676859445
 #
-# Token: claude_do_bot, from ~/.secrets/cpc.env (TELEGRAM_BOT_TOKEN) — same
+# Token: claude_dobot (current Director bot), from /srv/world/secrets/agents/claude-dobot/.env — same
 # source send-voice uses; never printed.
 set -uo pipefail
 
@@ -45,9 +45,9 @@ send_text_fallback() {
   echo "say-voice: voice path failed ($reason) — sending text fallback to chat ${CHAT_ID}" >&2
 
   local token
-  token=$(grep -E '^TELEGRAM_BOT_TOKEN=' ~/.secrets/cpc.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' ')
+  token=$(grep -h -m1 -o '[0-9]\{8,\}:AA[A-Za-z0-9_-]\{30,\}' /srv/world/secrets/agents/claude-dobot/.env)
   if [ -z "$token" ]; then
-    echo "say-voice: FATAL — no TELEGRAM_BOT_TOKEN in ~/.secrets/cpc.env, cannot send text fallback either" >&2
+    echo "say-voice: FATAL — no bot token in /srv/world/secrets/agents/claude-dobot/.env, cannot send text fallback either" >&2
     return 1
   fi
 
