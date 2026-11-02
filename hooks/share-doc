@@ -1,16 +1,193 @@
-#!/bin/bash
-# Compatibility entry point for WorldOS v2 document sharing.
-#
-# PostgreSQL custody, route selection, audio rendering, and Telegram delivery
-# belong to WorldOS. This wrapper deliberately owns none of them.
-set -euo pipefail
+#!/usr/bin/env python3
+"""share-doc: publish Markdown through the lane's WorldOS share_document path.
 
-client=${WORLDOS_SHARE_DOC_CLIENT:-/opt/worldos/current/plugins/worldos-communications/bin/share_doc.py}
+WorldOS owns publication, audio rendering (its speech worker and quota) and
+Telegram delivery. This wrapper keeps the legacy share-doc calling convention
+and maps it onto worldos-communications' share_doc.py:
 
-if [[ ! -x "$client" ]]; then
-  echo "error: WorldOS communications client is unavailable: $client" >&2
-  echo "       select a WorldOS release containing worldos-communications" >&2
-  exit 69
-fi
+  <markdown on stdin> | share-doc --to current [--no-audio]
+  echo /path/doc.md   | share-doc --chat-id ID [--thread-id ID] [--no-audio]
+  share-doc --to current --dry-run
 
-exec "$client" "$@"
+share_doc.py's own arguments (--conversation-id, --list-conversations, a file
+path, ...) pass straight through.
+
+Degrade, never gate: when the WorldOS path cannot run (no lane
+communications socket, no client, the broker refused before accepting), the
+legacy Telegram sender (share-doc-legacy) runs with the same arguments and
+input, after one stderr line saying so. An uncertain broker response (the
+request may have been accepted) never falls back, so a document is never
+sent twice.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+import uuid
+from pathlib import Path
+
+LEGACY = Path(__file__).resolve().parent / "share-doc-legacy"
+CLIENTS = (
+    Path("/opt/worldos/current/plugins/worldos-communications/bin/share_doc.py"),
+    Path.home() / "code/worldos/plugins/worldos-communications/bin/share_doc.py",
+)
+LEGACY_FLAGS = {"--no-audio", "--dry-run"}
+LEGACY_VALUES = {"--to", "--chat-id", "--thread-id", "--bot-env", "--bot-username"}
+UNRESOLVED = object()
+
+
+def legacy(argv: list[str], reason: str, stdin_text: str | None = None) -> int:
+    print(f"share-doc: WorldOS path unavailable ({reason}); using legacy sender", file=sys.stderr)
+    return subprocess.run([str(LEGACY), *argv], input=stdin_text, text=True).returncode
+
+
+def client() -> Path | None:
+    override = os.environ.get("WORLDOS_SHARE_DOC_CLIENT", "").strip()
+    for path in (Path(override),) if override else CLIENTS:
+        if path.is_file():
+            return path
+    return None
+
+
+def socket_ready() -> bool:
+    value = os.environ.get("WOS_COMMUNICATIONS_SOCKET", "").strip()
+    try:
+        return bool(value) and stat.S_ISSOCK(os.stat(value).st_mode)
+    except OSError:
+        return False
+
+
+def parse_legacy(argv: list[str]) -> dict[str, str | bool] | None:
+    """Legacy options, or None when argv is not a legacy invocation."""
+    options: dict[str, str | bool] = {}
+    index = 0
+    while index < len(argv):
+        name = argv[index]
+        if name in LEGACY_FLAGS:
+            options[name] = True
+            index += 1
+        elif name in LEGACY_VALUES and index + 1 < len(argv):
+            options[name] = argv[index + 1]
+            index += 2
+        else:
+            return None
+    return options
+
+
+def canonical(chat: object, thread: object) -> str | object:
+    chat_text = str(chat).strip()
+    thread_text = "root" if thread in (None, "") else str(thread).strip()
+    if not chat_text or any(mark in chat_text + thread_text for mark in "/:"):
+        return UNRESOLVED
+    return f"chat:{chat_text}/thread:{thread_text}"
+
+
+def destination(options: dict[str, str | bool]) -> str | None | object:
+    """WorldOS conversation id, None for the lane default, or UNRESOLVED."""
+    to, chat, thread = options.get("--to"), options.get("--chat-id"), options.get("--thread-id")
+    if to is None:
+        return UNRESOLVED if chat is None else canonical(chat, thread)
+    if to != "current" or chat is not None or thread is not None or "--bot-env" in options:
+        return UNRESOLVED
+    chat = os.environ.get("WORLDOS_CURRENT_CHAT_ID") or None
+    thread = os.environ.get("WORLDOS_CURRENT_THREAD_ID") or None
+    envelope_path = os.environ.get("WORLDOS_CURRENT_ENVELOPE_PATH")
+    if envelope_path:
+        try:
+            envelope = json.loads(Path(envelope_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return UNRESOLVED
+        if not isinstance(envelope, dict):
+            return UNRESOLVED
+        conversation = envelope.get("conversation")
+        conversation = conversation if isinstance(conversation, dict) else {}
+        raw = envelope.get("raw")
+        raw = raw if isinstance(raw, dict) else {}
+        found_chat = conversation.get("chat_id") or envelope.get("chat_id")
+        found_thread = (conversation.get("thread_id") or envelope.get("thread_id")
+                        or raw.get("message_thread_id"))
+        if chat and found_chat and str(chat) != str(found_chat):
+            return UNRESOLVED
+        if thread and found_thread and str(thread) != str(found_thread):
+            return UNRESOLVED
+        chat = chat or found_chat
+        thread = thread or found_thread
+    # No current-turn metadata: let WorldOS pick the lane's one conversation;
+    # it refuses (and we fall back) when the lane has more than one.
+    return None if not chat else canonical(chat, thread)
+
+
+def document(text: str) -> tuple[list[str], str | None] | None:
+    """Client arguments plus stdin for legacy input, or None without a title."""
+    trimmed = text.strip()
+    if "\n" not in trimmed and re.fullmatch(r"/.+\.md", trimmed) and Path(trimmed).is_file():
+        return [trimmed], None
+    first, _, body = text.partition("\n")
+    title = first.lstrip("#").strip()
+    if not title:
+        return None
+    return [], f"# {title}\n{body}"
+
+
+def main(argv: list[str]) -> int:
+    if argv[:1] in (["-h"], ["--help"]):
+        print(__doc__.strip(), file=sys.stderr)
+        print("\nLegacy sender usage (fallback):", file=sys.stderr)
+        return subprocess.run([str(LEGACY), "--help"]).returncode
+    found = client()
+    ready = found is not None and socket_ready()
+    options = parse_legacy(argv)
+    if options is None:  # share_doc.py's own interface
+        if not ready:
+            return legacy(argv, "no lane communications socket or client")
+        os.execv(sys.executable, [sys.executable, str(found), *argv])
+    target = destination(options)
+    if target is UNRESOLVED:
+        reason = "destination not resolvable to a WorldOS conversation"
+    elif not ready:
+        reason = "no lane communications socket or client"
+    else:
+        reason = ""
+    if options.get("--dry-run"):
+        if reason:
+            return legacy(argv, reason)
+        lane = os.environ.get("WOS_AGENT_ID", "unknown")
+        print(f"destination: worldos lane={lane} conversation={target or 'lane-default'} client={found}")
+        return 0
+    text = sys.stdin.read()
+    if reason:
+        return legacy(argv, reason, text)
+    parsed = document(text)
+    if parsed is None:
+        return legacy(argv, "no document title", text)
+    arguments, markdown = parsed
+    command = [sys.executable, str(found), *arguments,
+               "--idempotency-key", f"share-doc:{uuid.uuid4()}"]
+    if target is not None:
+        command += ["--conversation-id", str(target)]
+    if options.get("--no-audio"):
+        command.append("--no-audio")
+    result = subprocess.run(command, input=markdown, capture_output=True, text=True)
+    try:
+        response = json.loads(result.stdout)
+    except ValueError:
+        response = None
+    if result.returncode == 0 and isinstance(response, dict) and response.get("ok") is True:
+        sys.stdout.write(result.stdout)
+        return 0
+    if isinstance(response, dict) and response.get("ok") is False:
+        return legacy(argv, f"broker refused: {response.get('code', 'error')}", text)
+    if "uncertain" in result.stderr:
+        print("share-doc: WorldOS response is uncertain; the document may already be "
+              "delivered, so it is not resent", file=sys.stderr)
+        return 75
+    error = (result.stderr.strip().splitlines() or ["client failed"])[-1]
+    return legacy(argv, error[:200], text)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
