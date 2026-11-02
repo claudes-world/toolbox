@@ -671,9 +671,26 @@ def speaking_rate(role: str, backend: str) -> float:
     Chirp 3 HD's 1.0 is already a natural pace, so body runs slightly faster
     and every other role at 1.0.
     """
+    mult = rate_multiplier()
     if backend == "google":
-        return 1.05 if role == "body" else 1.0
-    return 1.155 if role == "body" else 1.045  # +10% from prior 1.05/0.95
+        return (1.05 if role == "body" else 1.0) * mult
+    return (1.155 if role == "body" else 1.045) * mult  # +10% from prior 1.05/0.95
+
+
+def rate_multiplier() -> float:
+    """MD_TTS_RATE_MULT scales every role's speaking rate (1.4 = 1.4x speed).
+
+    Applied at the TTS provider (Google speaking_rate, Kokoro --speed), so no
+    audio post-processing is needed. Google clamps to GOOGLE_RATE_RANGE.
+    """
+    raw = os.environ.get("MD_TTS_RATE_MULT", "").strip()
+    if not raw:
+        return 1.0
+    try:
+        return max(0.25, min(float(raw), 3.0))
+    except ValueError:
+        print(f"warning: ignoring MD_TTS_RATE_MULT={raw!r} (not a number)", file=sys.stderr)
+        return 1.0
 
 
 def _unescape_ssml(text: str) -> str:
@@ -824,7 +841,7 @@ def generate_ssml_audio(ssml: str, voice: str, output_path: str, rate: float = 1
         make_silence(output_path, 0.6)
         return
     # Google rates were relative to a slower base pace; Kokoro's 1.0 is natural.
-    speed = 1.1 if role == "body" else 1.0
+    speed = (1.1 if role == "body" else 1.0) * rate_multiplier()
     subprocess.run(
         [str(KOKORO_TTS_BIN), "--out", output_path, "--voice", KOKORO_VOICES[role],
          "--speed", str(speed)],
@@ -895,6 +912,21 @@ def add_mp3_metadata(
         )
 
     tags.save(file_path, v2_version=3)
+
+
+def normalize_loudness(path: str, target_lufs: float = -14.0, true_peak: float = -1.0):
+    """Bring the finished mp3 up to streaming loudness (Liam 15852, 2026-10-14: share-doc audio was ~-30 LUFS, inaudible on the street)."""
+    tmp = f"{path}.norm.mp3"
+    try:
+        subprocess.run(
+            ["ffmpeg", "-nostdin", "-i", path, "-af",
+             f"loudnorm=I={target_lufs}:TP={true_peak}:LRA=11", "-ar", "24000",
+             "-c:a", "libmp3lame", "-b:a", "128k", "-y", "-loglevel", "error", tmp],
+            check=True)
+        Path(tmp).replace(path)
+    except Exception as e:  # keep the un-normalized file rather than fail the share
+        print(f"  loudness normalization skipped: {e}", file=sys.stderr)
+        Path(tmp).unlink(missing_ok=True)
 
 
 def stitch_audio(parts: list[str], output_path: str):
@@ -1003,6 +1035,7 @@ def main():
 
         print(f"Stitching {len(parts)} audio parts...", file=sys.stderr)
         stitch_audio(parts, str(output))
+        normalize_loudness(str(output))
 
         # Add metadata (artist, title, album art)
         doc_title = md_path.stem.replace("-", " ").replace("_", " ").title()
