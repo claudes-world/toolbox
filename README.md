@@ -14,39 +14,45 @@ All tools use a shared Python venv at `~/venvs/transcribe/` and are symlinked in
 | [voice-hook](#voice-hook) | Claude Code hook: auto-transcribe Telegram voice notes |
 | [pulse](pulse/README.md) | GitHub org activity snapshots — open PRs, issues, releases, Dependabot |
 | [repair-telegram-mcp](#repair-telegram-mcp) | Repair Telegram MCP partial disconnects in a live Claude Code tmux session |
-| [share-doc](#share-doc) | Compatibility CLI for authoritative WorldOS document sharing |
+| [share-doc](#share-doc) | Share Markdown through WorldOS share_document, legacy sender as fallback |
 | [claude-was-wrong](#claude-was-wrong) | Tally Claude Code correction phrases and daily mistake frequency |
 
 ---
 
 ### share-doc
 
-Thin compatibility entry point for the `worldos-communications` plugin. It
-passes Markdown and explicit destination options to the current lane's
-credential-free communications broker. WorldOS owns publication, PostgreSQL
-custody, optional audio rendering, and Telegram delivery.
-
-Unlike the retired implementation, this command does not create files in a
-shared temporary directory, read Telegram bot-token files, or infer a current
-conversation. With multiple eligible routes, list them first and pass the
-selected conversation explicitly.
-
-**Setup:** run inside a managed WorldOS lane with the
-`worldos-communications` plugin loaded.
-
-**Usage:**
+Publishes Markdown through the current lane's WorldOS `share_document` path
+(`worldos-communications` `share_doc.py`). WorldOS owns publication, audio
+rendering on its speech worker (counted toward the quota), Telegram delivery
+and the auto-pin of the document message. The legacy calling convention keeps
+working:
 
 ```bash
-share-doc --list-conversations
-share-doc --conversation-id 'chat:-1001/thread:77' report.md
-share-doc --conversation-id 'chat:-1001/thread:77' --no-audio report.md
+printf '# Title\n\nBody\n' | share-doc --to current
+echo ~/claudes-world/tmp/report.md | share-doc --chat-id -1001 --thread-id 77 --no-audio
+share-doc --to current --dry-run          # prints the resolved destination
+share-doc --list-conversations            # share_doc.py arguments pass through
 ```
 
-**Files:** `hooks/share-doc` — wrapper that delegates to the selected WorldOS
-release.
+`--to current` uses `WORLDOS_CURRENT_CHAT_ID`/`WORLDOS_CURRENT_THREAD_ID` or
+`WORLDOS_CURRENT_ENVELOPE_PATH` when present, otherwise the lane's single
+conversation; no destination flag at all also means the lane's single
+conversation. `--chat-id`/`--thread-id` map to `chat:<id>/thread:<id|root>`;
+the lane's bound bot sends, so `--bot-env`/`--bot-username` only matter on the
+fallback path.
 
-**Cost:** provider-dependent TTS cost when audio is enabled; document-only
-delivery has no audio cost.
+**Degrade, never gate:** with no lane communications socket or client, an
+unresolvable destination, or a broker refusal before acceptance, `share-doc`
+prints one stderr line and runs `hooks/share-doc-legacy` (the direct Telegram
+sender) with the same arguments and input. An uncertain broker response (the
+request may have been accepted) also falls back, after one stderr line saying
+the document may arrive twice: a duplicate beats a lost message.
+
+**Files:** `hooks/share-doc` (wrapper), `hooks/share-doc-legacy` (fallback).
+`WORLDOS_SHARE_DOC_CLIENT` overrides the client path; the default is
+`/opt/worldos/current/...`, then `~/code/worldos/...`.
+
+**Cost:** TTS through the WorldOS speech worker when audio is enabled.
 
 ---
 
