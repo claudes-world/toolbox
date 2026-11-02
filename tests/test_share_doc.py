@@ -224,12 +224,13 @@ class ShareDocWorldOSTests(unittest.TestCase):
         self.assertEqual(result.returncode, 3)
         self.assertIn("also requires --bot-env", result.stderr)
 
-    def test_uncertain_response_is_never_resent_by_legacy(self):
+    def test_uncertain_response_falls_back_and_warns_of_duplicate(self):
         result = self.run_tool(
             "--chat-id", "123", env=self.lane("uncertain"), input_text="# Doc\n",
         )
-        self.assertEqual(result.returncode, 75)
-        self.assertNotIn("legacy", result.stderr)
+        self.assertIn("may arrive twice", result.stderr)
+        self.assertIn("using legacy sender", result.stderr)
+        self.assertEqual(result.returncode, 3)
         self.assertEqual(len(self.calls()), 1)
 
     def test_refused_connect_falls_back_despite_traceback_wording(self):

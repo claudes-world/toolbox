@@ -44,8 +44,9 @@ fallback path.
 **Degrade, never gate:** with no lane communications socket or client, an
 unresolvable destination, or a broker refusal before acceptance, `share-doc`
 prints one stderr line and runs `hooks/share-doc-legacy` (the direct Telegram
-sender) with the same arguments and input. An uncertain broker response exits
-75 and is never resent.
+sender) with the same arguments and input. An uncertain broker response (the
+request may have been accepted) also falls back, after one stderr line saying
+the document may arrive twice: a duplicate beats a lost message.
 
 **Files:** `hooks/share-doc` (wrapper), `hooks/share-doc-legacy` (fallback).
 `WORLDOS_SHARE_DOC_CLIENT` overrides the client path; the default is

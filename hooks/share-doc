@@ -16,8 +16,8 @@ Degrade, never gate: when the WorldOS path cannot run (no lane
 communications socket, no client, the broker refused before accepting), the
 legacy Telegram sender (share-doc-legacy) runs with the same arguments and
 input, after one stderr line saying so. An uncertain broker response (the
-request may have been accepted) never falls back, so a document is never
-sent twice.
+request may have been accepted) also falls back, after one stderr line saying
+the document may arrive twice: a duplicate beats a lost message.
 """
 from __future__ import annotations
 
@@ -190,13 +190,13 @@ def main(argv: list[str]) -> int:
     # Judge only the exception line: traceback source lines mention
     # "uncertain" even when connect failed. CommunicationsTransportError says
     # "... unavailable" when nothing was written; any other transport error
-    # means the request may have been accepted.
+    # means the request may have been accepted. Either way the legacy sender
+    # runs: a duplicate beats a lost message.
     lines = result.stderr.strip().splitlines()
     final = lines[-1] if lines else ""
     if "CommunicationsTransportError" in final and "unavailable" not in final:
-        print("share-doc: WorldOS response is uncertain; the document may already be "
-              "delivered, so it is not resent", file=sys.stderr)
-        return 75
+        print("share-doc: WorldOS response is uncertain; the document may arrive twice",
+              file=sys.stderr)
     return legacy(argv, (final or "client failed")[:200], text)
 
 
