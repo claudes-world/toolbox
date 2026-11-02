@@ -101,6 +101,7 @@ GOOGLE_SA_PATH = Path.home() / ".secrets" / "gcp-tts-sa.json"
 
 
 def speak_google(text: str, voice: str, ogg: bool) -> tuple[bytes, str]:
+    raise RuntimeError("Google Cloud TTS is disabled for v1 speech (Liam, 2026-10-06 msg 28: the bill exceeded the free tier).")
     os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", str(GOOGLE_SA_PATH))
 
     from google.cloud import texttospeech

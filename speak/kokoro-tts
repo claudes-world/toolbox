@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""kokoro-tts — render text to speech with Kokoro-82M on the dev-mac speech lab.
+
+Usage:
+    echo "Hello" | kokoro-tts --out hello.ogg
+    kokoro-tts --out doc.mp3 --voice am_adam --speed 1.1 < text.txt
+
+Text is read from stdin. The output format follows the --out extension:
+.ogg (Opus, for Telegram voice notes), .mp3, or .wav.
+
+Kokoro runs on dev-mac (`~/speech-lab`, MLX) over SSH because do-box renders
+at about 1x realtime under its usual load while dev-mac renders about 4x
+faster (measured 2026-10-06). It is free and local; it replaces Google Cloud
+TTS, which v1 speech stopped using on 2026-10-06 (Liam, msg 28).
+
+Exit status is non-zero with a one-line stderr message on any failure, and no
+partial output file is left behind.
+"""
+import argparse
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+HOST = os.environ.get("KOKORO_HOST", "dev-mac")
+REMOTE_PYTHON = "~/speech-lab/.venv/bin/python"
+MODEL = "mlx-community/Kokoro-82M-bf16"
+DEFAULT_VOICE = os.environ.get("KOKORO_VOICE", "am_onyx")
+TIMEOUT_S = int(os.environ.get("KOKORO_TIMEOUT", "300"))
+
+# Runs on dev-mac: text on stdin, one joined WAV on stdout.
+REMOTE_SCRIPT = r"""
+import glob, os, shutil, sys, tempfile
+from contextlib import redirect_stdout
+from mlx_audio.tts.generate import generate_audio
+voice, speed, model = sys.argv[1], float(sys.argv[2]), sys.argv[3]
+text = sys.stdin.read()
+d = tempfile.mkdtemp(prefix="kokoro-tts-")
+try:
+    with redirect_stdout(sys.stderr):
+        generate_audio(text=text, model=model, voice=voice, speed=speed, lang_code="a",
+                       output_path=d, file_prefix="out", join_audio=True, verbose=False)
+    # join_audio writes out.wav when Kokoro split the text into segments;
+    # a single-segment render leaves exactly one file.
+    joined = os.path.join(d, "out.wav")
+    wavs = glob.glob(os.path.join(d, "*.wav"))
+    if not os.path.exists(joined) and len(wavs) != 1:
+        sys.exit(f"expected one joined wav, found {len(wavs)}")
+    with open(joined if os.path.exists(joined) else wavs[0], "rb") as f:
+        sys.stdout.buffer.write(f.read())
+finally:
+    shutil.rmtree(d, ignore_errors=True)
+"""
+
+ENCODERS = {
+    ".ogg": ["-c:a", "libopus", "-b:a", "48k"],
+    ".mp3": ["-c:a", "libmp3lame", "-q:a", "4"],
+    ".wav": [],
+}
+
+
+def fail(message: str) -> None:
+    print(f"kokoro-tts: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def render_wav(text: str, voice: str, speed: float) -> bytes:
+    import shlex
+
+    remote = " ".join(
+        [REMOTE_PYTHON, "-c", shlex.quote(REMOTE_SCRIPT), shlex.quote(voice), str(speed), MODEL]
+    )
+    try:
+        result = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", HOST, remote],
+            input=text.encode(),
+            capture_output=True,
+            timeout=TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        fail(f"{HOST} render timed out after {TIMEOUT_S}s")
+    if result.returncode != 0 or not result.stdout.startswith(b"RIFF"):
+        tail = result.stderr.decode(errors="replace").strip().splitlines()[-1:] or ["(no stderr)"]
+        fail(f"{HOST} render failed (exit {result.returncode}): {tail[0]}")
+    return result.stdout
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Text to speech with Kokoro on dev-mac")
+    parser.add_argument("--out", type=Path, required=True, help=".ogg, .mp3 or .wav output path")
+    parser.add_argument("--voice", default=DEFAULT_VOICE)
+    parser.add_argument("--speed", type=float, default=1.0)
+    args = parser.parse_args()
+
+    suffix = args.out.suffix.lower()
+    if suffix not in ENCODERS:
+        fail(f"unsupported output extension {suffix!r} (use .ogg, .mp3 or .wav)")
+    text = sys.stdin.read().strip()
+    if not text:
+        fail("no text on stdin")
+
+    wav = render_wav(text, args.voice, args.speed)
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(suffix=suffix, dir=args.out.parent)
+    os.close(fd)
+    try:
+        encode = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", "pipe:0", *ENCODERS[suffix], tmp],
+            input=wav,
+            capture_output=True,
+        )
+        if encode.returncode != 0:
+            fail(f"ffmpeg failed: {encode.stderr.decode(errors='replace').strip()[:300]}")
+        os.replace(tmp, args.out)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+if __name__ == "__main__":
+    main()
