@@ -2,121 +2,189 @@
 """Estimate Codex API-equivalent cost from local rollout logs."""
 
 import argparse
-import glob
 import json
 import os
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-# Per-million-token prices: uncached input, cached input, output.
-# Checked against official OpenAI pricing on 2026-07-10.
-PRICING = [
-    ("gpt-5.6-sol", (5.00, 0.50, 30.00)),
-    ("gpt-5.6-terra", (2.50, 0.25, 15.00)),
-    ("gpt-5.6-luna", (1.00, 0.10, 6.00)),
-    ("gpt-5.5", (5.00, 0.50, 30.00)),
-    ("gpt-5.4-mini", (0.75, 0.075, 4.50)),
-    ("gpt-5.4", (2.50, 0.25, 15.00)),
-    ("gpt-5", (1.25, 0.125, 10.00)),
-]
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from cost_accounting import (OPENAI, LONG_CONTEXT, model_key, rates_for, accounting_blank,
+                             add_issue, account, merge_accounting, accounting_json,
+                             pricing_metadata, print_accounting)
+
+from codex_cost_core import Progress, file_records, parse_timestamp
+
+# Verified rates and exact model matching are shared with claude-cost.
+PRICING = OPENAI
 
 
 def price_for(model):
-    for key, prices in PRICING:
-        if key in model:
-            return key, prices
-    return "other", (2.50, 0.25, 15.00)
+    key = model_key(model, "openai")
+    return key, PRICING.get(key)
+
+
+BASE_FIELDS = ("calls", "fresh_in", "cache_read", "cache_write", "cache_unknown", "out", "cost", "naive")
+OUTPUT_KINDS = ("reasoning", "non_reasoning", "unclassified")
+BAND_LABELS = {"le_272k": "<=272k", "gt_272k": ">272k"}
 
 
 def blank():
-    return dict(calls=0, fresh_in=0, cache_read=0, out=0, cost=0.0, naive=0.0)
+    return dict(calls=0, fresh_in=0, cache_read=0, cache_write=0, cache_unknown=0,
+                out=0, cost=0.0, naive=0.0, **accounting_blank(),
+                output_breakdown={kind: {"tokens": 0, "cost": 0.0} for kind in OUTPUT_KINDS})
 
 
-def parse_timestamp(value):
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            return None
-        return parsed.astimezone(timezone.utc)
-    except (TypeError, ValueError):
-        return None
-
-
-def parse(sessions_dir, cutoff, model_filter):
+def parse(sessions_dir, cutoff, model_filter, *, workers=None, use_cache=True,
+          full_scan=False, progress=None):
     by_model, by_project = defaultdict(blank), defaultdict(blank)
-    files = glob.glob(os.path.join(sessions_dir, "**", "*.jsonl"), recursive=True)
-    for fp in files:
-        model, project = "", "unknown"
-        try:
-            with open(fp, errors="ignore") as handle:
-                for line in handle:
-                    try:
-                        obj = json.loads(line)
-                    except (TypeError, ValueError):
-                        continue
-                    payload = obj.get("payload") or {}
-                    if obj.get("type") == "session_meta":
-                        project = payload.get("cwd") or project
-                        continue
-                    if obj.get("type") == "turn_context":
-                        model = (payload.get("model") or model).lower()
-                        project = payload.get("cwd") or project
-                        continue
-                    if obj.get("type") != "event_msg" or payload.get("type") != "token_count":
-                        continue
-                    timestamp = parse_timestamp(obj.get("timestamp"))
-                    if cutoff is not None and (timestamp is None or timestamp < cutoff):
-                        continue
-                    if not model or (model_filter and model_filter not in model):
-                        continue
-                    usage = ((payload.get("info") or {}).get("last_token_usage") or {})
-                    if not usage:
-                        continue
-                    total_in = usage.get("input_tokens", 0) or 0
-                    cached = usage.get("cached_input_tokens", 0) or 0
-                    fresh = max(total_in - cached, 0)
-                    output = usage.get("output_tokens", 0) or 0
-                    key, (pin, pcache, pout) = price_for(model)
-                    cost = (fresh * pin + cached * pcache + output * pout) / 1e6
-                    naive = (total_in * pin + output * pout) / 1e6
-                    for agg in (by_model[key], by_project[project]):
-                        agg["calls"] += 1
-                        agg["fresh_in"] += fresh
-                        agg["cache_read"] += cached
-                        agg["out"] += output
-                        agg["cost"] += cost
-                        agg["naive"] += naive
-        except OSError as exc:
-            print(f"warning: could not read {fp}: {exc}", file=sys.stderr)
+    progress = progress if progress is not None else Progress(enabled=False)
+    cutoff_seconds = cutoff.timestamp() if cutoff is not None else None
+    for rows in file_records(sessions_dir, cutoff, progress, workers=workers,
+                             use_cache=use_cache, full_scan=full_scan):
+        for timestamp, model, project, total_in, cached, output, reasoning, writes, tier, geo, invalid in rows:
+            if cutoff_seconds is not None and (timestamp is None or timestamp < cutoff_seconds):
+                continue
+            if model_filter and model_filter not in model:
+                continue
+            key, base = price_for(model)
+            aggregates = [by_model[key], by_project[project]]
+            if invalid:
+                for agg in aggregates:
+                    add_issue(agg, invalid, "invalid_calls")
+                continue
+            if key in LONG_CONTEXT:
+                if "context_bands" not in by_model[key]:
+                    by_model[key]["context_bands"] = {band: blank() for band in BAND_LABELS}
+                band = "gt_272k" if total_in > 272_000 else "le_272k"
+                aggregates.append(by_model[key]["context_bands"][band])
+            rates, assumptions, issue = rates_for("openai", key, total_in,
+                                                 {"service_tier": tier, "inference_geo": geo})
+            if base and base[2] is None and writes:
+                issue, rates = "unexpected separate writes for legacy model", None
+            unknown = total_in - cached if writes is None and (not base or base[2] is not None) else 0
+            writes = writes or 0
+            fresh = total_in - cached - writes - unknown
+            cost = naive = extra = 0.0
+            pin = pcache = pwrite = pout = 0.0
+            if rates:
+                pin, pcache, pwrite, pout = rates
+                pwrite = pwrite or 0
+                cost = (fresh * pin + cached * pcache + writes * pwrite + unknown * pin + output * pout) / 1e6
+                naive = (total_in * pin + output * pout) / 1e6
+                extra = unknown * (pwrite - pin) / 1e6
+            split = ({"unclassified": output} if reasoning is None else
+                     {"reasoning": reasoning, "non_reasoning": output - reasoning})
+            categories = {"fresh": (fresh, fresh * pin / 1e6),
+                          "cache_read": (cached, cached * pcache / 1e6),
+                          "cache_write": (writes, writes * pwrite / 1e6),
+                          "cache_unknown": (unknown, unknown * pin / 1e6)}
+            for agg in aggregates:
+                for field, value in zip(BASE_FIELDS, (1, fresh, cached, writes, unknown, output, cost, naive)):
+                    agg[field] += value
+                account(agg, categories, extra, assumptions)
+                if issue:
+                    add_issue(agg, issue)
+                for kind, tokens in split.items():
+                    agg["output_breakdown"][kind]["tokens"] += tokens
+                    agg["output_breakdown"][kind]["cost"] += tokens * pout / 1e6
     return by_model, by_project
 
 
 def totals(groups):
     total = blank()
     for agg in groups.values():
-        for key in total:
+        for key in BASE_FIELDS:
             total[key] += agg[key]
+        merge_accounting(total, agg)
+        for kind, bucket in agg["output_breakdown"].items():
+            for field in ("tokens", "cost"):
+                total["output_breakdown"][kind][field] += bucket[field]
     return total
+
+
+def percentage(value, total):
+    return round(100 * value / total, 1) if total else 0.0
+
+
+def token_total(agg):
+    return agg["fresh_in"] + agg["cache_read"] + agg["cache_write"] + agg["cache_unknown"] + agg["out"]
+
+
+def output_split(agg):
+    split = agg["output_breakdown"]
+    output_cost = sum(bucket["cost"] for bucket in split.values())
+    return {kind: {"tokens": bucket["tokens"],
+                   "token_pct": percentage(bucket["tokens"], agg["out"]),
+                   "cost_usd": round(bucket["cost"], 2),
+                   "cost_pct": percentage(bucket["cost"], output_cost)}
+            for kind, bucket in split.items()}
+
+
+def model_json(agg, parent=None):
+    result = {key: agg[key] for key in ("calls", "fresh_in", "cache_read", "cache_write", "cache_unknown", "out")}
+    result.update(cost_usd=round(agg["cost"], 2), output_breakdown=output_split(agg), **accounting_json(agg))
+    if parent is not None:
+        result.update(total_tokens=token_total(agg),
+                      token_pct=percentage(token_total(agg), token_total(parent)),
+                      cost_pct=percentage(agg["cost"], parent["cost"]))
+    if "context_bands" in agg:
+        result["context_bands"] = {band: model_json(stats, agg)
+                                   for band, stats in agg["context_bands"].items()}
+    return result
+
+
+def compact_tokens(value):
+    if value >= 1_000_000:
+        return f"{value / 1e6:.2f}M"
+    if value >= 1_000:
+        return f"{value / 1e3:.1f}K"
+    return str(value)
+
+
+def human_row(label, agg, parent=None):
+    shares = (f" {percentage(token_total(agg), token_total(parent)):>6.1f}%"
+              f" {percentage(agg['cost'], parent['cost']):>6.1f}%") if parent is not None else ""
+    print(f"{label:15} {agg['calls']:>7} {compact_tokens(agg['fresh_in']):>9} "
+          f"{compact_tokens(agg['cache_read']):>9} {compact_tokens(agg['cache_write']):>9} "
+          f"{compact_tokens(agg['cache_unknown']):>9} {compact_tokens(agg['out']):>9} "
+          f"{agg['cost']:>10.2f}{shares}")
 
 
 def human(by_model, by_project, label, show_projects):
     print(f"Codex API-equivalent cost — {label}")
-    print(f"{'model':15} {'calls':>7} {'fresh':>9} {'cached':>9} {'output':>9} {'cost$':>10}")
-    print("-" * 65)
+    has_bands = any("context_bands" in a for a in by_model.values())
+    suffix = "  token%   cost%" if has_bands else ""
+    print(f"{'model':15} {'calls':>7} {'fresh':>9} {'cache_rd':>9} {'cache_wr':>9} {'unknown':>9} {'output':>9} {'cost$':>10}{suffix}")
+    print("-" * (116 if has_bands else 100))
     for key, agg in sorted(by_model.items(), key=lambda item: -item[1]["cost"]):
-        print(f"{key:15} {agg['calls']:>7} {agg['fresh_in']/1e6:>8.1f}M "
-              f"{agg['cache_read']/1e6:>8.1f}M {agg['out']/1e6:>8.1f}M {agg['cost']:>10.2f}")
+        human_row(key, agg)
+        for band, stats in agg.get("context_bands", {}).items():
+            human_row("  " + BAND_LABELS[band], stats, agg)
+    if has_bands:
+        print("Band shares: % of each model's input + output tokens, and cost.")
     total = totals(by_model)
     print("-" * 65)
-    total_input = total["fresh_in"] + total["cache_read"]
+    total_input = token_total(total) - total["out"]
     cache_pct = 100 * total["cache_read"] / max(total_input, 1)
     print(f"input-side tokens: {total_input/1e6:.1f}M  |  cache-served: {cache_pct:.0f}%  |  "
           f"output tokens: {total['out']/1e6:.1f}M")
-    print(f"TOTAL (list): ${total['cost']:,.2f}   |   naive without caching: ${total['naive']:,.2f}")
+    print(f"TOTAL (current API token prices): ${total['cost']:,.2f}   |   naive without caching: ${total['naive']:,.2f}")
     print(f"Caching saved ~${total['naive'] - total['cost']:,.2f}")
+    print_accounting(total)
+    print("\nOutput breakdown (percentages are shares of each row's output tokens/cost):")
+    print(f"{'model / band':17} {'type':14} {'tokens':>9} {'token%':>7} {'cost$':>10} {'cost%':>7}")
+    for key, agg in sorted(by_model.items(), key=lambda item: -item[1]["cost"]):
+        rows = [(key, agg)] + [("  " + BAND_LABELS[band], stats)
+                               for band, stats in agg.get("context_bands", {}).items()]
+        for label, stats in rows:
+            for kind, bucket in output_split(stats).items():
+                if kind == "unclassified" and not bucket["tokens"]:
+                    continue
+                print(f"{label:17} {kind.replace('_', '-'):14} {compact_tokens(bucket['tokens']):>9} "
+                      f"{bucket['token_pct']:>6.1f}% {bucket['cost_usd']:>10.2f} {bucket['cost_pct']:>6.1f}%")
+                label = ""
     if show_projects:
         print("\nby project (top 12 by cost):")
         for project, agg in sorted(by_project.items(), key=lambda item: -item[1]["cost"])[:12]:
@@ -125,21 +193,23 @@ def human(by_model, by_project, label, show_projects):
 
 def output_json(by_model, by_project, label, since_iso, show_projects):
     total = totals(by_model)
-    total_input = total["fresh_in"] + total["cache_read"]
+    total_input = token_total(total) - total["out"]
     result = {
         "window": label, "since_utc": since_iso,
         "total_input_tokens": total_input,
         "fresh_input_tokens": total["fresh_in"],
         "cached_input_tokens": total["cache_read"],
+        "cache_write_input_tokens": total["cache_write"],
+        "unclassified_input_tokens": total["cache_unknown"],
+        **pricing_metadata("openai"), **accounting_json(total),
         "output_tokens": total["out"],
         "total_tokens": total_input + total["out"],
         "cache_read_pct": round(100 * total["cache_read"] / max(total_input, 1), 1),
         "total_cost_usd": round(total["cost"], 2),
         "naive_cost_usd": round(total["naive"], 2),
         "cache_saved_usd": round(total["naive"] - total["cost"], 2),
-        "by_model": {key: {**{k: v for k, v in agg.items() if k not in ("cost", "naive")},
-                           "cost_usd": round(agg["cost"], 2)}
-                     for key, agg in sorted(by_model.items(), key=lambda item: -item[1]["cost"])},
+        "by_model": {key: model_json(agg) for key, agg in
+                     sorted(by_model.items(), key=lambda item: -item[1]["cost"])},
     }
     if show_projects:
         result["by_project"] = {key: round(agg["cost"], 2) for key, agg in
@@ -156,7 +226,13 @@ def main():
     parser.add_argument("--model", help="only model IDs containing this substring")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--sessions-dir", default=os.path.expanduser("~/.codex/sessions"))
+    parser.add_argument("--workers", type=int, help="maximum parsing processes (default: up to 4 CPUs)")
+    parser.add_argument("--no-cache", action="store_true", help="bypass the persistent transcript cache")
+    parser.add_argument("--full-scan", action="store_true", help="read files regardless of modification time")
+    parser.add_argument("--no-progress", action="store_true", help="suppress progress on stderr")
     args = parser.parse_args()
+    if args.workers is not None and args.workers < 1:
+        parser.error("--workers must be at least 1")
     if args.days < 0:
         parser.error("--days must be zero or greater")
     try:
@@ -172,7 +248,14 @@ def main():
         parser.error("--since must be a valid date in YYYY-MM-DD format")
     if not os.path.isdir(args.sessions_dir):
         parser.error(f"sessions dir not found: {args.sessions_dir}")
-    by_model, by_project = parse(args.sessions_dir, cutoff, (args.model or "").lower())
+    try:
+        with Progress(enabled=not args.no_progress) as progress:
+            by_model, by_project = parse(
+                args.sessions_dir, cutoff, (args.model or "").lower(), workers=args.workers,
+                use_cache=not args.no_cache, full_scan=args.full_scan, progress=progress,
+            )
+    except KeyboardInterrupt:
+        return 130
     if not by_model:
         print("no usage found in window", file=sys.stderr)
         return
@@ -183,4 +266,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
