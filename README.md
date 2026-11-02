@@ -238,12 +238,23 @@ agent-health-mcp-check SESSION  # MCP_OK, MCP_MISSING:<reason>, or MCP_UNKNOWN:<
 
 ### claude-was-wrong
 
-Scans local Claude Code session transcripts for assistant-authored correction and
-admission phrases such as "I was wrong," "you're/you are/you were right," "my
-mistake," "sorry/I'm sorry/I am sorry," and "good catch." It prints a phrase
-tally plus a daily table in Eastern Time. Daily
-admissions count matching assistant messages, so a message containing multiple
-tracked phrases is counted only once in the daily trend.
+Analyzes visible assistant replies in local Claude Code transcripts for admitted
+mistakes, user vindication, corrections, and explicit apologies. The default TUI
+features the combined "you were right and I was wrong" family, then shows
+response-normalized rates, daily and seven-day trends, category/phrase totals,
+main-agent versus sub-agent populations, context fullness, time-of-day patterns,
+and roughest/cleanest active days. Dates and hours are reported in Eastern Time.
+
+Exact, high-confidence matches drive the headline metrics. A separate probable
+tier catches fuzzier language such as "I missed..." for auditing without silently
+inflating the exact count. Standalone `sorry` is intentionally excluded; explicit
+forms such as "I'm sorry," "I am sorry," "I apologize," and "sorry about/for/that"
+are counted. One reply can contain several phrases, but counts as one admission
+response in rates and timelines.
+
+The first run builds a local SQLite index and may take a while on a large archive.
+Later runs scan only appended or changed transcript data. Resolved paths and
+copied message IDs are deduplicated.
 
 **Setup:** No credentials or third-party packages are required. Symlink the
 repository-owned executable into `~/bin`:
@@ -259,18 +270,42 @@ claude-was-wrong                  # last 30 ET calendar days
 claude-was-wrong --days 7         # today and the previous 6 ET days
 claude-was-wrong --all            # entire transcript archive
 claude-was-wrong --days 90 --json # machine-readable output
+claude-was-wrong --html report.html
+claude-was-wrong --audit probable
+claude-was-wrong --audit exact --include-snippets
+claude-was-wrong --population main --model opus
+claude-was-wrong --since 2026-01-01 --project toolbox
+claude-was-wrong --context-window sonnet=1000000
+claude-was-wrong --rebuild-index
 ```
 
-Set `CLAUDE_TRANSCRIPTS_DIR` or pass `--transcripts-dir PATH` to scan a different
-archive root.
+The HTML report is self-contained, responsive, and includes interactive
+population/model/project filters, a timeline, context and time heatmaps, phrase
+charts, and an audit table. Snippets are omitted by default. When explicitly
+enabled, matched clauses are locally redacted for common secrets, paths, and
+email addresses, but the generated report should still be treated as private.
+
+Set `CLAUDE_TRANSCRIPTS_DIR` or pass `--transcripts-dir PATH` for another archive.
+Set `CLAUDE_WAS_WRONG_STATE_DIR` or pass `--state-dir PATH` to move the index.
+The default state is `~/.world/claude-was-wrong/index.sqlite3` with private
+directory/file permissions.
+
+Context fullness is an estimate: usage is input plus cache-read plus
+cache-creation tokens divided by a model-family context-window mapping. Use
+repeatable `--context-window MODEL=TOKENS` overrides when the mapping is wrong.
+Results describe language in replies, not independently verified model errors,
+and sparse rates or correlations should not be read as causal.
 
 **Files:**
 
-- `claude-was-wrong/claude-was-wrong` — standalone transcript scanner
-- `tests/test_claude_was_wrong.py` — focused scanner and filtering tests
+- `claude-was-wrong/claude-was-wrong` — command-line entry point
+- `claude-was-wrong/cww_core.py` — index, classifier, and metrics
+- `claude-was-wrong/cww_render.py` — TUI, JSON, audit, and HTML renderers
+- `tests/test_claude_was_wrong.py` — classifier, index, privacy, and report tests
 - `~/.claude/projects/**/*.jsonl` — read-only input transcripts
+- `~/.world/claude-was-wrong/index.sqlite3` — private incremental index
 
-**Cost:** No paid API calls; it only reads local files.
+**Cost:** No paid API calls and no network requests; it only reads local files.
 
 ---
 
@@ -309,6 +344,54 @@ Standalone tools that don't have their own README section yet.
 | tag-mp3 | Tag an mp3 file with ID3 metadata and optional album art | `tag-mp3/` |
 | tg-sanitize | Telegram MarkdownV2 sanitizer — escapes special characters for safe bot messages | `tg-sanitize/` |
 
+### claude-cost
+
+Estimates current Claude API token costs from `~/.claude/projects/**/*.jsonl`,
+including subagents. Reads, 5-minute writes, 1-hour writes, and ordinary input
+are billed separately. Completed usage replaces partial streaming usage for
+the same message ID, including copies in other transcripts. Nested iteration
+and thinking counts are not added to the already aggregated token totals.
+
+```bash
+claude-cost                      # last 3 days
+claude-cost --days 7 --by-project
+claude-cost --model fable-5-1 --json
+claude-cost --all
+claude-cost --no-progress         # suppress progress on stderr
+```
+
+No credentials or dependencies are needed. Files: `claude-cost/claude-cost`
+(symlinked from `~/bin/claude-cost`) and the shared `cost_accounting.py` at the
+repository root. Keep the shared module with the repository when installing.
+The tool makes no API calls and costs nothing to run.
+
+Progress uses the same `cost_progress.py` renderer as Codex: terminals show a
+progress bar with file/byte counts, elapsed time, and ETA, followed by cost
+calculation status. Redirected stderr receives occasional plain-text updates.
+Progress stays on stderr, so `--json` remains clean; `--no-progress` hides it.
+
+Current standard/global prices, checked **2026-09-12**, in USD per million tokens:
+
+| Model | Ordinary input | Cache read | 5m write | 1h write | Output |
+|---|---:|---:|---:|---:|---:|
+| Fable 5.1 / Mythos 5.1 | 10 | 0.25 | 12.50 | 20 | 50 |
+| Fable 5 / Mythos 5 | 10 | 1 | 12.50 | 20 | 50 |
+| Opus 5 | 5 | 0.50 | 6.25 | 10 | 25 |
+| Sonnet 5 | 2 | 0.20 | 2.50 | 4 | 10 |
+| Haiku 4.5 | 1 | 0.10 | 1.25 | 2 | 5 |
+
+[Official Claude pricing](https://platform.claude.com/docs/en/about-claude/pricing).
+Sonnet 5's former introductory price is now permanent. Claude 5 has no
+long-context premium. Opus 5/4.8 Fast doubles standard token rates; Batch
+halves rates. Supported US-only inference multiplies all token rates by 1.1.
+Recorded billing metadata determines these modifiers. Existing explicit
+Opus 4.5–4.8 and Sonnet 4.5/4.6 models remain supported.
+
+JSON preserves `cache_write` as the combined write count and adds
+`cache_write_5m`, `cache_write_1h`, and `cache_write_unknown` per model.
+`total_cost_intro_usd` is deprecated and now equals `total_cost_usd`.
+The common reporting conventions below apply to both tools.
+
 ### codex-cost
 
 Estimates the metered OpenAI API equivalent of local Codex usage. It reads
@@ -318,8 +401,25 @@ the amount billed for a ChatGPT or Codex subscription. Human output includes
 aggregate input/output token totals and cache percentage; JSON includes the
 exact integer totals.
 
+Astra, Sol, Terra, Luna, GPT-5.5, and GPT-5.4 have two context subrows:
+`<=272k` and `>272k` total input tokens (including cache reads and writes).
+Their percentages show each band's share of its model's input-plus-output
+tokens and cost. They subdivide the model total; they do not add charges.
+JSON exposes these as `by_model.<model>.context_bands.le_272k` and `gt_272k`.
+
+An output breakdown for every model and context band separates reasoning from
+non-reasoning output, with token counts, output-token percentages, attributed
+output costs, and output-cost percentages. Reasoning is already included in
+output tokens. Non-reasoning output includes tool calls and formatting, not
+just final answers. Missing or invalid reasoning counts are shown as
+`unclassified`. JSON's `output_breakdown` contains `reasoning`, `non_reasoning`,
+and `unclassified` entries with `tokens`, `token_pct`, `cost_usd`, and `cost_pct`.
+
 Setup: no credentials or third-party packages are required. The executable is
-`codex-cost/codex-cost`, symlinked as `~/bin/codex-cost`.
+`codex-cost/codex-cost`, symlinked as `~/bin/codex-cost`, with its sibling
+`codex_cost_core.py` providing parsing, caching, and progress. Shared verified
+rates and reporting helpers live in the repository-root `cost_accounting.py`;
+`cost_progress.py` provides the shared stderr progress display.
 
 ```bash
 codex-cost                     # last 3 days
@@ -327,12 +427,99 @@ codex-cost --days 7
 codex-cost --since 2026-07-01
 codex-cost --by-project
 codex-cost --model gpt-5.6-sol
+codex-cost --model gpt-6-astra
 codex-cost --json
+codex-cost --workers 1          # sequential parsing; default caps workers at 4
+codex-cost --no-cache           # bypass persistent cache reads and writes
+codex-cost --full-scan          # ignore transcript modification times
+codex-cost --no-progress       # suppress progress messages
 ```
 
-The tool itself makes no API calls and therefore costs nothing to run. Its
-embedded per-token prices were checked against official OpenAI pricing on
-2026-07-10 and should be reviewed when model pricing changes.
+Bounded reports skip transcripts whose modification time predates the cutoff,
+then check timestamps inside the remaining files. Recently resumed sessions
+are included even when stored in old date directories. This assumes normal
+local log timestamps are consistent with file modification times; use
+`--full-scan` for imported or timestamp-altered logs. `--all` disables the time
+filter while retaining cache benefits.
+
+The disposable SQLite cache lives under
+`${XDG_CACHE_HOME:-~/.cache}/codex-cost/<sessions-directory-hash>.sqlite3`.
+It stores normalized usage counts and metadata, not transcript text or prices.
+Unchanged files are reused across date/model filters; changed files are fully
+reparsed. Each canonical sessions directory has its own cache, and cache errors
+fall back to reading logs. New or changed files are parsed in parallel when at
+least two files and 16 MiB of data need reading.
+
+Progress goes to stderr, keeping JSON on stdout clean. Terminals show an updating
+bar with file/byte counts, elapsed time, and ETA. Redirected stderr receives
+plain updates at most every five seconds, plus initial and final status.
+
+The tool itself makes no API calls and costs nothing to run. Current prices,
+checked **2026-09-12**, in USD per million tokens (Standard, <=272k input):
+
+| Model | Ordinary input | Cache read | Cache write | Output |
+|---|---:|---:|---:|---:|
+| GPT-6 Astra | 10 | 1 | 12.50 | 50 |
+| GPT-5.6 Sol | 4 | 0.40 | 5 | 20 |
+| GPT-5.6 Terra | 2 | 0.20 | 2.50 | 12 |
+| GPT-5.6 Luna | 0.20 | 0.02 | 0.25 | 1.20 |
+| GPT-5.6 Cyber | 12.50 | 1.25 | 15.625 | 75 |
+
+[Official OpenAI pricing](https://developers.openai.com/api/docs/pricing).
+For Astra/Sol/Terra/Luna, requests above 272,000 input tokens use 2×
+input/read/write rates and 1.5× output rates for the entire request.
+Fast/Priority doubles these rates; Batch/Flex halves them. Cyber has only
+verified Standard short-context pricing; other combinations are unpriced.
+Sol's promotional rates are available at least through **November 21, 2026**;
+recheck the official page then instead of assuming a replacement price.
+Existing GPT-5.5, GPT-5.4, GPT-5.4-mini, and GPT-5 rates remain supported,
+including their own documented context/tier rules.
+
+Ordinary input is `input_tokens - cached_input_tokens - cache_write_input_tokens`.
+Writes use their own rate, not an additional full-rate input charge. The parser
+also accepts `input_tokens_details.cached_tokens` and `.cache_write_tokens`.
+Repeated notifications with unchanged cumulative usage are counted once;
+identical-sized requests with growing totals are retained, as are requests
+after cumulative counter resets. Raw usage is repriced each run. Cache schema
+changes trigger an automatic rebuild without changing the source transcripts.
+
+JSON adds `cache_write_input_tokens` and `unclassified_input_tokens` at the top
+level, and `cache_write`/`cache_unknown` per model. `fresh_input_tokens` and
+`fresh_in` now mean known ordinary input, excluding writes and unknown splits.
+
+### Cost reporting conventions (both tools)
+
+- Prices are today's API-equivalent **token** prices even for older sessions.
+  Subscription invoices and separate hosted-tool fees are excluded.
+- Billing metadata on usage takes precedence over requested turn settings.
+  Missing processing tier/geography defaults to Standard/global and is disclosed;
+  current machine settings are never used to infer historical billing.
+- Exact model IDs, supported dated snapshots, and documented aliases are resolved.
+  `gpt-5.6` and `gpt-daybreak-blue-latest` currently resolve to Sol;
+  `gpt-daybreak-red-latest` resolves to Cyber. Unknown models, unsupported tiers,
+  and invalid counters are flagged instead of assigned guessed prices.
+- `pricing_complete`, `pricing_assumptions` (counts by assumption),
+  `pricing_issues`, `unpriced_calls`, `invalid_usage_records`, and
+  `uncertain_cache_calls` describe coverage at report and model level.
+  Missing metadata also makes `pricing_complete` false.
+- Explicit zero writes remain zero. Missing Codex write counts produce a range
+  from ordinary input to all non-read input being cache-written. Missing Claude
+  write durations range from 5-minute to 1-hour rates; partial duration breakdowns
+  preserve known writes and bound only the unresolved remainder.
+- `total_cost_usd` and per-model `cost_usd` stay numeric: lower cache estimates
+  under disclosed tier assumptions, excluding wholly unpriced/invalid usage.
+  `cost_range_usd` provides `min` and `max`; `max: null` means excluded usage
+  prevents a finite total. This range is conditional on the stated tier/geography,
+  not a bound on possible speed tiers. Unpriced usage tokens remain in model rows.
+  Project costs remain numeric subtotals, with coverage in the report/model rows.
+- `input_breakdown` contains integer tokens and USD costs for each input category;
+  `output_cost_usd` exposes the output subtotal. Breakdown costs retain six decimal
+  places, while legacy totals retain cents. Small rounding differences are expected.
+  Cache savings compare the same priced requests against ordinary-input pricing;
+  with unknown cache writes, the displayed savings are the upper estimate.
+- `pricing_checked_on`, `pricing_source`, and `pricing_basis` document provenance.
+  Update `cost_accounting.py`, its independent pricing fixtures, and this README
+  when prices change. No prices are fetched at runtime.
 
 ## Hooks
 
